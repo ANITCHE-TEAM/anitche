@@ -38,5 +38,6 @@ jobs:
 
 
       - name: Lancer les tests (si présents)
-        run: pytest -q || echo 'Aucun test trouvé pour l\'instant - à ajouter dans backend-fastapi/tests/'
+        run: pytest -q
+        continue-on-error: true
 
