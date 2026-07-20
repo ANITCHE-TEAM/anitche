@@ -33,7 +33,8 @@ jobs:
           pip install pytest httpx
 
       - name: Vérifier que l'app démarre (import + routes)
-        run: python -c "from app.main import app; print('Routes chargées :', [r.path for r in app.routes])"
+        run: |
+          python -c "from app.main import app; from fastapi.routing import APIRoute; print('Routes chargées :', [r.path for r in app.routes if isinstance(r, APIRoute)])"
 
       - name: Lancer les tests (si présents)
-        run: pytest -q || echo "Aucun test trouvé pour l'instant — à ajouter dans backend-fastapi/tests/"
+        run: pytest -q || echo 'Aucun test trouvé pour l'instant — à ajouter dans backend-fastapi/tests/'
