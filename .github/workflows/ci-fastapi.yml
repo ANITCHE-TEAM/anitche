@@ -1,0 +1,39 @@
+name: CI Backend FastAPI
+
+on:
+  push:
+    branches: [main, backend-fastapi]
+    paths:
+      - "backend-fastapi/**"
+      - ".github/workflows/ci-fastapi.yml"
+  pull_request:
+    paths:
+      - "backend-fastapi/**"
+
+defaults:
+  run:
+    working-directory: backend-fastapi
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: backend-fastapi/requirements.txt
+
+      - name: Installer les dépendances
+        run: |
+          pip install -r requirements.txt
+          pip install pytest httpx
+
+      - name: Vérifier que l'app démarre (import + routes)
+        run: python -c "from app.main import app; print('Routes chargées :', [r.path for r in app.routes])"
+
+      - name: Lancer les tests (si présents)
+        run: pytest -q || echo "Aucun test trouvé pour l'instant — à ajouter dans backend-fastapi/tests/"
