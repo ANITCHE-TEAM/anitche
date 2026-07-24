@@ -12,6 +12,8 @@ SECRET_KEY = config('SECRET_KEY', default='django-insecure-%%j)4t(2o%i8!+7!()j7^
 
 # Application definition
 
+AUTH_USER_MODEL = 'utilisateurs.Utilisateur'
+
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
@@ -24,6 +26,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework_simplejwt',
     'corsheaders',
+    'django_celery_beat',
 
     # Apps métier (apps/<nom>)
     'apps.utilisateurs',
@@ -110,6 +113,12 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+# Ça reste dans base.py et non dev.py : la config en elle-même (où pointent les fichiers) ne change pas entre dev et prod, seule la façon de servir ces fichiers change (voir étape 2). En prod, c'est un serveur web (nginx, S3...) qui prendra le relais — pas Django.
+
+
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
