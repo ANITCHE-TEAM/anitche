@@ -4,7 +4,6 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 
 from .models import (
     Utilisateur,
-    CodeOTP,
     TypeUsageOTP,
     DocumentKYC
 )
