@@ -7,7 +7,6 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from .models import (
     Utilisateur,
     CodeOTP,
-    DocumentKYC,
     StatutsKYCImpossibles,
 )
 
