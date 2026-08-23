@@ -41,10 +41,21 @@ class PanierItemListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         panier = get_or_create_panier(self.request)
-        return PanierItem.objects.filter(panier=panier)
+        return PanierItem.objects.filter(panier=panier).select_related('variante__produit', 'variante__stock')
 
     def perform_create(self, serializer):
         panier = get_or_create_panier(self.request)
+        variante = serializer.validated_data.get('variante')
+        quantite = serializer.validated_data.get('quantite', 1)
+
+        if variante:
+            existant = PanierItem.objects.filter(panier=panier, variante=variante).first()
+            if existant:
+                existant.quantite += quantite
+                existant.save(update_fields=['quantite'])
+                serializer.instance = existant
+                return
+
         serializer.save(panier=panier)
 
 
@@ -57,4 +68,4 @@ class PanierItemDetailView(generics.RetrieveUpdateDestroyAPIView):
         # Sécurité : un utilisateur ne peut modifier/supprimer que les items
         # de SON PROPRE panier, jamais ceux d'un autre visiteur/utilisateur.
         panier = get_or_create_panier(self.request)
-        return PanierItem.objects.filter(panier=panier)
+        return PanierItem.objects.filter(panier=panier).select_related('variante__produit', 'variante__stock')
