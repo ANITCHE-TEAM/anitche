@@ -1,0 +1,13 @@
+/* src/index.css */
+@import "tailwindcss";
+
+@theme {
+  --color-anitche-hero: #EBF1F6;        /* Fond Hero bleu-gris clair */
+  --color-anitche-blue: #0062D6;        /* Bleu principal bouton Commander */
+  --color-anitche-blue-hover: #0052B3;  /* Bleu survol */
+  --color-anitche-gray-btn: #DCE4EC;    /* Fond bouton Explorer */
+  --color-anitche-partners: #D6E4F0;    /* Fond bandeau marques */
+  --color-anitche-footer: #05050A;      /* Fond Footer sombre */
+  --color-anitche-title: #0A0F1D;       /* Noir titres & logo */
+  --color-anitche-body: #334155;        /* Gris sous-titres */
+}
