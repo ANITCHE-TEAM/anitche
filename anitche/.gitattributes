@@ -1,0 +1,22 @@
+# Normalise les fins de ligne : tout est stocké en LF dans Git,
+# peu importe l'OS de la personne qui commite (Windows/Mac/Linux).
+# Évite les "faux changements" de 500+ lignes quand quelqu'un sous Windows
+# touche à un fichier déjà écrit sous Mac/Linux, ou l'inverse.
+* text=auto eol=lf
+
+# Fichiers binaires : jamais de conversion (sinon ils deviennent corrompus)
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+
+# Les scripts shell doivent rester en LF même générés sous Windows,
+# sinon ils ne s'exécutent pas sur le serveur de prod (Linux)
+*.sh text eol=lf
