@@ -5,6 +5,7 @@ from .views import (
     SupportTicketChangeStatusView,
     TicketMessageListCreateView,
     TicketAttachmentListCreateView,
+    SupportTicketRateView
 )
 
 app_name = "support"
@@ -16,4 +17,5 @@ urlpatterns = [
 
     path("tickets/<uuid:ticket_id>/messages/", TicketMessageListCreateView.as_view(), name="ticket-messages"),
     path("messages/<uuid:message_id>/attachments/", TicketAttachmentListCreateView.as_view(), name="message-attachments"),
+    path("tickets/<uuid:pk>/rate/", SupportTicketRateView.as_view(), name="ticket-rate"),
 ]

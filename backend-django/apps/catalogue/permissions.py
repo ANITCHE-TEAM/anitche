@@ -7,7 +7,7 @@ class EstProprietaireDuProduit(BasePermission):
 
     message = "Vous n'avez pas la permission de modifier ce produit."
 
-    def has_object_permission(self, request, view, obj):
+    def has_object_permission(self, request, obj):
         if request.user.role in [Role.ADMIN, Role.SUPER_ADMIN]:
             return True
         return obj.boutique.proprietaire == request.user
@@ -18,7 +18,7 @@ class EstProprietaireDeLaVariante(BasePermission):
 
     message = "Vous n'avez pas la permission de modifier cette variante."
 
-    def has_object_permission(self, request, view, obj):
+    def has_object_permission(self, request, obj):
         if request.user.role in [Role.ADMIN, Role.SUPER_ADMIN]:
             return True
         return obj.produit.boutique.proprietaire == request.user
@@ -29,7 +29,7 @@ class EstProprietaireDeLImage(BasePermission):
 
     message = "Vous n'avez pas la permission de modifier ou supprimer cette image."
 
-    def has_object_permission(self, request, view, obj):
+    def has_object_permission(self, request, obj):
         if request.user.role in [Role.ADMIN, Role.SUPER_ADMIN]:
             return True
         return obj.produit.boutique.proprietaire == request.user

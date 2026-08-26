@@ -30,3 +30,5 @@ tzdata==2026.3
 tzlocal==5.4.4
 vine==5.1.0
 wcwidth==0.8.2
+google-auth==2.35.0
+requests==2.32.3

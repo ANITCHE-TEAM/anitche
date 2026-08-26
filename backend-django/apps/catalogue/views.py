@@ -1,6 +1,6 @@
-from django.db.models import Q, Min
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
-from rest_framework import generics, status
+from rest_framework import generics
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 

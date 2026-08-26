@@ -12,11 +12,13 @@ class SupportTicketSerializer(serializers.ModelSerializer):
             "id", "ticket_number", "subject", "description",
             "category", "status", "priority",
             "created_by", "assigned_to", "vendor",
-            "created_at", "updated_at",
+            "created_at", "updated_at", "product",
+            "satisfaction_rating",
         ]
         read_only_fields = [
             "id", "ticket_number", "created_by",
-            "assigned_to", "status", "created_at", "updated_at"
+            "assigned_to", "status", "created_at", "updated_at",
+            "satisfaction_rating",
         ]
 
 

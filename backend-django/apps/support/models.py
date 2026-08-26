@@ -70,9 +70,9 @@ class SupportTicket(models.Model):
         related_name="support_tickets",
     )
 
-    # À ajouter plus tard, quand ces apps seront prêtes :
-    # order = models.ForeignKey("commandes.Commande", on_delete=models.SET_NULL, null=True, blank=True, related_name="support_tickets")
-    # product = models.ForeignKey("catalogue.Produit", on_delete=models.SET_NULL, null=True, blank=True, related_name="support_tickets")
+   
+    order = models.ForeignKey("commandes.Commande", on_delete=models.SET_NULL, null=True, blank=True, related_name="support_tickets")
+    product = models.ForeignKey("catalogue.Produit", on_delete=models.SET_NULL, null=True, blank=True, related_name="support_tickets")
 
     subject = models.CharField(max_length=255)
     description = models.TextField()
@@ -188,3 +188,5 @@ class TicketAttachment(models.Model):
 
     def __str__(self):
         return self.original_filename
+
+

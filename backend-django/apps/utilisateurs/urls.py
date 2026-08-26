@@ -1,18 +1,17 @@
 from django.urls import path
-from rest_framework_simplejwt.views import (
-    TokenObtainPairView,
-    TokenRefreshView
-)
+from rest_framework_simplejwt.views import TokenRefreshView
 
 from .views import (
     InscriptionView,
+    LoginThrottleView,
     ProfilView,
     DemandeChangementContactView,
     VerificationOTPView,
     DemandeVendeurView,
     UploadKYCView,
     DemandeMotDePasseOublieView,
-    ConfirmationMotDePasseOublieView
+    ConfirmationMotDePasseOublieView,
+    ConnexionGoogleView
 )
 
 # =====================================================
@@ -31,7 +30,7 @@ urlpatterns = [
     # Authentification avec JWT.
     path(
         'connexion/',
-        TokenObtainPairView.as_view(),
+        LoginThrottleView.as_view(),
         name='connexion'
     ),
 
@@ -93,4 +92,6 @@ urlpatterns = [
         ConfirmationMotDePasseOublieView.as_view(),
         name='mdp-oublie-confirmer'
     ),
+    # Route vers connexkon via compte google
+    path('connexion-google/', ConnexionGoogleView.as_view(), name='connexion-google'),
 ]

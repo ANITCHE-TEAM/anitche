@@ -63,22 +63,12 @@ class SupportRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
 
 
 class SupportTicketChangeStatusView(APIView):
+    """Changement de statut, réservé au staff (admin/super_admin/support),
+    sauf pour le créateur qui peut fermer son propre ticket."""
     permission_classes = [IsAuthenticated]
 
     def patch(self, request, pk):
-        """Change le statut d'un ticket.
-
-        Deux profils autorisés :
-        - le staff : peut passer le ticket à N'IMPORTE QUEL statut
-        - le créateur du ticket : peut UNIQUEMENT le fermer (CLOSED),
-        pour lui laisser un moyen de dire "c'est réglé pour moi" sans
-        pouvoir usurper les statuts réservés au traitement staff
-        (IN_PROGRESS, RESOLVED, WAITING_CUSTOMER...).
-        Tout autre cas -> 403.
-        """
         user = request.user
-        # get_object_or_404 sur le queryset visible : pas d'accès à un ticket
-        # qu'on n'a pas le droit de voir, même pour vérifier son statut.
         ticket = get_object_or_404(get_visible_tickets(user), pk=pk)
         new_status = request.data.get("status")
 
@@ -100,6 +90,47 @@ class SupportTicketChangeStatusView(APIView):
 
         ticket.status = new_status
         ticket.save(update_fields=["status", "updated_at"])
+        return Response(SupportTicketSerializer(ticket).data, status=status.HTTP_200_OK)
+
+
+class SupportTicketRateView(APIView):
+    """Permet au créateur du ticket de laisser une note de satisfaction,
+    une seule fois. Impossible de la modifier une fois donnée."""
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+        ticket = get_object_or_404(get_visible_tickets(request.user), pk=pk)
+
+        if ticket.created_by != request.user:
+            return Response(
+                {"detail": "Seul le créateur du ticket peut le noter."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        if ticket.satisfaction_rating is not None:
+            return Response(
+                {"detail": "Ce ticket a déjà été noté."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        rating = request.data.get("satisfaction_rating")
+
+        try:
+            rating = int(rating)
+        except (TypeError, ValueError):
+            return Response(
+                {"detail": "La note doit être un nombre entier."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if rating < 1 or rating > 5:
+            return Response(
+                {"detail": "La note doit être comprise entre 1 et 5."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        ticket.satisfaction_rating = rating
+        ticket.save(update_fields=["satisfaction_rating", "updated_at"])
         return Response(SupportTicketSerializer(ticket).data, status=status.HTTP_200_OK)
 
 

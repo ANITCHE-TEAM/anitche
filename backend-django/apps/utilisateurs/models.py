@@ -49,6 +49,14 @@ class Utilisateur(AbstractBaseUser, PermissionsMixin):
     """
 
     email = models.EmailField(unique=True)
+    google_id = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        unique=True,
+        help_text="Identifiant unique Google (sub), rempli si le compte est lié à Google.",
+    )
+
     telephone = models.CharField(max_length=20, unique=True, null=True, blank=True)
 
     nom = models.CharField(max_length=100)

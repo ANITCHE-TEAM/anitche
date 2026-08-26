@@ -3,6 +3,17 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.throttling import ScopedRateThrottle
+from rest_framework_simplejwt.views import TokenObtainPairView
+from google.oauth2 import id_token as google_id_token
+from google.auth.transport import requests as google_requests
+from rest_framework_simplejwt.tokens import RefreshToken
+from django.conf import settings
+
+
+
+from .tasks import envoyer_code_otp_email
+
 
 from .models import (
     Utilisateur,
@@ -18,6 +29,7 @@ from .serializers import (
     DocumentKYCSerializer,
     DemandeMotDePasseOublieSerializer,
     ConfirmationMotDePasseOublieSerializer,
+    ConnexionGoogleSerializer
 )
 
 
@@ -33,6 +45,12 @@ class InscriptionView(generics.CreateAPIView):
     queryset = Utilisateur.objects.all()
     serializer_class = InscriptionSerializer
     permission_classes = [AllowAny]
+
+
+class LoginThrottleView(TokenObtainPairView):
+    """Connexion JWT avec limite de fréquence (anti brute-force)."""
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'login'  # taux défini dans DEFAULT_THROTTLE_RATES
 
 
 # =====================================================
@@ -64,6 +82,8 @@ class DemandeChangementContactView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'otp'
 
     def post(self, request):
         serializer = DemandeChangementContactSerializer(
@@ -82,11 +102,9 @@ class DemandeChangementContactView(APIView):
             nouvelle_valeur = data['nouveau_telephone']
 
         # Génération d'un nouveau code OTP.
-        _, code = CodeOTP.generer(
-            request.user,
-            type_usage,
-            nouvelle_valeur
-        )
+        _, code = CodeOTP.generer(request.user, type_usage, nouvelle_valeur)
+        envoyer_code_otp_email.delay(request.user.email, code, type_usage)
+        
 
         # TODO : Envoyer le code par email ou SMS
         # via Celery et un fournisseur externe.
@@ -108,6 +126,8 @@ class VerificationOTPView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'otp'
 
     def post(self, request):
         serializer = VerificationOTPSerializer(
@@ -248,6 +268,8 @@ class DemandeMotDePasseOublieView(APIView):
     """
 
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'otp'
 
     def post(self, request):
 
@@ -264,10 +286,8 @@ class DemandeMotDePasseOublieView(APIView):
         ).first()
 
         if utilisateur:
-            _, code = CodeOTP.generer(
-                utilisateur,
-                'mdp_oublie'
-            )
+            _, code = CodeOTP.generer(utilisateur, 'mdp_oublie')
+            envoyer_code_otp_email.delay(utilisateur.email, code, 'mdp_oublie')
 
             # TODO : envoyer le code par email.
 
@@ -294,6 +314,8 @@ class ConfirmationMotDePasseOublieView(APIView):
     """
 
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'otp'
 
     def post(self, request):
 
@@ -342,5 +364,74 @@ class ConfirmationMotDePasseOublieView(APIView):
 
         return Response(
             {"message": "Mot de passe réinitialisé."},
+            status=status.HTTP_200_OK,
+        )
+
+
+
+class ConnexionGoogleView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'login'
+
+    def post(self, request):
+        serializer = ConnexionGoogleSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            infos = google_id_token.verify_oauth2_token(
+                serializer.validated_data['id_token'],
+                google_requests.Request(),
+                settings.GOOGLE_OAUTH_CLIENT_ID,
+            )
+        except ValueError:
+            return Response(
+                {"message": "Token Google invalide."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        google_id = infos.get('sub')
+        email = infos.get('email')
+        email_verifie_google = infos.get('email_verified', False)
+
+        if not google_id or not email or not email_verifie_google:
+            return Response(
+                {"message": "Informations Google incomplètes ou non vérifiées."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 1. Compte déjà lié à ce google_id -> connexion directe.
+        utilisateur = Utilisateur.objects.filter(google_id=google_id).first()
+
+        if not utilisateur:
+            # 2. Sinon, un compte existe peut-être déjà avec cet email
+            #    (inscription classique) -> on le lie à Google.
+            utilisateur, cree = Utilisateur.objects.get_or_create(
+                email__iexact=email,
+                defaults={
+                    'email': email,
+                    'nom': infos.get('family_name', ''),
+                    'prenom': infos.get('given_name', ''),
+                    'email_verifie': True,
+                    'google_id': google_id,
+                },
+            )
+
+            if cree:
+                utilisateur.set_unusable_password()
+                utilisateur.save(update_fields=['password'])
+            else:
+                utilisateur.google_id = google_id
+                if not utilisateur.email_verifie:
+                    utilisateur.email_verifie = True
+                utilisateur.save(update_fields=['google_id', 'email_verifie'])
+
+        refresh = RefreshToken.for_user(utilisateur)
+
+        return Response(
+            {
+                "access": str(refresh.access_token),
+                "refresh": str(refresh),
+            },
             status=status.HTTP_200_OK,
         )

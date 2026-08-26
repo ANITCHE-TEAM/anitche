@@ -1,4 +1,5 @@
 from rest_framework import generics
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny
 
 from .models import Panier, PanierItem
@@ -13,7 +14,6 @@ def get_or_create_panier(request):
         panier, _ = Panier.objects.get_or_create(utilisateur=request.user)
         return panier
 
-    # Un visiteur anonyme n'a de session_key que si une session a déjà été créée.
     if not request.session.session_key:
         request.session.create()
 
@@ -24,8 +24,6 @@ def get_or_create_panier(request):
 
 
 class PanierDetailView(generics.RetrieveAPIView):
-    """Récupère le panier courant (utilisateur connecté ou visiteur anonyme).
-    Créé automatiquement au premier appel s'il n'existe pas encore."""
     permission_classes = [AllowAny]
     serializer_class = PanierSerializer
 
@@ -34,8 +32,6 @@ class PanierDetailView(generics.RetrieveAPIView):
 
 
 class PanierItemListCreateView(generics.ListCreateAPIView):
-    """Liste les articles du panier courant (GET) et permet d'en ajouter un
-    nouveau (POST)."""
     permission_classes = [AllowAny]
     serializer_class = PanierItemSerializer
 
@@ -48,24 +44,44 @@ class PanierItemListCreateView(generics.ListCreateAPIView):
         variante = serializer.validated_data.get('variante')
         quantite = serializer.validated_data.get('quantite', 1)
 
-        if variante:
-            existant = PanierItem.objects.filter(panier=panier, variante=variante).first()
-            if existant:
-                existant.quantite += quantite
-                existant.save(update_fields=['quantite'])
-                serializer.instance = existant
-                return
+        # Quantité déjà présente pour cette variante, si elle existe déjà dans le panier
+        existant = PanierItem.objects.filter(panier=panier, variante=variante).first()
+        quantite_totale = quantite + (existant.quantite if existant else 0)
+
+        stock = getattr(variante, 'stock', None)
+        if stock is None or not stock.est_en_stock(quantite_totale):
+            disponible = stock.quantite_disponible if stock else 0
+            raise ValidationError(
+                f"Stock insuffisant : {disponible} disponible(s), {quantite_totale} demandé(s)."
+            )
+
+        if existant:
+            existant.quantite = quantite_totale
+            existant.save(update_fields=['quantite'])
+            serializer.instance = existant
+            return
 
         serializer.save(panier=panier)
 
 
 class PanierItemDetailView(generics.RetrieveUpdateDestroyAPIView):
-    """Modifie la quantité ou supprime un article précis du panier courant."""
     permission_classes = [AllowAny]
     serializer_class = PanierItemSerializer
 
     def get_queryset(self):
-        # Sécurité : un utilisateur ne peut modifier/supprimer que les items
-        # de SON PROPRE panier, jamais ceux d'un autre visiteur/utilisateur.
         panier = get_or_create_panier(self.request)
         return PanierItem.objects.filter(panier=panier).select_related('variante__produit', 'variante__stock')
+
+    def perform_update(self, serializer):
+        # La quantité peut être modifiée via PATCH — même vérification de stock nécessaire.
+        item = self.get_object()
+        nouvelle_quantite = serializer.validated_data.get('quantite', item.quantite)
+        stock = getattr(item.variante, 'stock', None)
+
+        if stock is None or not stock.est_en_stock(nouvelle_quantite):
+            disponible = stock.quantite_disponible if stock else 0
+            raise ValidationError(
+                f"Stock insuffisant : {disponible} disponible(s), {nouvelle_quantite} demandé(s)."
+            )
+
+        serializer.save()

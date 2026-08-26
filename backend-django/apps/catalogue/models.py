@@ -1,6 +1,7 @@
 import uuid
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.utils import timezone
 from django.utils.text import slugify
 
 from apps.utilisateurs.models import Role, StatutKYC
@@ -305,13 +306,25 @@ class Stock(models.Model):
         return self.quantite_disponible >= quantite
 
     def decrementer(self, quantite=1):
-        """Décrémente le stock de manière sécurisée."""
-        if not self.est_en_stock(quantite):
+        """Décrémente le stock de manière atomique au niveau base de données.
+
+        Utilise un UPDATE conditionnel (quantite_disponible >= quantite) au lieu
+        d'un simple recalcul en mémoire : deux requêtes concurrentes sur la même
+        variante ne peuvent donc jamais faire passer le stock en négatif, même
+        sans verrou explicite (select_for_update) posé en amont.
+        """
+        lignes_modifiees = Stock.objects.filter(
+            pk=self.pk, quantite_disponible__gte=quantite
+        ).update(
+            quantite_disponible=models.F('quantite_disponible') - quantite,
+            date_mise_a_jour=timezone.now(),
+        )
+        if lignes_modifiees == 0:
+            self.refresh_from_db(fields=['quantite_disponible'])
             raise ValidationError(
                 f"Stock insuffisant : {self.quantite_disponible} disponible(s), {quantite} demandé(s)."
             )
-        self.quantite_disponible -= quantite
-        self.save(update_fields=['quantite_disponible', 'date_mise_a_jour'])
+        self.refresh_from_db(fields=['quantite_disponible', 'date_mise_a_jour'])
 
     def incrementer(self, quantite=1):
         """Incrémente le stock (retour, réapprovisionnement)."""

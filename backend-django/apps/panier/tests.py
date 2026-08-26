@@ -15,7 +15,6 @@ class PanierTestCase(APITestCase):
         self.client_user = self._create_user("client@test.com", Role.CLIENT)
         self.other_client = self._create_user("other@test.com", Role.CLIENT)
 
-        # Création d'un vendeur avec boutique et produit pour les tests de panier
         self.vendeur = self._create_user("vendeur@test.com", Role.VENDEUR, statut_kyc=StatutKYC.VALIDE)
         self.boutique = Boutique.objects.create(
             proprietaire=self.vendeur,
@@ -100,6 +99,7 @@ class PanierTestCase(APITestCase):
 
         url = reverse("panier:panier-items")
         response = self.client.post(url, {
+            "variante": self.variante.id,
             "quantite": 1,
             "panier": str(other_panier.id),  # tentative de forcer un autre panier
         })
@@ -112,7 +112,7 @@ class PanierTestCase(APITestCase):
 
     def test_user_cannot_see_others_items(self):
         other_panier = Panier.objects.create(utilisateur=self.other_client)
-        PanierItem.objects.create(panier=other_panier, quantite=3)
+        PanierItem.objects.create(panier=other_panier, variante=self.variante, quantite=3)
 
         self.client.force_authenticate(user=self.client_user)
         url = reverse("panier:panier-items")
@@ -122,7 +122,7 @@ class PanierTestCase(APITestCase):
 
     def test_user_cannot_modify_others_item(self):
         other_panier = Panier.objects.create(utilisateur=self.other_client)
-        item = PanierItem.objects.create(panier=other_panier, quantite=1)
+        item = PanierItem.objects.create(panier=other_panier, variante=self.variante, quantite=1)
 
         self.client.force_authenticate(user=self.client_user)
         url = reverse("panier:panier-item-detail", args=[item.id])
@@ -132,7 +132,7 @@ class PanierTestCase(APITestCase):
     def test_user_can_modify_own_item(self):
         self.client.force_authenticate(user=self.client_user)
         panier, _ = Panier.objects.get_or_create(utilisateur=self.client_user)
-        item = PanierItem.objects.create(panier=panier, quantite=1, variante=self.variante)
+        item = PanierItem.objects.create(panier=panier, variante=self.variante, quantite=1)
 
         url = reverse("panier:panier-item-detail", args=[item.id])
         response = self.client.patch(url, {"quantite": 5})
@@ -143,7 +143,7 @@ class PanierTestCase(APITestCase):
     def test_user_can_delete_own_item(self):
         self.client.force_authenticate(user=self.client_user)
         panier, _ = Panier.objects.get_or_create(utilisateur=self.client_user)
-        item = PanierItem.objects.create(panier=panier, quantite=1)
+        item = PanierItem.objects.create(panier=panier, variante=self.variante, quantite=1)
 
         url = reverse("panier:panier-item-detail", args=[item.id])
         response = self.client.delete(url)

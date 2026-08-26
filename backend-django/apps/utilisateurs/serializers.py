@@ -210,3 +210,12 @@ class ConfirmationMotDePasseOublieSerializer(serializers.Serializer):
             )
 
         return value
+
+
+# =====================================================
+# CONNEXION GOOGLE
+# =====================================================
+
+class ConnexionGoogleSerializer(serializers.Serializer):
+    """Reçoit l'ID token émis par Google Identity Services côté frontend."""
+    id_token = serializers.CharField()

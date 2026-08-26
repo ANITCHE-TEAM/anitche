@@ -48,8 +48,6 @@ class PanierItem(models.Model):
     variante = models.ForeignKey(
         'catalogue.VarianteProduit',
         on_delete=models.CASCADE,
-        null=True,
-        blank=True,
         related_name="panier_items",
         verbose_name="Variante de produit",
     )
