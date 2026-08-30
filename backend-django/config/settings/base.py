@@ -124,6 +124,11 @@ MEDIA_ROOT = BASE_DIR / 'media'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
+# Security Headers
+SECURE_BROWSER_XSS_FILTER = True
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = 'DENY'
+
 # Django REST Framework
 
 REST_FRAMEWORK = {
@@ -133,9 +138,17 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
     ),
+    'DEFAULT_THROTTLE_CLASSES': (
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle',
+    ),
     'DEFAULT_THROTTLE_RATES': {
-        'otp': '5/hour',
-        'login': '10/hour',
+        'anon': '100/minute',
+        'user': '1000/minute',
+        'otp': '5/minute',
+        'login': '10/minute',
+        'paiements': '30/minute',
+        'support': '20/minute',
     },
 }
 
