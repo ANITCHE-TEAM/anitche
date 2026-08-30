@@ -24,3 +24,11 @@ REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {
     'paiements': '100000/day',
     'support': '100000/day',
 }
+
+# Cache en mémoire rapide pour les tests
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+    }
+}
+
