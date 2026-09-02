@@ -1,4 +1,5 @@
-import random
+import secrets
+import logging
 from django.db import models
 from datetime import timedelta
 from django.utils import timezone
@@ -6,6 +7,8 @@ from django.utils import timezone
 from .managers import UtilisateurManager
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
 from django.contrib.auth.hashers import make_password, check_password
+
+logger_securite = logging.getLogger('securite')
 
 
 # ============================
@@ -222,7 +225,10 @@ class CodeOTP(models.Model):
         - le code en clair (à envoyer par SMS ou email)
         """
 
-        code = f"{random.randint(0, 999999):06d}"
+        # secrets (CSPRNG) plutôt que random (Mersenne Twister, non
+        # cryptographiquement sûr) : un code OTP prévisible casse toute
+        # la protection qu'il est censé apporter.
+        code = f"{secrets.randbelow(1000000):06d}"
 
         instance = cls.objects.create(
             utilisateur=utilisateur,
@@ -257,6 +263,11 @@ class CodeOTP(models.Model):
             return False, "Ce code a expiré."
 
         if self.nombre_tentatives >= self.NOMBRE_TENTATIVES_MAX:
+            logger_securite.warning(
+                "Verrouillage OTP : nombre maximal de tentatives atteint "
+                "(otp_id=%s, utilisateur_id=%s, type_usage=%s)",
+                self.id, self.utilisateur_id, self.type_usage,
+            )
             return False, "Nombre maximal de tentatives atteint."
 
         # Chaque tentative est comptabilisée.

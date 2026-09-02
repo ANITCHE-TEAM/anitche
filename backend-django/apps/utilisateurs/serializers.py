@@ -115,6 +115,35 @@ class DemandeChangementContactSerializer(serializers.Serializer):
 
         return data
 
+    def validate_nouvel_email(self, value):
+        """
+        Empêche de demander un email déjà utilisé par un autre compte.
+        Sans ce contrôle, la confirmation OTP échoue plus tard avec une
+        IntegrityError (contrainte unique en base), ce qui sert
+        d'oracle pour deviner les emails déjà inscrits.
+        """
+        utilisateur_courant = self.context['request'].user
+
+        if Utilisateur.objects.exclude(pk=utilisateur_courant.pk).filter(
+            email__iexact=value
+        ).exists():
+            raise serializers.ValidationError(
+                "Cet email est déjà utilisé par un autre compte."
+            )
+        return value
+
+    def validate_nouveau_telephone(self, value):
+        """Même contrôle que pour l'email, sur le numéro de téléphone."""
+        utilisateur_courant = self.context['request'].user
+
+        if Utilisateur.objects.exclude(pk=utilisateur_courant.pk).filter(
+            telephone=value
+        ).exists():
+            raise serializers.ValidationError(
+                "Ce numéro est déjà utilisé par un autre compte."
+            )
+        return value
+
 
 # =====================================================
 # VERIFICATION OTP

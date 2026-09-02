@@ -8,7 +8,7 @@ click-plugins==1.1.1.2
 click-repl==0.3.0
 colorama==0.4.6
 cron-descriptor==1.4.5
-Django==6.0.7
+Django==6.0.8
 django-celery-beat==2.9.0
 django-cors-headers==4.9.0
 django-timezone-field==7.2.2

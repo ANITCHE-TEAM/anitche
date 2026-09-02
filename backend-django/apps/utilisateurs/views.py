@@ -9,6 +9,9 @@ from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.conf import settings
+import logging
+
+logger_securite = logging.getLogger('securite')
 
 
 
@@ -87,7 +90,8 @@ class DemandeChangementContactView(APIView):
 
     def post(self, request):
         serializer = DemandeChangementContactSerializer(
-            data=request.data
+            data=request.data,
+            context={'request': request},
         )
         serializer.is_valid(raise_exception=True)
 
@@ -103,11 +107,18 @@ class DemandeChangementContactView(APIView):
 
         # Génération d'un nouveau code OTP.
         _, code = CodeOTP.generer(request.user, type_usage, nouvelle_valeur)
-        envoyer_code_otp_email.delay(request.user.email, code, type_usage)
-        
 
-        # TODO : Envoyer le code par email ou SMS
-        # via Celery et un fournisseur externe.
+        # Le code doit être envoyé sur le canal que l'on cherche à
+        # vérifier, jamais sur l'ancien. Sinon l'OTP ne prouve jamais
+        # que l'utilisateur possède réellement la nouvelle adresse, et
+        # n'importe qui peut s'approprier l'email d'un tiers.
+        if type_usage == 'changement_email':
+            envoyer_code_otp_email.delay(nouvelle_valeur, code, type_usage)
+        else:
+            # TODO : brancher un fournisseur SMS. En attendant, le code
+            # part sur l'email courant et vérifié du compte — c'est un
+            # canal déjà prouvé, contrairement au nouveau numéro.
+            envoyer_code_otp_email.delay(request.user.email, code, type_usage)
 
         return Response(
             {"message": "Code envoyé."},
@@ -206,6 +217,7 @@ class DemandeVendeurView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    throttle_scope = 'kyc'
 
     def post(self, request):
 
@@ -249,6 +261,7 @@ class UploadKYCView(generics.CreateAPIView):
 
     serializer_class = DocumentKYCSerializer
     permission_classes = [IsAuthenticated]
+    throttle_scope = 'kyc'
 
     # Autorise l'envoi de fichiers.
     parser_classes = [
@@ -425,6 +438,22 @@ class ConnexionGoogleView(APIView):
                 if not utilisateur.email_verifie:
                     utilisateur.email_verifie = True
                 utilisateur.save(update_fields=['google_id', 'email_verifie'])
+
+        # Contrôle d'accès : un compte désactivé (banni, fraude, etc.)
+        # ne doit jamais recevoir de token, quel que soit le moyen de
+        # connexion. RefreshToken.for_user() ne fait volontairement AUCUNE
+        # vérification d'is_active (contrairement à authenticate()) donc
+        # ce garde-fou doit être posé explicitement ici.
+        if not utilisateur.is_active:
+            logger_securite.warning(
+                "Tentative de connexion Google refusée : compte désactivé "
+                "(utilisateur_id=%s, email=%s)",
+                utilisateur.id, utilisateur.email,
+            )
+            return Response(
+                {"message": "Ce compte a été désactivé."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         refresh = RefreshToken.for_user(utilisateur)
 

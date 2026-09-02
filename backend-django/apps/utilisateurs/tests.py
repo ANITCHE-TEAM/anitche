@@ -1,4 +1,5 @@
 from datetime import timedelta
+from unittest.mock import patch
 
 from django.test import TestCase
 from django.utils import timezone
@@ -367,6 +368,62 @@ class CodeOTPTests(TestCase):
         )
 
 
+class DemandeChangementContactTests(TestCase):
+    """
+    Vérifie la sécurité de la demande de changement
+    d'email / téléphone : unicité et bonne destination du code OTP.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.url = '/api/utilisateurs/changement-contact/'
+
+        self.utilisateur = Utilisateur.objects.create_user(
+            email='moi@anitche.ci',
+            password='xxx',
+            nom='A',
+            prenom='B',
+        )
+        self.autre_utilisateur = Utilisateur.objects.create_user(
+            email='dejapris@anitche.ci',
+            password='xxx',
+            nom='C',
+            prenom='D',
+        )
+        self.client.force_authenticate(user=self.utilisateur)
+
+    def test_email_deja_utilise_refuse(self):
+        """
+        Impossible de demander un email déjà utilisé
+        par un autre compte.
+        """
+
+        response = self.client.post(self.url, {
+            'nouvel_email': 'dejapris@anitche.ci',
+        })
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(
+            CodeOTP.objects.filter(utilisateur=self.utilisateur).exists()
+        )
+
+    @patch('apps.utilisateurs.views.envoyer_code_otp_email.delay')
+    def test_otp_changement_email_envoye_a_la_nouvelle_adresse(self, mock_envoi):
+        """
+        Le code OTP doit partir sur la NOUVELLE adresse email,
+        jamais sur l'ancienne : c'est elle qu'on cherche à prouver.
+        """
+
+        response = self.client.post(self.url, {
+            'nouvel_email': 'nouvelle@anitche.ci',
+        })
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_envoi.assert_called_once()
+        destinataire = mock_envoi.call_args[0][0]
+        self.assertEqual(destinataire, 'nouvelle@anitche.ci')
+
+
 class VerificationOTPViewTests(TestCase):
     """
     Vérifie le endpoint /verification-otp/ pour
@@ -589,3 +646,72 @@ class DemandeVendeurTests(TestCase):
             response.status_code,
             status.HTTP_400_BAD_REQUEST
         )
+
+# =====================================================
+# TESTS DE CONNEXION GOOGLE
+# =====================================================
+
+class ConnexionGoogleTests(TestCase):
+    """
+    Vérifie que la connexion via Google respecte
+    les mêmes règles de contrôle d'accès que la
+    connexion classique (notamment is_active).
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.url = '/api/utilisateurs/connexion-google/'
+
+        self.infos_google = {
+            'sub': 'google-id-123',
+            'email': 'test@anitche.ci',
+            'email_verified': True,
+            'family_name': 'A',
+            'given_name': 'B',
+        }
+
+    @patch('apps.utilisateurs.views.google_id_token.verify_oauth2_token')
+    def test_compte_desactive_refuse_meme_avec_token_google_valide(self, mock_verify):
+        """
+        Un compte désactivé (banni) ne doit recevoir aucun
+        token, même si le token Google fourni est valide.
+        """
+
+        mock_verify.return_value = self.infos_google
+
+        utilisateur = Utilisateur.objects.create_user(
+            email='test@anitche.ci',
+            password='xxx',
+            nom='A',
+            prenom='B',
+        )
+        utilisateur.is_active = False
+        utilisateur.save(update_fields=['is_active'])
+
+        response = self.client.post(self.url, {'id_token': 'fake-token'})
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertNotIn('access', response.data)
+        self.assertNotIn('refresh', response.data)
+
+    @patch('apps.utilisateurs.views.google_id_token.verify_oauth2_token')
+    def test_compte_actif_recoit_des_tokens(self, mock_verify):
+        """
+        Un compte actif doit recevoir un couple de tokens
+        JWT valides après vérification Google.
+        """
+
+        mock_verify.return_value = self.infos_google
+
+        Utilisateur.objects.create_user(
+            email='test@anitche.ci',
+            password='xxx',
+            nom='A',
+            prenom='B',
+        )
+
+        response = self.client.post(self.url, {'id_token': 'fake-token'})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('access', response.data)
+        self.assertIn('refresh', response.data)
