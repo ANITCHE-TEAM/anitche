@@ -11,7 +11,12 @@ urlpatterns = [
     path("api/support/", include("apps.support.urls")),
     path("api/panier/", include("apps.panier.urls")),
     path("api/commandes/", include("apps.commandes.urls")),
-    path("api/livraison/", include("apps.livraison.urls"))
+    path("api/livraison/", include("apps.livraison.urls")),
+    path("api/paiements/", include("apps.paiements.urls")),
+    path("api/notifications/", include("apps.notifications.urls")),
+    path("api/retours/", include("apps.retours.urls")),
+    path("api/fidelite/", include("apps.fidelite.urls")),
+    path("api/passeports/", include("apps.passeport_qr.urls")),
 ]
 
 if settings.DEBUG:
