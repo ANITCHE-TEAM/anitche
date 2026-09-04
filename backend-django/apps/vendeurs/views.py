@@ -52,11 +52,11 @@ class BoutiquePubliqueListView(generics.ListAPIView):
     def get_queryset(self):
         queryset = Boutique.objects.publiques().select_related('proprietaire')
 
-        recherche = self.request.query_params.get('recherche')
+        recherche = self.request.query_params.get('recherche', '')[:100]
         if recherche:
             queryset = queryset.filter(nom__icontains=recherche)
 
-        ville = self.request.query_params.get('ville')
+        ville = self.request.query_params.get('ville', '')[:100]
         if ville:
             queryset = queryset.filter(ville__iexact=ville)
 

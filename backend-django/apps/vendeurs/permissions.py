@@ -14,7 +14,14 @@ ROLES_ADMINISTRATION = (Role.ADMIN, Role.SUPER_ADMIN)
 
 
 class EstAdministrateur(BasePermission):
-    """Réservé au back-office : rôle admin/super_admin, ou compte staff Django."""
+    """Réservé au back-office : rôle admin/super_admin uniquement.
+
+    `is_staff` n'est volontairement pas un critère alternatif : il ne
+    doit donner accès qu'au Django admin, pas aux pouvoirs métier de
+    cette API (validation KYC, suspension de boutique...). Un compte
+    staff « technique » sans rôle admin ne doit pas hériter de ces
+    pouvoirs par accident.
+    """
 
     message = "Action réservée à l'administration ANITCHE."
 
@@ -23,7 +30,7 @@ class EstAdministrateur(BasePermission):
         return bool(
             utilisateur
             and utilisateur.is_authenticated
-            and (utilisateur.is_staff or utilisateur.role in ROLES_ADMINISTRATION)
+            and utilisateur.role in ROLES_ADMINISTRATION
         )
 
 
