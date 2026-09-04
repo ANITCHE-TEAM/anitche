@@ -6,6 +6,7 @@ from apps.utilisateurs.models import DocumentKYC, Role, StatutKYC, Utilisateur
 
 from .models import Boutique
 from .services import (
+    AutoApprobationInterdite,
     TransitionVendeurImpossible,
     refuser_demande_vendeur,
     valider_demande_vendeur,
@@ -133,6 +134,26 @@ class ServicesDecisionTests(TestCase):
 
         with self.assertRaises(TransitionVendeurImpossible):
             valider_demande_vendeur(livreur)
+
+    def test_decideur_ne_peut_pas_traiter_sa_propre_demande(self):
+        administrateur = creer_administrateur()
+        administrateur.soumettre_demande_vendeur()
+
+        with self.assertRaises(AutoApprobationInterdite):
+            valider_demande_vendeur(administrateur, decideur=administrateur)
+
+        administrateur.refresh_from_db()
+        self.assertEqual(administrateur.statut_kyc, StatutKYC.EN_ATTENTE)
+
+    def test_decideur_different_peut_traiter_la_demande(self):
+        """Non-régression : un décideur tiers reste bien autorisé."""
+        demandeur = creer_demandeur()
+        administrateur = creer_administrateur()
+
+        valider_demande_vendeur(demandeur, decideur=administrateur)
+
+        demandeur.refresh_from_db()
+        self.assertEqual(demandeur.statut_kyc, StatutKYC.VALIDE)
 
     def test_nouvelle_demande_possible_apres_refus(self):
         demandeur = creer_demandeur()
@@ -293,6 +314,37 @@ class AdministrationDemandesAPITests(TestCase):
         self.demandeur.refresh_from_db()
         self.assertEqual(self.demandeur.role, Role.VENDEUR)
         self.assertEqual(self.demandeur.statut_kyc, StatutKYC.VALIDE)
+
+    def test_administrateur_ne_peut_pas_valider_sa_propre_demande(self):
+        """
+        Séparation des responsabilités : un admin qui a lui-même soumis
+        une demande vendeur ne doit jamais pouvoir l'approuver.
+        """
+        self.administrateur.soumettre_demande_vendeur()
+        self.client.force_authenticate(user=self.administrateur)
+
+        reponse = self.client.post(
+            f'/api/vendeurs/administration/demandes/{self.administrateur.id}/valider/',
+            {'commentaire': "Auto-approbation tentée"},
+        )
+
+        self.assertEqual(reponse.status_code, status.HTTP_403_FORBIDDEN)
+        self.administrateur.refresh_from_db()
+        self.assertEqual(self.administrateur.statut_kyc, StatutKYC.EN_ATTENTE)
+        self.assertNotEqual(self.administrateur.role, Role.VENDEUR)
+
+    def test_administrateur_ne_peut_pas_refuser_sa_propre_demande(self):
+        self.administrateur.soumettre_demande_vendeur()
+        self.client.force_authenticate(user=self.administrateur)
+
+        reponse = self.client.post(
+            f'/api/vendeurs/administration/demandes/{self.administrateur.id}/refuser/',
+            {'commentaire': "Auto-refus tenté, mais motivé"},
+        )
+
+        self.assertEqual(reponse.status_code, status.HTTP_403_FORBIDDEN)
+        self.administrateur.refresh_from_db()
+        self.assertEqual(self.administrateur.statut_kyc, StatutKYC.EN_ATTENTE)
 
     def test_validation_interdite_a_un_vendeur(self):
         self.client.force_authenticate(user=creer_vendeur_valide())

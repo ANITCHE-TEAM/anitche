@@ -2,6 +2,7 @@ from django.contrib import admin, messages
 
 from .models import Boutique, DemandeVendeur
 from .services import (
+    AutoApprobationInterdite,
     TransitionVendeurImpossible,
     refuser_demande_vendeur,
     valider_demande_vendeur,
@@ -47,7 +48,12 @@ class DemandeVendeurAdmin(admin.ModelAdmin):
         traitees, echecs = 0, 0
         for demande in queryset:
             try:
-                service(demande)
+                service(demande, decideur=request.user)
+            except AutoApprobationInterdite as erreur:
+                echecs += 1
+                self.message_user(
+                    request, f"{demande.email} : {erreur}", level=messages.WARNING
+                )
             except TransitionVendeurImpossible as erreur:
                 echecs += 1
                 self.message_user(

@@ -43,6 +43,26 @@ class BoutiqueSerializer(serializers.ModelSerializer):
                 "Ce compte possède déjà une boutique."
             )
         return data
+    def _valider_image(self, value, taille_max_mo, types_autorises=('image/jpeg', 'image/png', 'image/webp')):
+        """Garde-fou commun aux champs logo/banniere : taille et type MIME."""
+        if not value:
+            return value
+        if value.size > taille_max_mo * 1024 * 1024:
+            raise serializers.ValidationError(
+                f"Le fichier ne doit pas dépasser {taille_max_mo} Mo."
+            )
+        content_type = getattr(value, 'content_type', None)
+        if content_type and content_type not in types_autorises:
+            raise serializers.ValidationError(
+                "Format d'image non autorisé (JPEG, PNG ou WebP uniquement)."
+            )
+        return value
+
+    def validate_logo(self, value):
+        return self._valider_image(value, taille_max_mo=2)
+
+    def validate_banniere(self, value):
+        return self._valider_image(value, taille_max_mo=5)
 
     def create(self, validated_data):
         return Boutique.objects.create(

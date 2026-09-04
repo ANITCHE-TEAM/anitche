@@ -6,10 +6,13 @@ Trois niveaux d'accès, volontairement séparés dans les URL :
   - administration     : instruction des demandes (`/administration/...`)
 """
 
+import logging
+
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from .models import Boutique, DemandeVendeur
@@ -27,10 +30,13 @@ from .serializers import (
     RefusVendeurSerializer,
 )
 from .services import (
+    AutoApprobationInterdite,
     TransitionVendeurImpossible,
     refuser_demande_vendeur,
     valider_demande_vendeur,
 )
+
+logger_securite = logging.getLogger('securite')
 
 
 # --------------------------------------------------------------------------
@@ -81,6 +87,8 @@ class MaBoutiqueView(generics.RetrieveUpdateAPIView):
 
     serializer_class = BoutiqueSerializer
     permission_classes = [IsAuthenticated, EstVendeurValide, EstProprietaireDeLaBoutique]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'boutique_creation'
 
     def get_object(self):
         boutique = get_object_or_404(Boutique, proprietaire=self.request.user)
@@ -121,7 +129,13 @@ class DecisionVendeurView(APIView):
         demande = get_object_or_404(DemandeVendeur, pk=pk)
 
         try:
-            compte = self.service(demande, serializer.validated_data['commentaire'])
+            compte = self.service(
+                demande,
+                serializer.validated_data['commentaire'],
+                decideur=request.user,
+            )
+        except AutoApprobationInterdite as erreur:
+            return Response({"message": str(erreur)}, status=status.HTTP_403_FORBIDDEN)
         except TransitionVendeurImpossible as erreur:
             return Response({"message": str(erreur)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -164,3 +178,13 @@ class BoutiqueAdministrationDetailView(generics.RetrieveUpdateAPIView):
     serializer_class = BoutiqueAdministrationSerializer
     permission_classes = [IsAuthenticated, EstAdministrateur]
     queryset = Boutique.objects.select_related('proprietaire')
+
+    def perform_update(self, serializer):
+        etait_active = serializer.instance.est_active
+        boutique = serializer.save()
+        if etait_active != boutique.est_active:
+            action = "réactivée" if boutique.est_active else "suspendue"
+            logger_securite.info(
+                "Boutique %s (%s) %s par admin_id=%s",
+                boutique.id, boutique.nom, action, self.request.user.id,
+            )

@@ -38,6 +38,7 @@ services:
       retries: 5
 
   backend-django:
+    container_name: anitche-backend
     build:
       context: ../backend-django
     command: sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
@@ -53,12 +54,14 @@ services:
       - ../backend-django:/app
     ports:
       - "8000:8000"
+    networks:
+      - default
+      - anitche-net
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
-
   celery-worker:
     build:
       context: ../backend-django
@@ -93,6 +96,9 @@ services:
       REDIS_URL: redis://redis:6379/0
     volumes:
       - ../backend-django:/app
+    networks:
+      - default
+      - anitche-net
     depends_on:
       db:
         condition: service_healthy
@@ -134,3 +140,7 @@ services:
 
 volumes:
   anitche_pgdata:
+
+networks:
+  anitche-net:
+    external: true

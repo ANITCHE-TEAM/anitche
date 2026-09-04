@@ -17,8 +17,11 @@ Règles appliquées :
 
 from django.db import transaction
 from django.utils import timezone
+import logging
 
 from apps.utilisateurs.models import Role, StatutKYC, Utilisateur
+
+logger_securite = logging.getLogger('securite')
 
 #: Rôles depuis lesquels un compte peut devenir vendeur. Le modèle utilisateur
 #: ne porte qu'un seul rôle : on refuse d'écraser celui d'un livreur ou d'un
@@ -28,6 +31,15 @@ ROLES_ELIGIBLES_VENDEUR = (Role.CLIENT, Role.VENDEUR)
 
 class TransitionVendeurImpossible(Exception):
     """La décision demandée ne correspond pas à l'état courant du compte."""
+
+
+class AutoApprobationInterdite(Exception):
+    """Un administrateur ne peut pas traiter sa propre demande vendeur.
+
+    Séparation des responsabilités : la validation doit toujours passer
+    par un tiers, jamais par la personne concernée elle-même — que ce
+    soit via l'API ou via une action groupée du Django admin.
+    """
 
 
 def _tracer_decision(utilisateur, commentaire):
@@ -51,9 +63,14 @@ def _charger_demande_verrouillee(utilisateur):
 
 
 @transaction.atomic
-def valider_demande_vendeur(utilisateur, commentaire=''):
+def valider_demande_vendeur(utilisateur, commentaire='', decideur=None):
     """Valide la demande : le compte devient vendeur avec un KYC validé."""
     compte = _charger_demande_verrouillee(utilisateur)
+
+    if decideur is not None and decideur.pk == compte.pk:
+        raise AutoApprobationInterdite(
+            "Vous ne pouvez pas valider votre propre demande vendeur."
+        )
 
     if compte.role not in ROLES_ELIGIBLES_VENDEUR:
         raise TransitionVendeurImpossible(
@@ -65,11 +82,15 @@ def valider_demande_vendeur(utilisateur, commentaire=''):
     compte.save(update_fields=['statut_kyc', 'role'])
 
     _tracer_decision(compte, commentaire)
+    logger_securite.info(
+        "Demande vendeur validée (utilisateur_id=%s, decideur_id=%s)",
+        compte.id, getattr(decideur, 'id', None),
+    )
     return compte
 
 
 @transaction.atomic
-def refuser_demande_vendeur(utilisateur, commentaire=''):
+def refuser_demande_vendeur(utilisateur, commentaire='', decideur=None):
     """Refuse la demande : le KYC passe à refusé, le rôle n'est pas modifié.
 
     Le compte reste client et peut soumettre une nouvelle demande
@@ -77,8 +98,17 @@ def refuser_demande_vendeur(utilisateur, commentaire=''):
     """
     compte = _charger_demande_verrouillee(utilisateur)
 
+    if decideur is not None and decideur.pk == compte.pk:
+        raise AutoApprobationInterdite(
+            "Vous ne pouvez pas refuser votre propre demande vendeur."
+        )
+
     compte.statut_kyc = StatutKYC.REFUSE
     compte.save(update_fields=['statut_kyc'])
 
     _tracer_decision(compte, commentaire)
+    logger_securite.info(
+        "Demande vendeur refusée (utilisateur_id=%s, decideur_id=%s)",
+        compte.id, getattr(decideur, 'id', None),
+    )
     return compte

@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from decouple import config
 
@@ -150,8 +151,9 @@ REST_FRAMEWORK = {
         'otp': '5/hour',
         'login': '10/hour',
         'kyc': '5/hour',
+        'boutique_creation': '10/hour',
     },
-}
+}   
 
 from datetime import timedelta
 
@@ -169,10 +171,11 @@ CELERY_BROKER_URL = config('REDIS_URL', default='redis://localhost:6379/0')
 CELERY_RESULT_BACKEND = config('REDIS_URL', default='redis://localhost:6379/0')
 
 # Cache Redis
+REDIS_URL = os.environ.get('REDIS_URL', 'redis://redis:6379/0')
 CACHES = {
     'default': {
         'BACKEND': 'django.core.cache.backends.redis.RedisCache',
-        'LOCATION': config('REDIS_CACHE_URL', default='redis://localhost:6379/1'),
+        'LOCATION': REDIS_URL.replace('/0', '/1'),
         'TIMEOUT': 300,  # 5 minutes
     }
 }
