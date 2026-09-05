@@ -62,7 +62,7 @@ class ProduitPublicListView(generics.ListAPIView):
         params = self.request.query_params
 
         # Filtrage par recherche texte
-        recherche = params.get('recherche')
+        recherche = params.get('recherche', '')[:100]
         if recherche:
             queryset = queryset.filter(
                 Q(nom__icontains=recherche) |

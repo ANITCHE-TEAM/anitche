@@ -32,7 +32,27 @@ class ImageProduitSerializer(serializers.ModelSerializer):
     class Meta:
         model = ImageProduit
         fields = ['id', 'produit', 'image', 'est_principale', 'ordre', 'date_creation']
-        read_only_fields = ['id', 'date_creation']
+        read_only_fields = ['id', 'produit', 'date_creation']
+
+    def validate_image(self, value):
+        """Limite taille et type, comme pour les visuels de boutique (A04/A08).
+
+        `produit` est volontairement en lecture seule ci-dessus : la vue de
+        création (ImageProduitListCreateView) fixe déjà le produit via
+        perform_create(), mais le verrouiller aussi ici évite qu'un futur
+        endpoint réutilisant ce serializer n'expose un IDOR (attacher une
+        image au produit d'un autre vendeur via un champ non protégé).
+        """
+        if not value:
+            return value
+        if value.size > 3 * 1024 * 1024:
+            raise serializers.ValidationError("L'image ne doit pas dépasser 3 Mo.")
+        content_type = getattr(value, 'content_type', None)
+        if content_type and content_type not in ('image/jpeg', 'image/png', 'image/webp'):
+            raise serializers.ValidationError(
+                "Format d'image non autorisé (JPEG, PNG ou WebP uniquement)."
+            )
+        return value
 
 
 class StockSerializer(serializers.ModelSerializer):
