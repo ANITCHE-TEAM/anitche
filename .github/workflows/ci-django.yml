@@ -40,7 +40,7 @@ jobs:
       DB_PASSWORD: postgres
       DB_HOST: localhost
       DB_PORT: 5432
-
+      REDIS_URL=redis: //localhost:6379/0
     steps:
       - uses: actions/checkout@v4
 
