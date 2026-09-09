@@ -152,6 +152,7 @@ REST_FRAMEWORK = {
         'login': '10/hour',
         'kyc': '5/hour',
         'boutique_creation': '10/hour',
+        'commande_validation': '20/hour'
     },
 }   
 

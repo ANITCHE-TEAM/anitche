@@ -26,6 +26,7 @@ REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {
     'support': '100000/day',
     'kyc': '100000/day',
     'boutique_creation': '100000/day',
+    'commande_validation': '100000/day',
 }
 # Cache en mémoire rapide pour les tests
 CACHES = {

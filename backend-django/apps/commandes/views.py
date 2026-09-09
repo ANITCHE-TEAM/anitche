@@ -1,4 +1,6 @@
 from decimal import Decimal
+import logging
+
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.shortcuts import get_object_or_404
@@ -7,12 +9,16 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import ValidationError
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework import status
 
 from .models import Commande, GroupeCommande, CommandeItem
 from .serializers import CommandeSerializer, GroupeCommandeSerializer, CommandeItemSerializer
 from apps.catalogue.models import Stock
+from apps.panier.models import Panier
 from apps.panier.views import get_or_create_panier
+
+logger_securite = logging.getLogger('securite')
 
 
 class ValiderPanierView(APIView):
@@ -23,31 +29,45 @@ class ValiderPanierView(APIView):
     étape échoue (stock insuffisant, etc.), rien n'est enregistré.
     """
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'commande_validation'
 
     def post(self, request):
         panier = get_or_create_panier(request)
-        items = list(
-            panier.items.select_related("variante__produit__boutique", "variante__stock")
-        )
-
-        if not items:
-            return Response({"detail": "Le panier est vide."}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Une variante retirée de la vente entre l'ajout au panier et le
-        # paiement ne doit pas pouvoir être commandée.
-        variante_inactive = next((item for item in items if not item.variante.est_active), None)
-        if variante_inactive is not None:
-            raise ValidationError(
-                f"{variante_inactive.variante.nom} n'est plus disponible à la vente."
-            )
-
-        # 1. Regroupe les articles par boutique
-        items_par_boutique = {}
-        for item in items:
-            boutique = item.variante.produit.boutique
-            items_par_boutique.setdefault(boutique, []).append(item)
 
         with transaction.atomic():
+            # Verrouille la ligne du panier lui-même avant toute lecture de
+            # ses articles : une double soumission (double-clic, retry
+            # réseau) envoie deux requêtes qui liraient sinon le même panier
+            # en parallèle et créeraient chacune leur propre commande avec
+            # les mêmes articles, avant que l'une des deux n'ait eu le temps
+            # de le vider (A04/A08 — double-commande / double-facturation).
+            # La seconde requête reste bloquée ici jusqu'à ce que la
+            # première ait terminé (stock décrémenté, panier vidé, commit) ;
+            # elle relit alors un panier vide et échoue proprement en 400.
+            panier = Panier.objects.select_for_update().get(pk=panier.pk)
+
+            items = list(
+                panier.items.select_related("variante__produit__boutique", "variante__stock")
+            )
+
+            if not items:
+                raise ValidationError("Le panier est vide.")
+
+            # Une variante retirée de la vente entre l'ajout au panier et le
+            # paiement ne doit pas pouvoir être commandée.
+            variante_inactive = next((item for item in items if not item.variante.est_active), None)
+            if variante_inactive is not None:
+                raise ValidationError(
+                    f"{variante_inactive.variante.nom} n'est plus disponible à la vente."
+                )
+
+            # 1. Regroupe les articles par boutique
+            items_par_boutique = {}
+            for item in items:
+                boutique = item.variante.produit.boutique
+                items_par_boutique.setdefault(boutique, []).append(item)
+
             # 2. Verrouille les lignes de stock concernées pour toute la durée
             # de la transaction : aucune autre commande ne peut décrémenter
             # ces mêmes variantes tant que celle-ci n'est pas terminée.
@@ -101,6 +121,12 @@ class ValiderPanierView(APIView):
 
             # 3. Vide le panier une fois les commandes créées
             panier.items.all().delete()
+
+        logger_securite.info(
+            "Commande(s) créée(s) : groupe_id=%s, client_id=%s, nb_commandes=%s, montant_total=%s",
+            groupe.id, request.user.id, len(commandes_creees),
+            sum((c.montant_total for c in commandes_creees), Decimal("0.00")),
+        )
 
         serializer = CommandeSerializer(commandes_creees, many=True)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
