@@ -35,3 +35,12 @@ CACHES = {
     }
 }
 
+
+# Secrets de test fixes pour la vérification de signature des webhooks
+# de paiement — jamais utilisés en dehors de l'environnement de test.
+WEBHOOK_SECRETS = {
+    'wave': 'secret-test-wave',
+    'orange_money': 'secret-test-orange',
+    'mtn_money': 'secret-test-mtn',
+    'moov_money': 'secret-test-moov',
+}

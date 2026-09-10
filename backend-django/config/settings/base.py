@@ -184,6 +184,16 @@ CACHES = {
 # Auth Google
 GOOGLE_OAUTH_CLIENT_ID = config('GOOGLE_OAUTH_CLIENT_ID', default='')
 
+# Secrets de signature des webhooks de paiement, un par fournisseur.
+# Jamais de valeur par défaut : un webhook dont le fournisseur n'a pas de
+# secret configuré est systématiquement rejeté (voir WebhookPaiementView).
+WEBHOOK_SECRETS = {
+    'wave': config('WEBHOOK_SECRET_WAVE', default=''),
+    'orange_money': config('WEBHOOK_SECRET_ORANGE_MONEY', default=''),
+    'mtn_money': config('WEBHOOK_SECRET_MTN_MONEY', default=''),
+    'moov_money': config('WEBHOOK_SECRET_MOOV_MONEY', default=''),
+}
+
 
 
 #  Email config

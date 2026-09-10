@@ -43,7 +43,6 @@ services:
       context: ../backend-django
     command: sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
     environment:
-      DJANGO_SETTINGS_MODULE: config.settings.dev
       DB_NAME: ${DB_NAME:-anitche}
       DB_USER: ${DB_USER:-postgres}
       DB_PASSWORD: ${DB_PASSWORD:-postgres}

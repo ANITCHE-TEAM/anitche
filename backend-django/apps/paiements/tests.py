@@ -1,7 +1,13 @@
 from decimal import Decimal
+import hashlib
+import hmac
+import json
+
+from django.conf import settings
 from django.urls import reverse
 from rest_framework.test import APITestCase
 from rest_framework import status
+
 
 from apps.utilisateurs.models import Utilisateur, Role, StatutKYC
 from apps.vendeurs.models import Boutique
@@ -234,6 +240,19 @@ class WebhookPaiementTestCase(BasePaiementTestCase):
             adresse_livraison="Marcory Zone 4, Abidjan",
         )
 
+    def _poster_webhook_signe(self, url, fournisseur, payload):
+        """Poste un payload de webhook en calculant sa vraie signature HMAC,
+        pour simuler une notification authentique de la passerelle."""
+        corps_brut = json.dumps(payload).encode("utf-8")
+        secret = settings.WEBHOOK_SECRETS[fournisseur]
+        signature = hmac.new(secret.encode("utf-8"), corps_brut, hashlib.sha256).hexdigest()
+        return self.client.post(
+            url,
+            data=corps_brut,
+            content_type="application/json",
+            HTTP_X_WEBHOOK_SIGNATURE=signature,
+        )
+
     def test_webhook_succes_valide_commande_et_cree_livraison(self):
         url = reverse("paiements:webhook-paiement", kwargs={"fournisseur": "wave"})
         payload = {
@@ -244,27 +263,56 @@ class WebhookPaiementTestCase(BasePaiementTestCase):
             "metadata": {"frais": "150"},
         }
 
-        response = self.client.post(url, payload, format="json")
+        response = self._poster_webhook_signe(url, "wave", payload)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
-        # 1. Statut du paiement mis à jour
         self.paiement.refresh_from_db()
         self.assertEqual(self.paiement.statut, Paiement.Statut.VALIDE)
         self.assertIsNotNone(self.paiement.date_validation)
         self.assertEqual(self.paiement.transaction_id_externe, "wave_trx_998877")
 
-        # 2. Statut de la commande passé à CONFIRMEE
         self.commande1.refresh_from_db()
         self.assertEqual(self.commande1.status, Commande.Status.CONFIRMEE)
 
-        # 3. Fiche Livraison créée automatiquement
         livraison = Livraison.objects.get(commande=self.commande1)
         self.assertEqual(livraison.status, Livraison.Status.EN_ATTENTE)
         self.assertEqual(livraison.adresse_livraison, "Marcory Zone 4, Abidjan")
 
-        # 4. Entrée enregistrée dans le JournalWebhook
         journal = JournalWebhook.objects.get(evenement_id="evt_wave_123456")
         self.assertEqual(journal.statut_traitement, JournalWebhook.StatutTraitement.TRAITE)
+
+    def test_webhook_refuse_sans_signature(self):
+        """Un webhook sans en-tête de signature doit être rejeté (A07)."""
+        url = reverse("paiements:webhook-paiement", kwargs={"fournisseur": "wave"})
+        payload = {
+            "evenement_id": "evt_wave_falsifie",
+            "reference": self.paiement.reference,
+            "statut": "succes",
+        }
+
+        response = self.client.post(url, payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        self.paiement.refresh_from_db()
+        self.assertEqual(self.paiement.statut, Paiement.Statut.EN_ATTENTE)
+
+    def test_webhook_refuse_signature_invalide(self):
+        """Un webhook avec une signature incorrecte doit être rejeté (A07)."""
+        url = reverse("paiements:webhook-paiement", kwargs={"fournisseur": "wave"})
+        payload = {
+            "evenement_id": "evt_wave_signature_fausse",
+            "reference": self.paiement.reference,
+            "statut": "succes",
+        }
+
+        response = self.client.post(
+            url, payload, format="json",
+            HTTP_X_WEBHOOK_SIGNATURE="0" * 64,
+        )
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        self.paiement.refresh_from_db()
+        self.assertEqual(self.paiement.statut, Paiement.Statut.EN_ATTENTE)
 
     def test_webhook_idempotence(self):
         url = reverse("paiements:webhook-paiement", kwargs={"fournisseur": "wave"})
@@ -274,12 +322,10 @@ class WebhookPaiementTestCase(BasePaiementTestCase):
             "statut": "succes",
         }
 
-        # Premier appel
-        res1 = self.client.post(url, payload, format="json")
+        res1 = self._poster_webhook_signe(url, "wave", payload)
         self.assertEqual(res1.status_code, status.HTTP_200_OK)
 
-        # Deuxième appel avec le même événement ID
-        res2 = self.client.post(url, payload, format="json")
+        res2 = self._poster_webhook_signe(url, "wave", payload)
         self.assertEqual(res2.status_code, status.HTTP_200_OK)
         self.assertEqual(JournalWebhook.objects.filter(evenement_id="evt_wave_unique_99").count(), 1)
 
@@ -292,13 +338,12 @@ class WebhookPaiementTestCase(BasePaiementTestCase):
             "metadata": {"motif": "Solde insuffisant"},
         }
 
-        response = self.client.post(url, payload, format="json")
+        response = self._poster_webhook_signe(url, "orange_money", payload)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
         self.paiement.refresh_from_db()
         self.assertEqual(self.paiement.statut, Paiement.Statut.ECHOUE)
         self.assertEqual(self.paiement.metadata.get("motif_echec"), "Solde insuffisant")
 
-        # La commande reste en état CREEE
         self.commande1.refresh_from_db()
         self.assertEqual(self.commande1.status, Commande.Status.CREEE)
