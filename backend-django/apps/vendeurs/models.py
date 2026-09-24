@@ -9,7 +9,8 @@ from apps.core.validators import validateur_image_standard
 
 class BoutiqueQuerySet(models.QuerySet):
     def ouvertes(self):
-        return self.filter(est_active=True)
+        """Ni fermée par le vendeur, ni suspendue par l'administration."""
+        return self.filter(est_active=True, est_suspendue=False)
 
     def publiques(self):
         """Boutiques visibles côté client : vendeur validé et boutique ouverte.
@@ -54,7 +55,14 @@ class Boutique(models.Model):
 
     est_active = models.BooleanField(
         default=True,
-        help_text="Décochez pour fermer temporairement la boutique (elle disparaît du catalogue public).",
+        help_text="Fermeture volontaire par le vendeur (la boutique disparaît du catalogue public).",
+    )
+    est_suspendue = models.BooleanField(
+        default=False,
+        help_text=(
+            "Suspension par l'administration : la boutique disparaît du catalogue public "
+            "et le vendeur ne peut pas la lever lui-même."
+        ),
     )
 
     date_creation = models.DateTimeField(auto_now_add=True)
@@ -75,9 +83,16 @@ class Boutique(models.Model):
         """Autorisation de publier / d'être visible publiquement.
 
         Point d'entrée unique pour les autres modules (catalogue, commandes) :
-        un vendeur non validé ou une boutique fermée ne publie rien.
+        un vendeur non validé, une boutique fermée ou suspendue ne publie rien.
+        `Produit.objects.publies()` (catalogue) duplique cette règle en SQL :
+        toute évolution ici doit y être répercutée.
         """
-        return self.est_active and self.proprietaire.is_active and self.vendeur_est_valide
+        return (
+            self.est_active
+            and not self.est_suspendue
+            and self.proprietaire.is_active
+            and self.vendeur_est_valide
+        )
 
     def clean(self):
         # Contrôle uniquement à la création : une boutique déjà existante doit

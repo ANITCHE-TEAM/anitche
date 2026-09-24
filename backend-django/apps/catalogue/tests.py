@@ -221,6 +221,20 @@ class CataloguePublicAPITests(BaseCatalogueTestCase):
         self.assertEqual(response.data['nom'], "Mocassin Prestige")
         self.assertEqual(len(response.data['variantes']), 1)
 
+    def test_produits_boutique_suspendue_masques(self):
+        self.boutique1.est_suspendue = True
+        self.boutique1.save()
+
+        liste = self.client.get(reverse('catalogue:produits-liste'), {'recherche': 'Prestige'})
+        resultats = liste.data['results'] if 'results' in liste.data else liste.data
+        self.assertEqual(len(resultats), 0)
+
+        detail = self.client.get(reverse('catalogue:produit-detail', args=[self.produit.slug]))
+        self.assertEqual(detail.status_code, status.HTTP_404_NOT_FOUND)
+
+        self.produit.refresh_from_db()
+        self.assertFalse(self.produit.est_achetable)
+
     def test_produit_boutique_fermee_renvoie_404(self):
         self.boutique1.est_active = False
         self.boutique1.save()

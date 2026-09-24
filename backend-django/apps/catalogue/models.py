@@ -89,11 +89,13 @@ class ProduitQuerySet(models.QuerySet):
     def publies(self):
         """Produits visibles côté client : produit actif ET boutique publiable.
 
-        S'appuie sur la règle centrale de Boutique.est_publiable (statut_kyc=valide,
-        boutique active, vendeur actif) sans dupliquer la logique.
+        Traduction SQL de la règle centrale Boutique.est_publiable (statut_kyc=valide,
+        boutique active et non suspendue, vendeur actif) : toute évolution de
+        est_publiable doit être répercutée ici.
         """
         return self.actifs().filter(
             boutique__est_active=True,
+            boutique__est_suspendue=False,
             boutique__proprietaire__role=Role.VENDEUR,
             boutique__proprietaire__statut_kyc=StatutKYC.VALIDE,
             boutique__proprietaire__is_active=True,

@@ -80,6 +80,13 @@ class BoutiqueModeleTests(TestCase):
         )
         self.assertFalse(boutique.est_publiable)
 
+    def test_boutique_suspendue_non_publiable_et_hors_publiques(self):
+        boutique = Boutique.objects.create(
+            proprietaire=creer_vendeur_valide(), nom="Suspendue", est_suspendue=True
+        )
+        self.assertFalse(boutique.est_publiable)
+        self.assertNotIn(boutique, Boutique.objects.publiques())
+
     def test_creation_directe_refusee_pour_vendeur_non_valide(self):
         """A04:2025 — défense en profondeur : même un appel ORM direct
         (shell, script, tâche Celery), hors de toute vue/permission API,
@@ -325,6 +332,57 @@ class MaBoutiqueAPITests(TestCase):
 
         self.assertEqual(Boutique.objects.get().proprietaire, vendeur)
 
+    def test_vendeur_suspendu_qui_se_rouvre_reste_invisible(self):
+        """La fermeture volontaire (est_active) reste au vendeur, mais ne
+        lève jamais une suspension de l'administration."""
+        vendeur = creer_vendeur_valide()
+        boutique = Boutique.objects.create(
+            proprietaire=vendeur, nom="Chez Awa", est_active=False, est_suspendue=True
+        )
+        self.client.force_authenticate(user=vendeur)
+
+        reponse = self.client.patch(URL_MA_BOUTIQUE, {'est_active': True}, format='json')
+
+        self.assertEqual(reponse.status_code, status.HTTP_200_OK)
+        boutique.refresh_from_db()
+        self.assertTrue(boutique.est_active)
+        self.assertTrue(boutique.est_suspendue)
+        self.assertFalse(boutique.est_publiable)
+
+        self.client.force_authenticate(user=None)
+        self.assertEqual(
+            self.client.get(f'{URL_BOUTIQUES_PUBLIQUES}{boutique.slug}/').status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+        self.assertEqual(self.client.get(URL_BOUTIQUES_PUBLIQUES).data['results'], [])
+
+    def test_vendeur_ferme_puis_rouvre_sa_boutique(self):
+        vendeur = creer_vendeur_valide()
+        boutique = Boutique.objects.create(proprietaire=vendeur, nom="Chez Awa")
+        url_publique = f'{URL_BOUTIQUES_PUBLIQUES}{boutique.slug}/'
+        anonyme = APIClient()
+        self.client.force_authenticate(user=vendeur)
+
+        reponse = self.client.patch(URL_MA_BOUTIQUE, {'est_active': False}, format='json')
+        self.assertEqual(reponse.status_code, status.HTTP_200_OK)
+        self.assertEqual(anonyme.get(url_publique).status_code, status.HTTP_404_NOT_FOUND)
+
+        reponse = self.client.patch(URL_MA_BOUTIQUE, {'est_active': True}, format='json')
+        self.assertEqual(reponse.status_code, status.HTTP_200_OK)
+        self.assertEqual(anonyme.get(url_publique).status_code, status.HTTP_200_OK)
+
+    def test_vendeur_ne_peut_pas_lever_sa_suspension(self):
+        vendeur = creer_vendeur_valide()
+        boutique = Boutique.objects.create(proprietaire=vendeur, nom="Chez Awa", est_suspendue=True)
+        self.client.force_authenticate(user=vendeur)
+
+        reponse = self.client.patch(URL_MA_BOUTIQUE, {'est_suspendue': False}, format='json')
+
+        self.assertEqual(reponse.status_code, status.HTTP_200_OK)
+        self.assertTrue(reponse.data['est_suspendue'])
+        boutique.refresh_from_db()
+        self.assertTrue(boutique.est_suspendue)
+
 
 class MaBoutiqueThrottleTestCase(TestCase):
     """
@@ -497,18 +555,79 @@ class AdministrationBoutiquesAPITests(TestCase):
         self.assertEqual(reponse.status_code, status.HTTP_200_OK)
         self.assertEqual(len(reponse.data["results"]), 1)
 
+    def url_detail(self):
+        return f'/api/vendeurs/administration/boutiques/{self.boutique.id}/'
+
     def test_suspension_par_administrateur(self):
-        self.boutique.est_active = True
-        self.boutique.save(update_fields=['est_active'])
+        # Contrat : la suspension admin passe par est_suspendue (est_active
+        # est désormais la fermeture volontaire du vendeur).
         self.client.force_authenticate(user=creer_administrateur())
 
-        reponse = self.client.patch(
-            f'/api/vendeurs/administration/boutiques/{self.boutique.id}/', {'est_active': False}
-        )
+        reponse = self.client.patch(self.url_detail(), {'est_suspendue': True}, format='json')
 
         self.assertEqual(reponse.status_code, status.HTTP_200_OK)
         self.boutique.refresh_from_db()
+        self.assertTrue(self.boutique.est_suspendue)
+
+    def test_suspension_puis_levee_par_administrateur(self):
+        self.boutique.est_active = True
+        self.boutique.save(update_fields=['est_active'])
+        self.client.force_authenticate(user=creer_administrateur())
+        url_publique = f'{URL_BOUTIQUES_PUBLIQUES}{self.boutique.slug}/'
+        anonyme = APIClient()
+
+        with self.assertLogs('securite', level='INFO') as logs:
+            reponse = self.client.patch(self.url_detail(), {'est_suspendue': True}, format='json')
+        self.assertEqual(reponse.status_code, status.HTTP_200_OK)
+        self.assertIn('suspendue', logs.output[0])
+        self.assertEqual(anonyme.get(url_publique).status_code, status.HTTP_404_NOT_FOUND)
+
+        with self.assertLogs('securite', level='INFO') as logs:
+            reponse = self.client.patch(self.url_detail(), {'est_suspendue': False}, format='json')
+        self.assertEqual(reponse.status_code, status.HTTP_200_OK)
+        self.assertIn('réactivée', logs.output[0])
+        self.assertEqual(anonyme.get(url_publique).status_code, status.HTTP_200_OK)
+
+    def test_administrateur_ne_peut_pas_modifier_le_contenu(self):
+        """Tout champ autre que est_suspendue → 400 explicite, rien en base."""
+        self.client.force_authenticate(user=creer_administrateur())
+
+        reponse = self.client.patch(
+            self.url_detail(),
+            {'nom': "Nom imposé", 'description': "Réécrite", 'ville': "Bouaké"},
+            format='json',
+        )
+
+        self.assertEqual(reponse.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Seul le champ est_suspendue est modifiable ici", reponse.data['detail'])
+        self.boutique.refresh_from_db()
+        self.assertEqual(self.boutique.nom, "Chez Awa")
+        self.assertEqual(self.boutique.description, "")
+        self.assertEqual(self.boutique.ville, "")
+
+    def test_administrateur_ne_peut_pas_modifier_est_active(self):
+        self.client.force_authenticate(user=creer_administrateur())
+
+        reponse = self.client.patch(self.url_detail(), {'est_active': True}, format='json')
+
+        self.assertEqual(reponse.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('est_active', reponse.data['detail'])
+        self.boutique.refresh_from_db()
         self.assertFalse(self.boutique.est_active)
+
+    def test_champ_refuse_bloque_toute_la_requete(self):
+        """Un champ interdit mêlé à est_suspendue : rien n'est appliqué,
+        pas même la suspension (pas d'application partielle)."""
+        self.client.force_authenticate(user=creer_administrateur())
+
+        reponse = self.client.patch(
+            self.url_detail(), {'est_suspendue': True, 'nom': "Nom imposé"}, format='json'
+        )
+
+        self.assertEqual(reponse.status_code, status.HTTP_400_BAD_REQUEST)
+        self.boutique.refresh_from_db()
+        self.assertFalse(self.boutique.est_suspendue)
+        self.assertEqual(self.boutique.nom, "Chez Awa")
 
     def test_acces_interdit_au_vendeur(self):
         self.client.force_authenticate(user=creer_vendeur_valide('autre@anitche.ci'))

@@ -21,7 +21,12 @@ class BoutiquePubliqueSerializer(serializers.ModelSerializer):
 
 
 class BoutiqueSerializer(serializers.ModelSerializer):
-    """Boutique vue par son propriétaire (création et mise à jour)."""
+    """Boutique vue par son propriétaire (création et mise à jour).
+
+    `est_active` = fermeture volontaire, modifiable par le vendeur.
+    `est_suspendue` = décision de l'administration : visible mais en lecture
+    seule ici, pour qu'un vendeur suspendu ne puisse pas la lever.
+    """
 
     proprietaire_email = serializers.EmailField(source='proprietaire.email', read_only=True)
     est_publiable = serializers.BooleanField(read_only=True)
@@ -31,11 +36,11 @@ class BoutiqueSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'nom', 'slug', 'description', 'logo', 'banniere',
             'telephone_contact', 'email_contact', 'adresse', 'ville',
-            'est_active', 'est_publiable', 'proprietaire_email',
+            'est_active', 'est_suspendue', 'est_publiable', 'proprietaire_email',
             'date_creation', 'date_mise_a_jour',
         ]
         read_only_fields = [
-            'id', 'slug', 'est_publiable', 'proprietaire_email',
+            'id', 'slug', 'est_suspendue', 'est_publiable', 'proprietaire_email',
             'date_creation', 'date_mise_a_jour',
         ]
 
@@ -115,7 +120,16 @@ class BoutiqueSerializer(serializers.ModelSerializer):
 
 
 class BoutiqueAdministrationSerializer(BoutiqueSerializer):
-    """Vue back-office : mêmes champs, plus l'identité du propriétaire."""
+    """Vue back-office : mêmes champs, plus l'identité du propriétaire.
+
+    L'administration ne décide que de la suspension (`est_suspendue`). Le
+    contenu de la boutique et sa fermeture volontaire (`est_active`)
+    appartiennent au vendeur : ils sont en lecture seule ici, et tout autre
+    champ envoyé est refusé explicitement (400) plutôt qu'ignoré, pour qu'un
+    back-office qui croirait fermer ou renommer une boutique le sache.
+    """
+
+    CHAMPS_MODIFIABLES = {'est_suspendue'}
 
     proprietaire_id = serializers.IntegerField(source='proprietaire.id', read_only=True)
     proprietaire_statut_kyc = serializers.CharField(
@@ -126,6 +140,16 @@ class BoutiqueAdministrationSerializer(BoutiqueSerializer):
         fields = BoutiqueSerializer.Meta.fields + [
             'proprietaire_id', 'proprietaire_statut_kyc',
         ]
+        read_only_fields = [champ for champ in fields if champ != 'est_suspendue']
+
+    def validate(self, data):
+        champs_refuses = sorted(set(self.initial_data) - self.CHAMPS_MODIFIABLES)
+        if champs_refuses:
+            raise serializers.ValidationError(
+                "Seul le champ est_suspendue est modifiable ici "
+                f"(champs refusés : {', '.join(champs_refuses)})."
+            )
+        return super().validate(data)
 
 
 class DossierKYCLectureSerializer(serializers.ModelSerializer):

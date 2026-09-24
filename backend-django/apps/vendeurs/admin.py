@@ -11,8 +11,10 @@ from .services import (
 
 @admin.register(Boutique)
 class BoutiqueAdmin(admin.ModelAdmin):
-    list_display = ('nom', 'proprietaire', 'ville', 'est_active', 'est_publiable', 'date_creation')
-    list_filter = ('est_active', 'ville', 'proprietaire__statut_kyc')
+    list_display = (
+        'nom', 'proprietaire', 'ville', 'est_active', 'est_suspendue', 'est_publiable', 'date_creation',
+    )
+    list_filter = ('est_active', 'est_suspendue', 'ville', 'proprietaire__statut_kyc')
     search_fields = ('nom', 'proprietaire__email', 'proprietaire__nom', 'ville')
     readonly_fields = ('slug', 'date_creation', 'date_mise_a_jour')
     autocomplete_fields = ('proprietaire',)

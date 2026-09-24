@@ -193,10 +193,10 @@ class BoutiqueAdministrationDetailView(generics.RetrieveUpdateAPIView):
     queryset = Boutique.objects.select_related('proprietaire')
 
     def perform_update(self, serializer):
-        etait_active = serializer.instance.est_active
+        etait_suspendue = serializer.instance.est_suspendue
         boutique = serializer.save()
-        if etait_active != boutique.est_active:
-            action = "réactivée" if boutique.est_active else "suspendue"
+        if etait_suspendue != boutique.est_suspendue:
+            action = "suspendue" if boutique.est_suspendue else "réactivée"
             logger_securite.info(
                 "Boutique %s (%s) %s par admin_id=%s",
                 boutique.id, boutique.nom, action, self.request.user.id,
