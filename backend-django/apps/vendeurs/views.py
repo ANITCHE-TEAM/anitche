@@ -87,8 +87,21 @@ class MaBoutiqueView(generics.RetrieveUpdateAPIView):
 
     serializer_class = BoutiqueSerializer
     permission_classes = [IsAuthenticated, EstVendeurValide, EstProprietaireDeLaBoutique]
-    throttle_classes = [ScopedRateThrottle]
-    throttle_scope = 'boutique_creation'
+
+    def get_throttles(self):
+        """
+        Le scope 'boutique_creation' (taux bas, pensé pour limiter les
+        tentatives de création) ne doit s'appliquer qu'au POST. Il était
+        auparavant posé via throttle_classes/throttle_scope de classe,
+        donc appliqué à GET/PATCH aussi — bloquant le dashboard vendeur
+        (consultation/mise à jour répétées en usage normal). Les autres
+        méthodes retombent sur les throttles par défaut (user/anon, voir
+        REST_FRAMEWORK.DEFAULT_THROTTLE_CLASSES).
+        """
+        if self.request.method == 'POST':
+            self.throttle_scope = 'boutique_creation'
+            return [ScopedRateThrottle()]
+        return super().get_throttles()
 
     def get_object(self):
         boutique = get_object_or_404(Boutique, proprietaire=self.request.user)

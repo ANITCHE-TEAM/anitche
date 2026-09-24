@@ -1,3 +1,5 @@
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import IntegrityError, transaction
 from django.urls import reverse
 from rest_framework import serializers
 
@@ -38,6 +40,10 @@ class BoutiqueSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, data):
+        # Pré-vérification rapide pour un message d'erreur immédiat dans
+        # le cas non-concurrent (l'écrasante majorité des cas). Ce n'est
+        # qu'un confort : la vérification qui compte réellement est celle
+        # sous verrou dans create(), seule capable d'empêcher la course.
         utilisateur = self.context['request'].user
         if self.instance is None and Boutique.objects.filter(proprietaire=utilisateur).exists():
             raise serializers.ValidationError(
@@ -66,9 +72,46 @@ class BoutiqueSerializer(serializers.ModelSerializer):
         return self._valider_image(value, taille_max_mo=5)
 
     def create(self, validated_data):
-        return Boutique.objects.create(
-            proprietaire=self.context['request'].user, **validated_data
-        )
+        """
+        CONCURRENCE : verrouille la ligne Utilisateur (select_for_update)
+        pour la durée de la vérification+création. Sans ce verrou, deux
+        requêtes de création simultanées peuvent toutes deux constater
+        l'absence de boutique avant que l'une des deux n'insère — la
+        seconde percute alors la contrainte OneToOne sur `proprietaire`
+        (IntegrityError non gérée, 500) au lieu d'un refus propre.
+
+        Le verrou porte sur l'UTILISATEUR courant : il ne protège donc
+        que contre le doublon d'un même compte, pas contre deux vendeurs
+        DIFFÉRENTS créant simultanément une boutique de même nom (nom et
+        slug sont uniques globalement) — d'où le filet de sécurité
+        IntegrityError/ValidationError ci-dessous, qui traduit une telle
+        collision en 400 plutôt qu'en 500.
+        """
+        request_utilisateur = self.context['request'].user
+
+        with transaction.atomic():
+            utilisateur = Utilisateur.objects.select_for_update().get(
+                pk=request_utilisateur.pk
+            )
+
+            if Boutique.objects.filter(proprietaire=utilisateur).exists():
+                raise serializers.ValidationError(
+                    "Ce compte possède déjà une boutique."
+                )
+
+            try:
+                return Boutique.objects.create(
+                    proprietaire=utilisateur, **validated_data
+                )
+            except IntegrityError:
+                raise serializers.ValidationError(
+                    "Ce nom de boutique vient d'être pris par une autre "
+                    "création simultanée. Réessayez avec un nom différent."
+                )
+            except DjangoValidationError as erreur:
+                raise serializers.ValidationError(
+                    erreur.message_dict if hasattr(erreur, 'message_dict') else erreur.messages
+                )
 
 
 class BoutiqueAdministrationSerializer(BoutiqueSerializer):

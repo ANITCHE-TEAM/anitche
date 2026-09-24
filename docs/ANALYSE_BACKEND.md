@@ -77,7 +77,7 @@ Le backend Django est articulé en **12 applications modulaires** situées dans 
     - `GET/PUT/PATCH /api/utilisateurs/profil/`
     - `POST /api/utilisateurs/changement-contact/`
     - `POST /api/utilisateurs/verification-otp/`
-    - `POST /api/utilisateurs/demande-vendeur/` & `/upload-kyc/`
+    - `POST /api/utilisateurs/upload-kyc/` (soumet directement la demande vendeur : `statut_kyc` → `en_attente`)
     - `POST /api/utilisateurs/mot-de-passe-oublie/` & `/mot-de-passe-oublie/confirmer/`
   - [`tests.py`](file:///c:/Users/Jordan/Documents/Anitche/backend-django/apps/utilisateurs/tests.py) : Tests exhaustifs de validation KYC, OTP, JWT et récupération de compte.
 

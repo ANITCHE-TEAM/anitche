@@ -812,54 +812,6 @@ class MotDePasseOublieTests(TestCase):
 
 
 # =====================================================
-# TESTS DEMANDE VENDEUR / KYC
-# =====================================================
-
-class DemandeVendeurTests(TestCase):
-    """
-    Vérifie les règles d'accès au statut vendeur.
-    """
-
-    def setUp(self):
-        self.client = APIClient()
-        self.url = '/api/utilisateurs/demande-vendeur/'
-
-        self.utilisateur = Utilisateur.objects.create_user(
-            email='test@anitche.ci',
-            password='xxx',
-            nom='A',
-            prenom='B',
-        )
-
-    def test_sans_authentification_refuse(self):
-        """
-        Un utilisateur non authentifié ne peut pas
-        demander le statut vendeur.
-        """
-
-        response = self.client.post(self.url)
-
-        self.assertEqual(
-            response.status_code,
-            status.HTTP_401_UNAUTHORIZED
-        )
-
-    def test_sans_dossier_kyc_refuse(self):
-        """
-        La demande doit être refusée si aucun
-        dossier KYC n'a été soumis au préalable.
-        """
-
-        self.client.force_authenticate(user=self.utilisateur)
-
-        response = self.client.post(self.url)
-
-        self.assertEqual(
-            response.status_code,
-            status.HTTP_400_BAD_REQUEST
-        )
-
-# =====================================================
 # TESTS DE CONNEXION GOOGLE
 # =====================================================
 
@@ -1340,6 +1292,23 @@ class UploadKYCTests(TestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
+    def test_premiere_soumission_passe_directement_en_attente(self):
+        """
+        Harmonisation : la toute première soumission KYC suffit
+        désormais à elle seule à passer statut_kyc à en_attente, comme
+        la resoumission après refus — la vue /demande-vendeur/ séparée
+        qui aurait autrement été nécessaire a été supprimée.
+        """
+        from apps.utilisateurs.models import StatutKYC
+
+        response = self.client.post(
+            self.url, self._payload('passeport', avec_verso=False), format='multipart',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        self.utilisateur.refresh_from_db()
+        self.assertEqual(self.utilisateur.statut_kyc, StatutKYC.EN_ATTENTE)
+
     def test_compte_bancaire_vide_stocke_en_none(self):
         """
         Un formulaire multipart envoie un champ laissé vide comme ''
@@ -1368,8 +1337,8 @@ class ResoumissionKYCTests(TestCase):
     Un dossier KYC refusé doit pouvoir être resoumis (nouveaux fichiers,
     éventuellement nouveau type_piece) sans création d'un second dossier
     — et cette resoumission suffit à elle seule à repasser le compte en
-    file d'attente (pas d'appel séparé à /demande-vendeur/). Un dossier
-    en_attente ou valide, lui, reste bloqué.
+    file d'attente (aucune vue séparée à appeler). Un dossier en_attente
+    ou valide, lui, reste bloqué.
     """
 
     def setUp(self):

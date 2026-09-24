@@ -1,6 +1,12 @@
-from django.test import TestCase
+from unittest import skipUnless
+from unittest.mock import patch
+
+from django.core.cache import cache
+from django.db import connection
+from django.test import TestCase, TransactionTestCase
 from rest_framework import status
 from rest_framework.test import APIClient
+from rest_framework.throttling import ScopedRateThrottle
 
 from apps.utilisateurs.models import DocumentKYC, Role, StatutKYC, TypePieceIdentite, Utilisateur
 
@@ -270,6 +276,26 @@ class MaBoutiqueAPITests(TestCase):
         self.assertEqual(reponse.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(Boutique.objects.count(), 1)
 
+    def test_deux_vendeurs_meme_nom_de_boutique_pas_de_500(self):
+        """
+        Boutique.nom est unique globalement. Avant le correctif, une
+        collision de nom entre deux vendeurs DIFFÉRENTS remontait comme
+        une django.core.exceptions.ValidationError non interceptée par
+        DRF (levée par full_clean() dans Boutique.save()) — 500 au lieu
+        d'un refus propre, puisque ce n'est pas le même compte donc pas
+        rattrapé par la vérification 'une seule boutique par compte'.
+        """
+        premier_vendeur = creer_vendeur_valide('premier@anitche.ci')
+        Boutique.objects.create(proprietaire=premier_vendeur, nom="Chez Awa")
+
+        second_vendeur = creer_vendeur_valide('second@anitche.ci')
+        self.client.force_authenticate(user=second_vendeur)
+
+        reponse = self.client.post(URL_MA_BOUTIQUE, {'nom': "Chez Awa"})
+
+        self.assertEqual(reponse.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Boutique.objects.filter(proprietaire=second_vendeur).exists())
+
     def test_consultation_et_mise_a_jour_par_le_proprietaire(self):
         vendeur = creer_vendeur_valide()
         Boutique.objects.create(proprietaire=vendeur, nom="Chez Awa")
@@ -298,6 +324,47 @@ class MaBoutiqueAPITests(TestCase):
         self.client.patch(URL_MA_BOUTIQUE, {'proprietaire': autre.id})
 
         self.assertEqual(Boutique.objects.get().proprietaire, vendeur)
+
+
+class MaBoutiqueThrottleTestCase(TestCase):
+    """
+    Le scope 'boutique_creation' (taux bas) ne doit s'appliquer qu'au
+    POST de MaBoutiqueView — pas à GET/PATCH, qui sont l'usage normal du
+    dashboard vendeur et seraient sinon bloqués après quelques
+    rafraîchissements.
+
+    DIAGNOSTIC (comme apps.fidelite.tests.FideliteThrottleTestCase) :
+    ScopedRateThrottle.THROTTLE_RATES est figé comme attribut de classe
+    à l'import ; on le patche directement plutôt que via
+    override_settings, sans effet ici. Le cache de throttling
+    (LocMemCache en test) n'est pas vidé automatiquement entre tests
+    Django : on repart d'un cache propre à chaque test de cette classe.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.vendeur = creer_vendeur_valide()
+        Boutique.objects.create(proprietaire=self.vendeur, nom="Chez Awa")
+        self.client.force_authenticate(user=self.vendeur)
+
+    def test_get_repetes_jamais_bloques_par_le_throttle_de_creation(self):
+        with patch.dict(ScopedRateThrottle.THROTTLE_RATES, {'boutique_creation': '2/min'}):
+            for _ in range(15):
+                reponse = self.client.get(URL_MA_BOUTIQUE)
+                self.assertNotEqual(reponse.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_post_reste_limite_par_le_throttle_de_creation(self):
+        # Ce compte a déjà une boutique : chaque POST échouera en 400
+        # métier ("déjà une boutique"), mais le throttle est vérifié
+        # AVANT cette validation — seul le comptage des requêtes compte
+        # ici, pas le succès de la création.
+        with patch.dict(ScopedRateThrottle.THROTTLE_RATES, {'boutique_creation': '2/min'}):
+            statuts = [
+                self.client.post(URL_MA_BOUTIQUE, {'nom': f"Autre {i}"}).status_code
+                for i in range(3)
+            ]
+        self.assertIn(status.HTTP_429_TOO_MANY_REQUESTS, statuts)
 
 
 class AdministrationDemandesAPITests(TestCase):
@@ -449,3 +516,42 @@ class AdministrationBoutiquesAPITests(TestCase):
         reponse = self.client.get('/api/vendeurs/administration/boutiques/')
 
         self.assertEqual(reponse.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class BoutiqueConcurrenceTestCase(TransactionTestCase):
+    """A04:2025 : deux créations de boutique simultanées pour le MÊME
+    compte ne doivent jamais produire de 500 (IntegrityError sur la
+    contrainte OneToOne `proprietaire`)."""
+
+    def setUp(self):
+        self.vendeur = creer_vendeur_valide()
+
+    @skipUnless(
+        connection.vendor == 'postgresql',
+        "DIAGNOSTIC : select_for_update() est un no-op sur SQLite (pas de "
+        "verrouillage de ligne) ; deux transactions d'écriture concurrentes "
+        "s'y soldent par un comportement propre à SQLite, pas par le "
+        "verrouillage réel visé par ce test — même limite déjà documentée "
+        "sur apps.retours.tests.RetoursConcurrenceTestCase et "
+        "apps.utilisateurs.tests.ResoumissionKYCConcurrenceTestCase.",
+    )
+    def test_deux_creations_simultanees_une_seule_acceptee(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import django.db
+
+        def appel(index):
+            django.db.close_old_connections()
+            try:
+                client = APIClient()
+                client.force_authenticate(user=self.vendeur)
+                return client.post(URL_MA_BOUTIQUE, {'nom': f"Boutique {index}"}).status_code
+            finally:
+                django.db.connection.close()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            statuts = list(executor.map(appel, range(2)))
+
+        self.assertNotIn(500, statuts)
+        self.assertEqual(statuts.count(status.HTTP_201_CREATED), 1)
+        self.assertEqual(statuts.count(status.HTTP_400_BAD_REQUEST), 1)
+        self.assertEqual(Boutique.objects.filter(proprietaire=self.vendeur).count(), 1)

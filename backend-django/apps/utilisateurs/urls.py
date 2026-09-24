@@ -7,7 +7,6 @@ from .views import (
     ProfilView,
     DemandeChangementContactView,
     VerificationOTPView,
-    DemandeVendeurView,
     UploadKYCView,
     TelechargerDocumentKYCView,
     DemandeMotDePasseOublieView,
@@ -63,13 +62,6 @@ urlpatterns = [
         'verification-otp/',
         VerificationOTPView.as_view(),
         name='verification-otp'
-    ),
-
-    # Demande d'accès au statut de vendeur.
-    path(
-        'demande-vendeur/',
-        DemandeVendeurView.as_view(),
-        name='demande-vendeur'
     ),
 
     # Envoi des documents KYC.

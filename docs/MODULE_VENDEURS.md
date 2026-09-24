@@ -11,7 +11,7 @@
 | `role` (`client` par défaut, `vendeur`, …) | idem | Rôle unique du compte |
 | `Utilisateur.soumettre_demande_vendeur()` | idem | Fait passer le compte à `en_attente` |
 | `DocumentKYC` (`dossier_kyc`) + `date_traitement`, `commentaire_admin` | idem | Dossier instruit par l'administration |
-| `POST /api/utilisateurs/upload-kyc/` puis `POST /api/utilisateurs/demande-vendeur/` | `apps/utilisateurs/urls.py` | Dépôt de la demande |
+| `POST /api/utilisateurs/upload-kyc/` | `apps/utilisateurs/urls.py` | Dépôt de la demande (l'upload passe directement le compte à `en_attente`) |
 
 Le module vendeurs **ne duplique aucun statut de validation** et ne modifie pas le module utilisateurs.
 
@@ -19,7 +19,7 @@ Le module vendeurs **ne duplique aucun statut de validation** et ne modifie pas 
 
 ```
 client (statut_kyc = non_soumis)
-   │  upload KYC + POST /api/utilisateurs/demande-vendeur/   (module utilisateurs)
+   │  POST /api/utilisateurs/upload-kyc/   (module utilisateurs)
    ▼
 en_attente ──── refus admin ────▶ refuse ──(nouvelle demande possible)──┐
    │                                                                     │

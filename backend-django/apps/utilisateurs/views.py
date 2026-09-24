@@ -34,7 +34,6 @@ from .models import (
     Utilisateur,
     CodeOTP,
     TypeUsageOTP,
-    StatutsKYCImpossibles,
     DocumentKYC,
     Role,
 )
@@ -260,49 +259,6 @@ class VerificationOTPView(APIView):
 
         return Response(
             {"message": message},
-            status=status.HTTP_200_OK,
-        )
-
-
-# =====================================================
-# DEMANDE DE STATUT VENDEUR
-# =====================================================
-
-class DemandeVendeurView(APIView):
-    """
-    Permet à un utilisateur de demander
-    l'obtention du statut vendeur.
-    """
-
-    permission_classes = [IsAuthenticated]
-    throttle_scope = 'kyc'
-
-    def post(self, request):
-
-        # Le dossier KYC est obligatoire.
-        if not hasattr(request.user, 'dossier_kyc'):
-            return Response(
-                {
-                    "message":
-                    "Vous devez d'abord soumettre vos documents KYC."
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        try:
-            request.user.soumettre_demande_vendeur()
-
-        except StatutsKYCImpossibles as erreur:
-            return Response(
-                {"message": str(erreur)},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        return Response(
-            {
-                "message":
-                "Demande vendeur enregistrée, en attente de validation."
-            },
             status=status.HTTP_200_OK,
         )
 

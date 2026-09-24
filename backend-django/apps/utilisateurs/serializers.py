@@ -287,6 +287,15 @@ class DocumentKYCSerializer(serializers.ModelSerializer):
         fois — sauf resoumission après un refus (statut_kyc='refuse'),
         qui remplace le dossier existant plutôt que d'en créer un second.
 
+        HARMONISATION : l'upload seul suffit désormais à soumettre la
+        demande vendeur, que ce soit la première fois ou une resoumission
+        après refus — soumettre_demande_vendeur() est appelée dans les
+        deux branches. Avant cette harmonisation, la toute première
+        soumission exigeait un second appel explicite à une vue
+        /demande-vendeur/ dédiée, depuis supprimée (devenue redondante) ;
+        la resoumission après refus, elle, transitionnait déjà
+        automatiquement.
+
         CONCURRENCE : verrouille la ligne Utilisateur (select_for_update)
         pour la durée de la décision. Sans ce verrou, deux requêtes
         d'upload simultanées peuvent toutes les deux constater l'absence
@@ -307,10 +316,12 @@ class DocumentKYCSerializer(serializers.ModelSerializer):
             ).first()
 
             if dossier_existant is None:
-                return DocumentKYC.objects.create(
+                dossier = DocumentKYC.objects.create(
                     utilisateur=utilisateur,
                     **validated_data
                 )
+                utilisateur.soumettre_demande_vendeur()
+                return dossier
 
             if utilisateur.statut_kyc != StatutKYC.REFUSE:
                 messages_par_statut = {
@@ -366,10 +377,10 @@ class DocumentKYCSerializer(serializers.ModelSerializer):
 
             transaction.on_commit(_supprimer_anciens_fichiers)
 
-            # Même transition que le premier passage par
-            # DemandeVendeurView — cohérence garantie par
-            # StatutsKYCImpossibles (ne peut pas lever ici : on vient de
-            # vérifier statut_kyc == REFUSE, ni EN_ATTENTE ni VALIDE).
+            # Même transition que pour la branche « nouveau dossier »
+            # ci-dessus — cohérence garantie par StatutsKYCImpossibles
+            # (ne peut pas lever ici : on vient de vérifier
+            # statut_kyc == REFUSE, ni EN_ATTENTE ni VALIDE).
             utilisateur.soumettre_demande_vendeur()
 
             return dossier_existant
