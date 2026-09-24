@@ -1,6 +1,8 @@
 import pytest
+from unittest.mock import patch, AsyncMock
 from fastapi.testclient import TestClient
 from app.main import app
+from app.core.securite import utilisateur_courant
 
 client = TestClient(app)
 
@@ -150,6 +152,10 @@ def test_consulter_passeport_get():
 # ==========================================
 
 def test_mise_a_jour_position_gps_et_consultation():
+    # F-11 : ces routes sont désormais authentifiées (voir
+    # test_f11_auth_gps.py pour les cas d'accès refusé) ; on simule ici un
+    # livreur légitime autorisé sur la livraison pour vérifier que le flux
+    # normal fonctionne toujours.
     livraison_id = "550e8400-e29b-41d4-a716-446655440000"
     payload = {
         "livraison_id": livraison_id,
@@ -160,19 +166,29 @@ def test_mise_a_jour_position_gps_et_consultation():
         "cap_degres": 120.0,
     }
 
-    # 1. Envoi de la position par le livreur
-    response_post = client.post("/livraison/position", json=payload)
-    assert response_post.status_code == 200
-    data_post = response_post.json()
-    assert data_post["livraison_id"] == livraison_id
-    assert data_post["statut"] == "en_route"
-    assert data_post["distance_restante_km"] > 0
-    assert data_post["temps_estime_minutes"] > 0
+    app.dependency_overrides[utilisateur_courant] = lambda: {
+        "id": 42, "role": "livreur", "_token": "faketoken",
+    }
+    try:
+        with patch(
+            "app.routeurs.suivi_temps_reel.verifier_acces_livraison",
+            new=AsyncMock(return_value=None),
+        ):
+            # 1. Envoi de la position par le livreur
+            response_post = client.post("/livraison/position", json=payload)
+            assert response_post.status_code == 200
+            data_post = response_post.json()
+            assert data_post["livraison_id"] == livraison_id
+            assert data_post["statut"] == "en_route"
+            assert data_post["distance_restante_km"] > 0
+            assert data_post["temps_estime_minutes"] > 0
 
-    # 2. Consultation de la position par le client
-    response_get = client.get(f"/livraison/position/{livraison_id}")
-    assert response_get.status_code == 200
-    data_get = response_get.json()
-    assert data_get["latitude"] == 5.3350
-    assert data_get["longitude"] == -4.0020
-    assert data_get["livreur_id"] == 42
+            # 2. Consultation de la position par le client
+            response_get = client.get(f"/livraison/position/{livraison_id}")
+            assert response_get.status_code == 200
+            data_get = response_get.json()
+            assert data_get["latitude"] == 5.3350
+            assert data_get["longitude"] == -4.0020
+            assert data_get["livreur_id"] == 42
+    finally:
+        app.dependency_overrides.clear()

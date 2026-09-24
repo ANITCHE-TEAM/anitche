@@ -121,11 +121,17 @@ class VarianteVendeurCreateSerializer(serializers.ModelSerializer):
         quantite_initiale = validated_data.pop('quantite_initiale', 0)
         seuil_alerte = validated_data.pop('seuil_alerte', 5)
         variante = super().create(validated_data)
-        
+
         stock, _ = Stock.objects.get_or_create(variante=variante)
         stock.quantite_disponible = quantite_initiale
         stock.seuil_alerte = seuil_alerte
         stock.save()
+        # Sans cette ligne, la réponse API peut sérialiser une version en
+        # cache de `variante.stock` antérieure à la mise à jour ci-dessus
+        # (quantite_disponible=0) même si la valeur réellement persistée en
+        # base est correcte — la réponse mentirait au vendeur sur son
+        # propre stock qu'il vient de créer.
+        variante.stock = stock
         return variante
 
 

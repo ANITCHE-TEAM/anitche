@@ -19,9 +19,14 @@ class LivraisonSerializer(serializers.ModelSerializer):
             "id", "commande", "livreur", "status", "adresse_livraison",
             "date_expedition", "date_livraison", "created_at", "updated_at"
         ]
+        # `livreur` et `status` ne doivent jamais être modifiés par écriture
+        # directe de serializer : le changement de statut passe uniquement
+        # par Livraison.changer_status(), qui historise et déclenche le
+        # signal métier. Les laisser modifiables ici serait une porte de
+        # contournement si une vue d'update générique était ajoutée plus tard.
         read_only_fields = [
-            "id", "commande", "date_expedition", "date_livraison",
-            "created_at", "updated_at"
+            "id", "commande", "livreur", "status", "date_expedition",
+            "date_livraison", "created_at", "updated_at"
         ]
 
 

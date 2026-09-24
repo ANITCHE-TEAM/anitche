@@ -9,9 +9,11 @@ from .views import (
     VerificationOTPView,
     DemandeVendeurView,
     UploadKYCView,
+    TelechargerDocumentKYCView,
     DemandeMotDePasseOublieView,
     ConfirmationMotDePasseOublieView,
-    ConnexionGoogleView
+    ConnexionGoogleView,
+    LogoutView
 )
 
 # =====================================================
@@ -77,6 +79,14 @@ urlpatterns = [
         name='upload-kyc'
     ),
 
+    # Téléchargement contrôlé d'un document KYC (propriétaire ou admin
+    # uniquement) — remplace l'accès direct via MEDIA_URL.
+    path(
+        'kyc/<int:utilisateur_id>/<str:champ>/',
+        TelechargerDocumentKYCView.as_view(),
+        name='kyc-telecharger'
+    ),
+
     # Première étape de la réinitialisation
     # du mot de passe : demande d'un OTP.
     path(
@@ -94,4 +104,7 @@ urlpatterns = [
     ),
     # Route vers connexkon via compte google
     path('connexion-google/', ConnexionGoogleView.as_view(), name='connexion-google'),
+
+    # Déconnexion : révoque le refresh token fourni.
+    path('deconnexion/', LogoutView.as_view(), name='deconnexion'),
 ]

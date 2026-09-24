@@ -56,40 +56,69 @@ class CompteFidelite(models.Model):
             return
 
         with transaction.atomic():
-            self.solde_points += points
-            self.points_cumules_total += points
-            self.actualiser_palier()
-            self.save(update_fields=["solde_points", "points_cumules_total", "palier", "date_mise_a_jour"])
+            # Verrou pessimiste : deux crédits concurrents sur le même compte
+            # (ex. deux commandes validées au même instant) doivent s'appliquer
+            # l'un après l'autre sur le solde à jour, pas sur une copie périmée.
+            compte = CompteFidelite.objects.select_for_update().get(pk=self.pk)
+
+            compte.solde_points += points
+            compte.points_cumules_total += points
+            compte.actualiser_palier()
+            compte.save(update_fields=["solde_points", "points_cumules_total", "palier", "date_mise_a_jour"])
 
             TransactionFidelite.objects.create(
-                compte=self,
+                compte=compte,
                 type_transaction=TransactionFidelite.TypeTransaction.GAIN,
                 points=points,
-                solde_apres=self.solde_points,
+                solde_apres=compte.solde_points,
                 description=description,
                 reference_externe=reference_externe,
             )
 
-    def debiter_points(self, points, description="Échange de points contre coupon", reference_externe=""):
-        """Débite des points si le solde est suffisant."""
+        # Répercuter l'état à jour sur l'instance appelante.
+        self.solde_points = compte.solde_points
+        self.points_cumules_total = compte.points_cumules_total
+        self.palier = compte.palier
+
+    def debiter_points(self, points, description="Échange de points contre coupon", reference_externe="", type_transaction=None):
+        """Débite des points si le solde est suffisant.
+
+        SÉCURITÉ : la vérification du solde et le débit doivent se faire sur
+        la même ligne verrouillée (select_for_update), sinon deux requêtes
+        concurrentes (double-clic, replay) peuvent toutes deux lire le même
+        solde, passer la vérification, et déboucher chacune sur un débit —
+        double dépense de points / coupon émis en trop.
+
+        `type_transaction` permet à un appelant (ex: la reprise de points
+        suite à un remboursement, voir signals.py) d'auditer correctement
+        le mouvement plutôt que de le classer à tort comme une conversion
+        volontaire en coupon (TypeTransaction.DEPENSE, la valeur par défaut
+        conservée pour ne pas casser l'appelant historique).
+        """
         if points <= 0:
             raise ValidationError("Le nombre de points à débiter doit être supérieur à 0.")
 
-        if self.solde_points < points:
-            raise ValidationError(f"Solde insuffisant : {self.solde_points} points disponibles, {points} requis.")
-
         with transaction.atomic():
-            self.solde_points -= points
-            self.save(update_fields=["solde_points", "date_mise_a_jour"])
+            compte = CompteFidelite.objects.select_for_update().get(pk=self.pk)
+
+            if compte.solde_points < points:
+                raise ValidationError(
+                    f"Solde insuffisant : {compte.solde_points} points disponibles, {points} requis."
+                )
+
+            compte.solde_points -= points
+            compte.save(update_fields=["solde_points", "date_mise_a_jour"])
 
             TransactionFidelite.objects.create(
-                compte=self,
-                type_transaction=TransactionFidelite.TypeTransaction.DEPENSE,
+                compte=compte,
+                type_transaction=type_transaction or TransactionFidelite.TypeTransaction.DEPENSE,
                 points=-points,
-                solde_apres=self.solde_points,
+                solde_apres=compte.solde_points,
                 description=description,
                 reference_externe=reference_externe,
             )
+
+        self.solde_points = compte.solde_points
 
 
 class TransactionFidelite(models.Model):

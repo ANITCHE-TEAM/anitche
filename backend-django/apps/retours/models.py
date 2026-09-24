@@ -4,6 +4,8 @@ from django.db import models, transaction
 from django.conf import settings
 from django.utils import timezone
 
+from apps.core.validators import validateur_image_standard
+
 
 class DemandeRetour(models.Model):
     """Demande de retour et de remboursement / échange initiée par un client suite à une livraison."""
@@ -158,7 +160,10 @@ class PhotoRetour(models.Model):
         verbose_name="Demande de retour",
     )
 
-    image = models.ImageField(upload_to="retours/preuves/%Y/%m/")
+    image = models.ImageField(
+        upload_to="retours/preuves/%Y/%m/",
+        validators=[validateur_image_standard],
+    )
     date_ajout = models.DateTimeField(auto_now_add=True)
 
     class Meta:

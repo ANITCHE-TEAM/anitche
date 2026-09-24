@@ -17,11 +17,28 @@ STAFF_ROLES = [Role.ADMIN, Role.SUPER_ADMIN, Role.SUPPORT]
 def get_visible_tickets(user):
     """Point unique de la règle de visibilité par rôle.
     Réutilisé partout où on doit vérifier l'accès à un ticket,
-    pour éviter que la règle diverge entre les vues."""
+    pour éviter que la règle diverge entre les vues.
+
+    SÉCURITÉ / TROU CORRIGÉ : le vendeur doit voir à la fois les litiges
+    ouverts CONTRE sa boutique (vendor__proprietaire=user, ex: un client
+    qui se plaint) ET les tickets qu'il a lui-même ouverts en tant
+    qu'utilisateur (created_by=user, ex: un souci de paiement ou de
+    compte, catégorie sans rapport avec une boutique — `vendor` reste
+    alors à null car ce champ est en lecture seule côté API, voir
+    SupportTicketSerializer). Avant ce correctif, un vendeur qui
+    ouvrait son propre ticket ne pouvait plus jamais le revoir ni y
+    répondre une fois créé : get_visible_tickets() ne renvoyait que les
+    tickets liés à `vendor`, jamais ceux dont il est `created_by` — un
+    vendeur se retrouvait enfermé hors de sa propre réclamation, y
+    compris pour TicketMessageListCreateView et TicketAttachmentListCreateView
+    qui s'appuient toutes deux sur cette même fonction pour l'accès.
+    """
     if user.role in [Role.ADMIN, Role.SUPER_ADMIN]:
         return SupportTicket.objects.all()
     if user.role == Role.VENDEUR:
-        return SupportTicket.objects.filter(vendor__proprietaire=user)
+        return SupportTicket.objects.filter(
+            models.Q(vendor__proprietaire=user) | models.Q(created_by=user)
+        )
     if user.role == Role.SUPPORT:
         return SupportTicket.objects.filter(
             models.Q(assigned_to=user) | models.Q(assigned_to__isnull=True)
@@ -42,6 +59,7 @@ class SupportTicketListCreateView(generics.ListCreateAPIView):
         serializer.save(created_by=self.request.user)
 
 
+# views.py
 class SupportRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = SupportTicketSerializer
@@ -49,14 +67,18 @@ class SupportRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
     def get_queryset(self):
         return get_visible_tickets(self.request.user)
 
-    def perform_destroy(self, instance):
-        """Empêche la suppression physique d'un ticket par un non-staff.
+    def perform_update(self, serializer):
+        """La visibilité (get_visible_tickets) autorise à VOIR ce ticket,
+        pas à le MODIFIER. Seul le staff peut ajuster category/priority
+        (les seuls champs encore modifiables côté serializer) ; tout le
+        reste est de toute façon verrouillé en read_only_fields."""
+        if self.request.user.role not in STAFF_ROLES:
+            raise PermissionDenied(
+                "Seul le staff peut modifier la catégorie ou la priorité d'un ticket."
+            )
+        serializer.save()
 
-        Un ticket = trace/historique potentiellement utile en cas de litige.
-        Un client qui veut "en finir" avec son ticket doit le FERMER
-        (status=CLOSED via SupportTicketChangeStatusView), pas le supprimer.
-        Seul le staff (admin/super_admin/support) peut réellement l'effacer.
-        """
+    def perform_destroy(self, instance):
         if self.request.user.role not in STAFF_ROLES:
             raise PermissionDenied("Seul le staff peut supprimer un ticket.")
         instance.delete()
@@ -186,7 +208,10 @@ class TicketAttachmentListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         message = self._get_accessible_message()
-        return TicketAttachment.objects.filter(message=message)
+        # Sans tri explicite, DRF émet UnorderedObjectListWarning : la
+        # pagination sur un queryset non trié peut sauter ou répéter des
+        # lignes d'une page à l'autre.
+        return TicketAttachment.objects.filter(message=message).order_by("created_at")
 
     def perform_create(self, serializer):
         message = self._get_accessible_message()

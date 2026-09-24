@@ -1,12 +1,14 @@
 import secrets
 import logging
-from django.db import models
+from django.db import models, transaction
 from datetime import timedelta
 from django.utils import timezone
 
 from .managers import UtilisateurManager
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
 from django.contrib.auth.hashers import make_password, check_password
+from apps.core.validators import validateur_document_kyc, validateur_image_standard
+from apps.core.storage import CheminUploadUUID
 
 logger_securite = logging.getLogger('securite')
 
@@ -124,6 +126,25 @@ class Utilisateur(AbstractBaseUser, PermissionsMixin):
 # DOSSIER KYC
 # ============================
 
+class TypePieceIdentite(models.TextChoices):
+    """
+    Types de pièce d'identité acceptés pour le KYC.
+
+    Détermine si un verso est obligatoire, refusé ou sans objet
+    (voir DocumentKYCSerializer.validate) :
+    - recto/verso obligatoires : CNI, permis, carte consulaire, carte résident ;
+    - une seule page (verso refusé) : passeport (page d'identité), attestation
+      d'identité.
+    """
+
+    CNI = 'cni', "Carte nationale d'identité"
+    PASSEPORT = 'passeport', 'Passeport'
+    PERMIS = 'permis', 'Permis de conduire'
+    CARTE_CONSULAIRE = 'carte_consulaire', 'Carte consulaire'
+    CARTE_RESIDENT = 'carte_resident', 'Carte de résident'
+    ATTESTATION_IDENTITE = 'attestation_identite', "Attestation d'identité"
+
+
 class DocumentKYC(models.Model):
     """
     Ensemble des documents transmis par un utilisateur
@@ -136,9 +157,37 @@ class DocumentKYC(models.Model):
         related_name='dossier_kyc',
     )
 
-    # Documents nécessaires à la vérification.
-    piece_identite = models.FileField(upload_to='kyc/pieces_identite/')
-    selfie = models.ImageField(upload_to='kyc/selfies/')
+    # Détermine, via DocumentKYCSerializer, si piece_identite_verso est
+    # obligatoire, refusé ou sans objet. Pas de default : la valeur doit
+    # être explicitement fournie par le client à l'upload (voir la
+    # migration pour la valeur de bascule des dossiers déjà existants).
+    type_piece = models.CharField(
+        max_length=30,
+        choices=TypePieceIdentite.choices,
+    )
+
+    # Documents nécessaires à la vérification. Le verso reste optionnel
+    # au niveau du modèle (pas toutes les pièces n'en ont un) — c'est
+    # DocumentKYCSerializer.validate qui applique la règle réelle,
+    # conditionnelle à type_piece.
+    # upload_to en UUID (voir apps.core.storage.CheminUploadUUID) : le nom
+    # d'origine du fichier n'est jamais conservé, ni comme nom de fichier
+    # stocké, ni comme indice dans le chemin — chaque face a son propre
+    # sous-dossier.
+    piece_identite_recto = models.FileField(
+        upload_to=CheminUploadUUID('kyc/pieces_identite/recto'),
+        validators=[validateur_document_kyc],
+    )
+    piece_identite_verso = models.FileField(
+        upload_to=CheminUploadUUID('kyc/pieces_identite/verso'),
+        validators=[validateur_document_kyc],
+        null=True,
+        blank=True,
+    )
+    selfie = models.ImageField(
+        upload_to=CheminUploadUUID('kyc/selfies'),
+        validators=[validateur_image_standard],
+    )
 
     numero_mobile_money = models.CharField(max_length=20)
     adresse = models.TextField()
@@ -254,33 +303,44 @@ class CodeOTP(models.Model):
         - expiré
         - nombre maximal de tentatives
         - correspondance avec le hash enregistré
+
+        CONCURRENCE : verrouille la ligne (select_for_update) le temps de
+        la vérification + de l'incrément de nombre_tentatives. Sans ce
+        verrou, deux requêtes de vérification simultanées peuvent lire la
+        même valeur de nombre_tentatives avant que l'une des deux
+        n'enregistre son incrément, ce qui permet de dépasser
+        NOMBRE_TENTATIVES_MAX d'une unité (perte de mise à jour classique
+        en lecture-puis-écriture concurrente).
         """
 
-        if self.utilise:
-            return False, "Ce code a déjà été utilisé."
+        with transaction.atomic():
+            otp = CodeOTP.objects.select_for_update().get(pk=self.pk)
 
-        if timezone.now() > self.date_expiration:
-            return False, "Ce code a expiré."
+            if otp.utilise:
+                return False, "Ce code a déjà été utilisé."
 
-        if self.nombre_tentatives >= self.NOMBRE_TENTATIVES_MAX:
-            logger_securite.warning(
-                "Verrouillage OTP : nombre maximal de tentatives atteint "
-                "(otp_id=%s, utilisateur_id=%s, type_usage=%s)",
-                self.id, self.utilisateur_id, self.type_usage,
-            )
-            return False, "Nombre maximal de tentatives atteint."
+            if timezone.now() > otp.date_expiration:
+                return False, "Ce code a expiré."
 
-        # Chaque tentative est comptabilisée.
-        self.nombre_tentatives += 1
-        self.save(update_fields=['nombre_tentatives'])
+            if otp.nombre_tentatives >= self.NOMBRE_TENTATIVES_MAX:
+                logger_securite.warning(
+                    "Verrouillage OTP : nombre maximal de tentatives atteint "
+                    "(otp_id=%s, utilisateur_id=%s, type_usage=%s)",
+                    otp.id, otp.utilisateur_id, otp.type_usage,
+                )
+                return False, "Nombre maximal de tentatives atteint."
 
-        if check_password(code_saisi, self.code_hash):
-            self.utilise = True
-            self.save(update_fields=['utilise'])
+            # Chaque tentative est comptabilisée.
+            otp.nombre_tentatives += 1
+            otp.save(update_fields=['nombre_tentatives'])
 
-            return True, "Code valide."
+            if check_password(code_saisi, otp.code_hash):
+                otp.utilise = True
+                otp.save(update_fields=['utilise'])
 
-        return False, "Code incorrect."
+                return True, "Code valide."
+
+            return False, "Code incorrect."
 
     def __str__(self):
         return f"OTP {self.type_usage} — {self.utilisateur.email}"

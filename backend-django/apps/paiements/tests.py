@@ -147,6 +147,21 @@ class PaiementAPITestCase(BasePaiementTestCase):
         self.assertEqual(Decimal(str(response.data["montant"])), Decimal("20000.00"))
         self.assertEqual(str(response.data["groupe_commande"]), str(self.groupe.id))
 
+    def test_rejet_double_initiation_paiement_meme_groupe(self):
+        self.client.force_authenticate(user=self.client1)
+        url = reverse("paiements:initier-paiement")
+        data = {
+            "groupe_commande_id": str(self.groupe.id),
+            "methode": "orange_money",
+        }
+
+        premiere = self.client.post(url, data, format="json")
+        self.assertEqual(premiere.status_code, status.HTTP_201_CREATED)
+
+        seconde = self.client.post(url, data, format="json")
+        self.assertEqual(seconde.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Paiement.objects.filter(groupe_commande=self.groupe).count(), 1)
+
     def test_initier_paiement_espece_livraison_confirme_automatiquement(self):
         self.client.force_authenticate(user=self.client1)
         url = reverse("paiements:initier-paiement")
@@ -192,6 +207,25 @@ class PaiementAPITestCase(BasePaiementTestCase):
         response = self.client.post(url, data, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_rejet_double_initiation_paiement_meme_commande(self):
+        """A04:2025 : un paiement déjà EN_ATTENTE sur la commande doit
+        bloquer toute nouvelle initiation — sinon rien n'empêche un
+        double-débit si les deux sessions de paiement aboutissent
+        réellement chez la passerelle."""
+        self.client.force_authenticate(user=self.client1)
+        url = reverse("paiements:initier-paiement")
+        data = {
+            "commande_id": str(self.commande1.id),
+            "methode": "wave",
+        }
+
+        premiere = self.client.post(url, data, format="json")
+        self.assertEqual(premiere.status_code, status.HTTP_201_CREATED)
+
+        seconde = self.client.post(url, data, format="json")
+        self.assertEqual(seconde.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Paiement.objects.filter(commande=self.commande1).count(), 1)
+
     def test_liste_paiements_isolation_clients(self):
         p1 = Paiement.objects.create(
             client=self.client1,
@@ -218,14 +252,14 @@ class PaiementAPITestCase(BasePaiementTestCase):
         url = reverse("paiements:paiement-liste")
         res1 = self.client.get(url)
         self.assertEqual(res1.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(res1.data), 1)
-        self.assertEqual(res1.data[0]["id"], str(p1.id))
+        self.assertEqual(len(res1.data["results"]), 1)
+        self.assertEqual(res1.data["results"][0]["id"], str(p1.id))
 
         # Admin voit tous les paiements
         self.client.force_authenticate(user=self.admin)
         res_admin = self.client.get(url)
         self.assertEqual(res_admin.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(res_admin.data), 2)
+        self.assertEqual(len(res_admin.data["results"]), 2)
 
 
 class WebhookPaiementTestCase(BasePaiementTestCase):
@@ -260,6 +294,7 @@ class WebhookPaiementTestCase(BasePaiementTestCase):
             "reference": self.paiement.reference,
             "statut": "succes",
             "transaction_id_externe": "wave_trx_998877",
+            "montant": "15000.00",
             "metadata": {"frais": "150"},
         }
 
@@ -320,6 +355,7 @@ class WebhookPaiementTestCase(BasePaiementTestCase):
             "evenement_id": "evt_wave_unique_99",
             "reference": self.paiement.reference,
             "statut": "succes",
+            "montant": "15000.00",
         }
 
         res1 = self._poster_webhook_signe(url, "wave", payload)
@@ -328,6 +364,41 @@ class WebhookPaiementTestCase(BasePaiementTestCase):
         res2 = self._poster_webhook_signe(url, "wave", payload)
         self.assertEqual(res2.status_code, status.HTTP_200_OK)
         self.assertEqual(JournalWebhook.objects.filter(evenement_id="evt_wave_unique_99").count(), 1)
+
+    def test_webhook_succes_sans_montant_refuse(self):
+        """A08:2025 : un webhook 'succes' sans montant ne doit jamais valider le paiement."""
+        url = reverse("paiements:webhook-paiement", kwargs={"fournisseur": "wave"})
+        payload = {
+            "evenement_id": "evt_wave_sans_montant",
+            "reference": self.paiement.reference,
+            "statut": "succes",
+        }
+
+        response = self._poster_webhook_signe(url, "wave", payload)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.paiement.refresh_from_db()
+        self.assertEqual(self.paiement.statut, Paiement.Statut.EN_ATTENTE)
+
+    def test_webhook_succes_montant_incorrect_refuse(self):
+        """A08:2025 : un montant reçu différent du montant dû ne doit jamais valider le paiement
+        (rejeu avec montant modifié, passerelle compromise ou mal intégrée)."""
+        url = reverse("paiements:webhook-paiement", kwargs={"fournisseur": "wave"})
+        payload = {
+            "evenement_id": "evt_wave_montant_truque",
+            "reference": self.paiement.reference,
+            "statut": "succes",
+            "montant": "1.00",
+        }
+
+        response = self._poster_webhook_signe(url, "wave", payload)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.paiement.refresh_from_db()
+        self.assertEqual(self.paiement.statut, Paiement.Statut.EN_ATTENTE)
+
+        journal = JournalWebhook.objects.get(evenement_id="evt_wave_montant_truque")
+        self.assertEqual(journal.statut_traitement, JournalWebhook.StatutTraitement.ERREUR)
 
     def test_webhook_echec_met_a_jour_statut(self):
         url = reverse("paiements:webhook-paiement", kwargs={"fournisseur": "orange_money"})
@@ -347,3 +418,16 @@ class WebhookPaiementTestCase(BasePaiementTestCase):
 
         self.commande1.refresh_from_db()
         self.assertEqual(self.commande1.status, Commande.Status.CREEE)
+
+
+class PaiementAdminTestCase(APITestCase):
+    """F-14 : le Django admin ne doit jamais permettre de valider un
+    paiement sans passer par ServicePaiement (HMAC, vérification du
+    montant, idempotence)."""
+
+    def test_statut_paiement_readonly_dans_admin(self):
+        from apps.paiements.admin import PaiementAdmin
+        from django.contrib.admin.sites import AdminSite
+
+        admin_instance = PaiementAdmin(Paiement, AdminSite())
+        self.assertIn("statut", admin_instance.readonly_fields)

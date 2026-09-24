@@ -25,12 +25,21 @@ class Panier(models.Model):
 
     @property
     def total(self):
-        """Montant total du panier en FCFA recalculé dynamiquement."""
+        """Montant total du panier en FCFA recalculé dynamiquement.
+
+        Retourne 0 sans requête DB pour une instance non encore
+        persistée (pk=None) : la relation inverse `items` n'est
+        interrogeable qu'une fois l'objet sauvegardé.
+        """
+        if self.pk is None:
+            return Decimal("0.00")
         return sum((item.sous_total for item in self.items.select_related('variante').all()), Decimal("0.00"))
 
     @property
     def nombre_articles(self):
-        """Nombre total d'articles dans le panier."""
+        """Nombre total d'articles dans le panier (0 si non persisté)."""
+        if self.pk is None:
+            return 0
         return sum(item.quantite for item in self.items.all())
 
     def __str__(self):

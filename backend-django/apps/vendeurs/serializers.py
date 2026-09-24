@@ -1,3 +1,4 @@
+from django.urls import reverse
 from rest_framework import serializers
 
 from apps.utilisateurs.models import DocumentKYC, Utilisateur
@@ -89,16 +90,44 @@ class DossierKYCLectureSerializer(serializers.ModelSerializer):
 
     Défini ici plutôt que dans utilisateurs : c'est un besoin du back-office
     vendeur, le module utilisateurs n'a pas à changer pour ça.
+
+    SÉCURITÉ : piece_identite_recto/verso et selfie ne sont JAMAIS exposés
+    comme URL directe (MEDIA_URL) — seulement comme lien vers
+    TelechargerDocumentKYCView, qui revérifie à chaque appel que le
+    demandeur est bien le propriétaire ou un admin. Exposer l'URL brute
+    ici reviendrait à contourner ce contrôle.
     """
+
+    piece_identite_recto_url = serializers.SerializerMethodField()
+    piece_identite_verso_url = serializers.SerializerMethodField()
+    selfie_url = serializers.SerializerMethodField()
 
     class Meta:
         model = DocumentKYC
         fields = [
-            'piece_identite', 'selfie', 'numero_mobile_money', 'adresse',
+            'type_piece', 'piece_identite_recto_url', 'piece_identite_verso_url',
+            'selfie_url', 'numero_mobile_money', 'adresse',
             'compte_bancaire', 'date_soumission', 'date_traitement',
             'commentaire_admin',
         ]
         read_only_fields = fields
+
+    def _url_document(self, obj, champ):
+        request = self.context.get('request')
+        chemin = reverse(
+            'kyc-telecharger',
+            kwargs={'utilisateur_id': obj.utilisateur_id, 'champ': champ},
+        )
+        return request.build_absolute_uri(chemin) if request else chemin
+
+    def get_piece_identite_recto_url(self, obj):
+        return self._url_document(obj, 'piece_identite_recto') if obj.piece_identite_recto else None
+
+    def get_piece_identite_verso_url(self, obj):
+        return self._url_document(obj, 'piece_identite_verso') if obj.piece_identite_verso else None
+
+    def get_selfie_url(self, obj):
+        return self._url_document(obj, 'selfie') if obj.selfie else None
 
 
 class DemandeVendeurSerializer(serializers.ModelSerializer):

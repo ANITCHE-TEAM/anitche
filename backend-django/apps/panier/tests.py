@@ -45,23 +45,39 @@ class PanierTestCase(APITestCase):
             statut_kyc=statut_kyc,
         )
 
-    # ---------- Création implicite du panier ----------
+    # ---------- Création du panier : uniquement sur écriture réelle ----------
 
-    def test_authenticated_user_gets_a_panier(self):
+    def test_consulter_panier_authentifie_ne_cree_rien_en_base(self):
+        """A04:2025 : une simple consultation (GET) ne doit jamais créer de
+        Panier en base — seul un vrai ajout d'article le justifie."""
         self.client.force_authenticate(user=self.client_user)
         url = reverse("panier:panier-detail")
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["total"], "0.00")
+        self.assertFalse(Panier.objects.filter(utilisateur=self.client_user).exists())
+
+    def test_consulter_panier_anonyme_ne_cree_rien_en_base(self):
+        url = reverse("panier:panier-detail")
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(Panier.objects.filter(utilisateur__isnull=True).exists())
+
+    def test_ajouter_article_cree_bien_le_panier(self):
+        """Le premier ajout réel doit, lui, créer le panier."""
+        self.client.force_authenticate(user=self.client_user)
+        url = reverse("panier:panier-items")
+        response = self.client.post(url, {"variante": self.variante.id, "quantite": 1})
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertTrue(Panier.objects.filter(utilisateur=self.client_user).exists())
 
-    def test_anonymous_visitor_gets_a_panier(self):
-        url = reverse("panier:panier-detail")
-        response = self.client.get(url)
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertTrue(Panier.objects.filter(utilisateur__isnull=True).exists())
-
     def test_authenticated_user_always_gets_same_panier(self):
+        """Une fois le panier réellement créé (premier ajout), toute
+        consultation ultérieure doit renvoyer ce même panier persisté —
+        pas une nouvelle instance éphémère à chaque fois."""
         self.client.force_authenticate(user=self.client_user)
+        self.client.post(reverse("panier:panier-items"), {"variante": self.variante.id, "quantite": 1})
+
         url = reverse("panier:panier-detail")
         response1 = self.client.get(url)
         response2 = self.client.get(url)
@@ -118,7 +134,7 @@ class PanierTestCase(APITestCase):
         url = reverse("panier:panier-items")
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 0)
+        self.assertEqual(len(response.data["results"]), 0)
 
     def test_user_cannot_modify_others_item(self):
         other_panier = Panier.objects.create(utilisateur=self.other_client)

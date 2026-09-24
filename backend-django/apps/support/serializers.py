@@ -2,9 +2,13 @@ from rest_framework import serializers
 from .models import SupportTicket, TicketMessage, TicketAttachment
 
 
+# serializers.py
 class SupportTicketSerializer(serializers.ModelSerializer):
-    """Ticket de support. status modifiable seulement via l'action dédiée,
-    pas via ce serializer."""
+    """Ticket de support. Le contenu original (subject/description/vendor/
+    product) est immuable après création : le client corrige ou précise via
+    un nouveau message (TicketMessage), jamais en réécrivant la réclamation
+    initiale. category/priority restent modifiables, mais uniquement par le
+    staff (voir SupportRetrieveUpdateDestroyView.perform_update)."""
 
     class Meta:
         model = SupportTicket
@@ -19,6 +23,7 @@ class SupportTicketSerializer(serializers.ModelSerializer):
             "id", "ticket_number", "created_by",
             "assigned_to", "status", "created_at", "updated_at",
             "satisfaction_rating",
+            "subject", "description", "vendor", "product",
         ]
 
 

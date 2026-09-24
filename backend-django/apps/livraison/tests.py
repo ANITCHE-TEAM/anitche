@@ -51,8 +51,8 @@ class LivraisonTestCase(APITestCase):
         response = self.client.get(reverse("livraison:livraison-list"))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 1)
-        self.assertEqual(response.data[0]["id"], str(self.livraison.id))
+        self.assertEqual(len(response.data["results"]), 1)
+        self.assertEqual(response.data["results"][0]["id"], str(self.livraison.id))
 
     def test_livreur_ne_voit_que_les_livraisons_assignees(self):
         autre_commande = Commande.objects.create(
@@ -66,8 +66,8 @@ class LivraisonTestCase(APITestCase):
         response = self.client.get(reverse("livraison:livraison-list"))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 1)
-        self.assertEqual(response.data[0]["id"], str(self.livraison.id))
+        self.assertEqual(len(response.data["results"]), 1)
+        self.assertEqual(response.data["results"][0]["id"], str(self.livraison.id))
 
     def test_admin_voit_toutes_les_livraisons(self):
         autre_commande = Commande.objects.create(
@@ -79,7 +79,7 @@ class LivraisonTestCase(APITestCase):
         response = self.client.get(reverse("livraison:livraison-list"))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 2)
+        self.assertEqual(len(response.data["results"]), 2)
 
     def test_liste_livraisons_non_authentifie_refuse(self):
         response = self.client.get(reverse("livraison:livraison-list"))
@@ -176,7 +176,7 @@ class LivraisonTestCase(APITestCase):
         response = self.client.get(url)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 2)
+        self.assertEqual(len(response.data["results"]), 2)
 
     # ---------- Modèle : signal ----------
 
@@ -198,3 +198,56 @@ class LivraisonTestCase(APITestCase):
         self.assertEqual(signaux_recus[0]["nouveau_status"], Livraison.Status.EXPEDIEE)
         self.assertEqual(signaux_recus[0]["ancien_status"], Livraison.Status.EN_ATTENTE)
         self.assertEqual(signaux_recus[0]["effectue_par"], self.livreur)
+
+    # ---------- F-05 : validation des transitions de statut ----------
+
+    def test_livreur_ne_peut_pas_sauter_une_etape(self):
+        """EN_ATTENTE -> LIVREE directement doit être refusé pour un livreur."""
+        # self.livraison est créée dans setUp avec le statut par défaut EN_ATTENTE.
+        self.client.force_authenticate(user=self.livreur)
+
+        response = self.client.patch(
+            reverse("livraison:livraison-changer-status", kwargs={"pk": self.livraison.pk}),
+            {"status": "livree"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.livraison.refresh_from_db()
+        self.assertEqual(self.livraison.status, Livraison.Status.EN_ATTENTE)
+
+    def test_livreur_ne_peut_pas_faire_regresser_le_statut(self):
+        """EN_COURS -> EN_ATTENTE doit être refusé pour un livreur."""
+        self.livraison.status = Livraison.Status.EN_COURS
+        self.livraison.save(update_fields=["status"])
+
+        self.client.force_authenticate(user=self.livreur)
+
+        response = self.client.patch(
+            reverse("livraison:livraison-changer-status", kwargs={"pk": self.livraison.pk}),
+            {"status": "en_attente"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.livraison.refresh_from_db()
+        self.assertEqual(self.livraison.status, Livraison.Status.EN_COURS)
+
+    def test_admin_garde_la_main_sur_transition_libre(self):
+        """Un admin peut toujours corriger manuellement, même hors séquence normale."""
+        # self.livraison : statut par défaut EN_ATTENTE (voir setUp).
+        self.client.force_authenticate(user=self.admin)
+
+        response = self.client.patch(
+            reverse("livraison:livraison-changer-status", kwargs={"pk": self.livraison.pk}),
+            {"status": "en_cours"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.livraison.refresh_from_db()
+        self.assertEqual(self.livraison.status, Livraison.Status.EN_COURS)
+
+    def test_status_livraison_readonly_dans_admin(self):
+        from apps.livraison.admin import LivraisonAdmin
+        from django.contrib.admin.sites import AdminSite
+
+        admin_instance = LivraisonAdmin(Livraison, AdminSite())
+        self.assertIn("status", admin_instance.readonly_fields)

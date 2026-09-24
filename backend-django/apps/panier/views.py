@@ -6,9 +6,33 @@ from .models import Panier, PanierItem
 from .serializers import PanierSerializer, PanierItemSerializer
 
 
+def get_panier_existant(request):
+    """Cherche un panier existant SANS jamais en créer un nouveau.
+
+    Utilisée pour toute lecture (GET) : consulter un panier ne doit
+    jamais avoir d'effet de bord en base. Retourne None si aucun panier
+    n'existe encore pour cet utilisateur/cette session.
+    """
+    if request.user.is_authenticated:
+        return Panier.objects.filter(utilisateur=request.user).first()
+
+    session_key = request.session.session_key
+    if not session_key:
+        return None
+    return Panier.objects.filter(session_key=session_key).first()
+
+
 def get_or_create_panier(request):
     """Récupère le panier de l'utilisateur connecté, ou celui du visiteur
-    anonyme via sa session. Crée le panier s'il n'existe pas encore."""
+    anonyme via sa session. Crée le panier s'il n'existe pas encore.
+
+    Réservée aux actions d'écriture réelles (ajouter un article) : sans
+    cette distinction, les vues en AllowAny créaient un nouveau Panier en
+    base sur un simple GET, y compris pour un client qui ne conserve pas
+    ses cookies (bot, script sans session persistée) — une ligne Panier
+    orpheline à chaque requête, sans limite (A04:2025 — Unrestricted
+    Resource Consumption).
+    """
 
     if request.user.is_authenticated:
         panier, _ = Panier.objects.get_or_create(utilisateur=request.user)
@@ -28,7 +52,13 @@ class PanierDetailView(generics.RetrieveAPIView):
     serializer_class = PanierSerializer
 
     def get_object(self):
-        return get_or_create_panier(self.request)
+        panier = get_panier_existant(self.request)
+        if panier is not None:
+            return panier
+        # Aucun panier n'existe encore : on en renvoie un vide, non
+        # persisté, plutôt que d'en créer un juste pour cette consultation.
+        utilisateur = self.request.user if self.request.user.is_authenticated else None
+        return Panier(utilisateur=utilisateur)
 
 
 class PanierItemListCreateView(generics.ListCreateAPIView):
@@ -36,7 +66,9 @@ class PanierItemListCreateView(generics.ListCreateAPIView):
     serializer_class = PanierItemSerializer
 
     def get_queryset(self):
-        panier = get_or_create_panier(self.request)
+        panier = get_panier_existant(self.request)
+        if panier is None:
+            return PanierItem.objects.none()
         return PanierItem.objects.filter(panier=panier).select_related('variante__produit', 'variante__stock')
 
     def perform_create(self, serializer):
@@ -69,7 +101,9 @@ class PanierItemDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = PanierItemSerializer
 
     def get_queryset(self):
-        panier = get_or_create_panier(self.request)
+        panier = get_panier_existant(self.request)
+        if panier is None:
+            return PanierItem.objects.none()
         return PanierItem.objects.filter(panier=panier).select_related('variante__produit', 'variante__stock')
 
     def perform_update(self, serializer):

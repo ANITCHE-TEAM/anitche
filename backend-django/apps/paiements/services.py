@@ -1,6 +1,7 @@
 import logging
 import uuid
 from decimal import Decimal
+from django.db import IntegrityError
 from django.db import transaction
 from django.utils import timezone
 
@@ -83,28 +84,27 @@ class ServicePaiement:
         return paiement
 
     @staticmethod
-    def traiter_webhook(fournisseur, evenement_id, reference, statut, transaction_id_externe=None, payload=None, metadata=None):
+    def traiter_webhook(fournisseur, evenement_id, reference, statut, transaction_id_externe=None, montant_recu=None, payload=None, metadata=None):
         """Traite de façon idempotente les notifications des passerelles de paiement."""
         payload = payload or {}
         metadata = metadata or {}
 
-        # 1. Vérification d'idempotence
-        journal = JournalWebhook.objects.filter(
+        # 1. Vérification d'idempotence (get_or_create est atomique côté DB
+        # grâce à la contrainte unique (fournisseur, evenement_id) : deux
+        # requêtes concurrentes avec le même evenement_id ne peuvent jamais
+        # lever d'IntegrityError ici, Django gère la course en interne).
+        journal, cree = JournalWebhook.objects.get_or_create(
             fournisseur=fournisseur,
             evenement_id=evenement_id,
-        ).first()
+            defaults={
+                "payload": payload,
+                "statut_traitement": JournalWebhook.StatutTraitement.TRAITE,
+            },
+        )
 
-        if journal and journal.statut_traitement == JournalWebhook.StatutTraitement.TRAITE:
+        if not cree and journal.statut_traitement == JournalWebhook.StatutTraitement.TRAITE:
             logger.info(f"Webhook {fournisseur}:{evenement_id} déjà traité. Ignoré pour idempotence.")
             return True, "Événement déjà traité."
-
-        if not journal:
-            journal = JournalWebhook.objects.create(
-                fournisseur=fournisseur,
-                evenement_id=evenement_id,
-                payload=payload,
-                statut_traitement=JournalWebhook.StatutTraitement.TRAITE,
-            )
 
         # 2. Recherche du Paiement
         paiement = Paiement.objects.filter(reference=reference).first()
@@ -122,6 +122,24 @@ class ServicePaiement:
         # 3. Application de l'état
         try:
             if statut == "succes":
+                # Le montant confirmé par la passerelle doit correspondre au
+                # montant attendu en base : une passerelle compromise, mal
+                # intégrée, ou un rejeu avec un montant modifié ne doit
+                # jamais suffire à valider un paiement pour un montant
+                # inférieur (ou différent) de celui dû (A08:2025).
+                if montant_recu is not None and montant_recu != paiement.montant:
+                    journal.statut_traitement = JournalWebhook.StatutTraitement.ERREUR
+                    journal.erreur = (
+                        f"Montant reçu ({montant_recu}) différent du montant attendu "
+                        f"({paiement.montant}) pour le paiement {paiement.reference}."
+                    )
+                    journal.save(update_fields=["statut_traitement", "erreur"])
+                    logger.error(
+                        f"Webhook {fournisseur}:{evenement_id} rejeté : "
+                        f"écart de montant sur le paiement {paiement.reference}."
+                    )
+                    return False, journal.erreur
+
                 paiement.valider(
                     transaction_id_externe=transaction_id_externe or paiement.transaction_id_externe,
                     donnees_supplementaires=metadata,

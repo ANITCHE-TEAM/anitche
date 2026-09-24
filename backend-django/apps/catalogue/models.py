@@ -5,6 +5,7 @@ from django.utils import timezone
 from django.utils.text import slugify
 
 from apps.utilisateurs.models import Role, StatutKYC
+from apps.core.validators import validateur_image_standard
 
 
 class CategorieQuerySet(models.QuerySet):
@@ -22,7 +23,10 @@ class Categorie(models.Model):
     nom = models.CharField(max_length=100, unique=True)
     slug = models.SlugField(max_length=120, unique=True, blank=True)
     description = models.TextField(blank=True)
-    image = models.ImageField(upload_to='catalogue/categories/', null=True, blank=True)
+    image = models.ImageField(
+        upload_to='catalogue/categories/', null=True, blank=True,
+        validators=[validateur_image_standard],
+    )
 
     parent = models.ForeignKey(
         'self',
@@ -173,7 +177,10 @@ class ImageProduit(models.Model):
         verbose_name="Produit",
     )
 
-    image = models.ImageField(upload_to='catalogue/produits/%Y/%m/')
+    image = models.ImageField(
+        upload_to='catalogue/produits/%Y/%m/',
+        validators=[validateur_image_standard],
+    )
     est_principale = models.BooleanField(
         default=False,
         help_text="Image principale affichée sur les vignettes de recherche.",
@@ -327,9 +334,13 @@ class Stock(models.Model):
         self.refresh_from_db(fields=['quantite_disponible', 'date_mise_a_jour'])
 
     def incrementer(self, quantite=1):
-        """Incrémente le stock (retour, réapprovisionnement)."""
-        self.quantite_disponible += quantite
-        self.save(update_fields=['quantite_disponible', 'date_mise_a_jour'])
+        """Incrémente le stock (retour, réapprovisionnement), de façon atomique
+        au niveau base de données — même principe que decrementer()."""
+        Stock.objects.filter(pk=self.pk).update(
+            quantite_disponible=models.F('quantite_disponible') + quantite,
+            date_mise_a_jour=timezone.now(),
+        )
+        self.refresh_from_db(fields=['quantite_disponible', 'date_mise_a_jour'])
 
     def __str__(self):
         return f"Stock {self.variante.nom} : {self.quantite_disponible} unité(s)"

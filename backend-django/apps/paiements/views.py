@@ -146,6 +146,7 @@ class WebhookPaiementView(APIView):
             reference=serializer.validated_data["reference"],
             statut=serializer.validated_data["statut"],
             transaction_id_externe=serializer.validated_data.get("transaction_id_externe"),
+            montant_recu=serializer.validated_data.get("montant"),
             payload=request.data,
             metadata=serializer.validated_data.get("metadata", {}),
         )

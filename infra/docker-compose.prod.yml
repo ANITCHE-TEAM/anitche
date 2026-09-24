@@ -51,6 +51,13 @@ services:
       DB_HOST: db
       DB_PORT: 5432
       REDIS_URL: redis://redis:6379/0
+    volumes:
+      # MEDIA_ROOT (config/settings/base.py) = BASE_DIR/media = /app/media
+      # dans ce conteneur (WORKDIR /app, voir Dockerfile). Sans volume
+      # nommé, tout fichier KYC uploadé (recto/verso/selfie) est perdu au
+      # prochain rebuild/redeploy — seul backend-django sert ces fichiers
+      # (TelechargerDocumentKYCView), pas besoin de le monter ailleurs.
+      - anitche_media:/app/media
     depends_on:
       db:
         condition: service_healthy
@@ -125,12 +132,38 @@ services:
     restart: unless-stopped
     ports:
       - "80:80"
+      - "443:443"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # F-18 : certificats émis/renouvelés par le service "certbot"
+      # ci-dessous, partagés en lecture avec Nginx via ce volume commun.
+      - certbot_conf:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot:ro
     depends_on:
       - frontend
       - backend-django
       - backend-fastapi
 
+  # F-18 : renouvelle automatiquement le certificat Let's Encrypt toutes les
+  # 12h (certbot n'agit que si le certificat approche de son expiration —
+  # à 30 jours de l'échéance par défaut). L'émission INITIALE du certificat
+  # ne passe pas par ce service : voir infra/scripts/init-lets-encrypt.sh,
+  # à lancer une seule fois avant le tout premier démarrage de Nginx en 443.
+  certbot:
+    image: certbot/certbot
+    restart: unless-stopped
+    volumes:
+      - certbot_conf:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    entrypoint: >
+      sh -c "trap exit TERM;
+      while :; do
+        certbot renew --webroot -w /var/www/certbot --quiet;
+        sleep 12h & wait $${!};
+      done"
+
 volumes:
   anitche_pgdata:
+  anitche_media:
+  certbot_conf:
+  certbot_www:

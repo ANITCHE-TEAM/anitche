@@ -2,7 +2,7 @@ from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from apps.utilisateurs.models import DocumentKYC, Role, StatutKYC, Utilisateur
+from apps.utilisateurs.models import DocumentKYC, Role, StatutKYC, TypePieceIdentite, Utilisateur
 
 from .models import Boutique
 from .services import (
@@ -33,7 +33,8 @@ def creer_demandeur(email='demandeur@anitche.ci', avec_dossier=True):
     if avec_dossier:
         DocumentKYC.objects.create(
             utilisateur=utilisateur,
-            piece_identite='kyc/pieces_identite/cni.pdf',
+            type_piece=TypePieceIdentite.CNI,
+            piece_identite_recto='kyc/pieces_identite/cni.pdf',
             selfie='kyc/selfies/selfie.jpg',
             numero_mobile_money='0700000000',
             adresse='Cocody, Abidjan',
@@ -73,12 +74,30 @@ class BoutiqueModeleTests(TestCase):
         )
         self.assertFalse(boutique.est_publiable)
 
+    def test_creation_directe_refusee_pour_vendeur_non_valide(self):
+        """A04:2025 — défense en profondeur : même un appel ORM direct
+        (shell, script, tâche Celery), hors de toute vue/permission API,
+        doit être bloqué si le propriétaire n'est pas un vendeur validé."""
+        from django.core.exceptions import ValidationError
+
+        vendeur_non_valide = creer_utilisateur('non-valide@anitche.ci', role=Role.VENDEUR)
+        with self.assertRaises(ValidationError):
+            Boutique.objects.create(proprietaire=vendeur_non_valide, nom="Ne doit pas exister")
+
     def test_queryset_publiques_exclut_les_non_valides(self):
         Boutique.objects.create(proprietaire=creer_vendeur_valide('ok@anitche.ci'), nom="Visible")
-        Boutique.objects.create(
-            proprietaire=creer_utilisateur('attente@anitche.ci', role=Role.VENDEUR),
-            nom="KYC non validé",
+
+        # La boutique doit être créée pour un vendeur déjà validé (sinon
+        # full_clean() la refuse dès la création, voir Boutique.save()),
+        # puis on fait redescendre son KYC après coup pour obtenir le même
+        # état final que l'ancien scénario ("KYC non validé").
+        vendeur_en_attente = creer_vendeur_valide('attente@anitche.ci')
+        boutique_en_attente = Boutique.objects.create(
+            proprietaire=vendeur_en_attente, nom="KYC non validé",
         )
+        vendeur_en_attente.statut_kyc = StatutKYC.EN_ATTENTE
+        vendeur_en_attente.save(update_fields=['statut_kyc'])
+
         Boutique.objects.create(
             proprietaire=creer_vendeur_valide('ferme@anitche.ci'), nom="Fermée", est_active=False
         )
@@ -178,15 +197,19 @@ class BoutiquePubliqueAPITests(TestCase):
     def test_liste_accessible_sans_authentification(self):
         reponse = self.client.get(URL_BOUTIQUES_PUBLIQUES)
         self.assertEqual(reponse.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(reponse.data), 1)
+        self.assertEqual(len(reponse.data["results"]), 1)
 
     def test_boutique_de_vendeur_non_valide_absente(self):
+        vendeur_en_attente = creer_vendeur_valide('attente@anitche.ci')
         Boutique.objects.create(
-            proprietaire=creer_utilisateur('attente@anitche.ci', role=Role.VENDEUR),
+            proprietaire=vendeur_en_attente,
             nom="Pas encore validée",
         )
+        vendeur_en_attente.statut_kyc = StatutKYC.EN_ATTENTE
+        vendeur_en_attente.save(update_fields=['statut_kyc'])
+
         reponse = self.client.get(URL_BOUTIQUES_PUBLIQUES)
-        self.assertEqual([b['nom'] for b in reponse.data], ["Chez Awa"])
+        self.assertEqual([b['nom'] for b in reponse.data["results"]], ["Chez Awa"])
 
     def test_detail_par_slug(self):
         reponse = self.client.get(f'/api/vendeurs/boutiques/{self.boutique.slug}/')
@@ -202,7 +225,7 @@ class BoutiquePubliqueAPITests(TestCase):
 
     def test_recherche_par_ville(self):
         reponse = self.client.get(URL_BOUTIQUES_PUBLIQUES, {'ville': 'bouake'})
-        self.assertEqual(len(reponse.data), 0)
+        self.assertEqual(len(reponse.data["results"]), 0)
 
 
 class MaBoutiqueAPITests(TestCase):
@@ -295,12 +318,12 @@ class AdministrationDemandesAPITests(TestCase):
         reponse = self.client.get(URL_DEMANDES)
 
         self.assertEqual(reponse.status_code, status.HTTP_200_OK)
-        self.assertEqual([d['email'] for d in reponse.data], [self.demandeur.email])
+        self.assertEqual([d['email'] for d in reponse.data["results"]], [self.demandeur.email])
 
     def test_dossier_kyc_visible_dans_la_demande(self):
         self.client.force_authenticate(user=self.administrateur)
         reponse = self.client.get(URL_DEMANDES)
-        self.assertEqual(reponse.data[0]['dossier_kyc']['numero_mobile_money'], '0700000000')
+        self.assertEqual(reponse.data["results"][0]['dossier_kyc']['numero_mobile_money'], '0700000000')
 
     def test_validation_par_administrateur(self):
         self.client.force_authenticate(user=self.administrateur)
@@ -405,7 +428,7 @@ class AdministrationBoutiquesAPITests(TestCase):
         reponse = self.client.get('/api/vendeurs/administration/boutiques/')
 
         self.assertEqual(reponse.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(reponse.data), 1)
+        self.assertEqual(len(reponse.data["results"]), 1)
 
     def test_suspension_par_administrateur(self):
         self.boutique.est_active = True

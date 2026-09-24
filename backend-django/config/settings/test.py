@@ -1,4 +1,6 @@
+import tempfile
 from .base import *
+from pathlib import Path
 
 DEBUG = True
 PASSWORD_HASHERS = [
@@ -8,7 +10,13 @@ PASSWORD_HASHERS = [
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': ':memory:',
+        'NAME': Path(tempfile.gettempdir()) / 'anitche_test_db.sqlite3',
+        'TEST': {
+            'NAME': Path(tempfile.gettempdir()) / 'anitche_test_db.sqlite3',
+        },
+        'OPTIONS': {
+            'timeout': 20,
+        },
     }
 }
 
@@ -27,6 +35,9 @@ REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {
     'kyc': '100000/day',
     'boutique_creation': '100000/day',
     'commande_validation': '100000/day',
+    'coupon_verification': '100000/day',
+    'fidelite_conversion': '100000/day',
+    'logout': '100000/day',
 }
 # Cache en mémoire rapide pour les tests
 CACHES = {

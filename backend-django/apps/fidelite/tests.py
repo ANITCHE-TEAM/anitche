@@ -1,12 +1,17 @@
 from decimal import Decimal
+from unittest.mock import patch
+from django.core.cache import cache
 from django.urls import reverse
 from rest_framework.test import APITestCase
 from rest_framework import status
+from rest_framework.throttling import ScopedRateThrottle
 
-from apps.utilisateurs.models import Utilisateur, Role
+from apps.utilisateurs.models import Utilisateur, Role, StatutKYC
 from apps.vendeurs.models import Boutique
 from apps.commandes.models import Commande
 from apps.paiements.models import Paiement
+from apps.retours.models import DemandeRetour
+from apps.retours.signals import retour_status_change
 from .models import CompteFidelite, TransactionFidelite, CouponReduction
 
 
@@ -19,6 +24,7 @@ class BaseFideliteTestCase(APITestCase):
             nom="Konan",
             prenom="Aya",
             role=Role.CLIENT,
+            statut_kyc=StatutKYC.VALIDE,
         )
 
         # Client 2
@@ -37,6 +43,7 @@ class BaseFideliteTestCase(APITestCase):
             nom="Kouassi",
             prenom="Jean",
             role=Role.VENDEUR,
+            statut_kyc=StatutKYC.VALIDE,
         )
         self.boutique = Boutique.objects.create(
             proprietaire=self.vendeur,
@@ -193,3 +200,204 @@ class FideliteAPITestCase(BaseFideliteTestCase):
         response = self.client.post(url, data, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertFalse(response.data["valide"])
+
+
+class FideliteThrottleTestCase(BaseFideliteTestCase):
+    """Sécurité (A04:2025) : vérifie que les throttle_scope dédiés de
+    VerifierCouponView et ConvertirPointsEnCouponView sont réellement
+    appliqués par DRF (pas seulement présents comme attribut mort) —
+    en abaissant temporairement leur taux, la N+1-ième requête dans la
+    fenêtre doit être rejetée en 429.
+
+    DIAGNOSTIC (test préexistant, corrigé sans toucher au module) :
+    override_settings(REST_FRAMEWORK=...) ne suffit pas ici. DRF fige
+    ScopedRateThrottle.THROTTLE_RATES = api_settings.DEFAULT_THROTTLE_RATES
+    comme attribut de CLASSE au moment de l'import de
+    rest_framework.throttling (une seule fois par process de test) ; ce
+    n'est pas une propriété relue à chaque requête. override_settings
+    remplace l'objet settings.REST_FRAMEWORK par un nouveau dict, mais
+    l'attribut de classe déjà résolu continue de pointer vers l'ancien
+    objet (celui de config/settings/test.py, qui met tous les taux à
+    100000/jour pour éviter les 429 parasites ailleurs dans la suite) —
+    d'où le 200/201 observé au lieu du 429 attendu. Le fix correct est
+    de patcher directement ce dict de classe pour la durée du test.
+
+    Second point d'isolation nécessaire : le cache de throttling
+    (LocMemCache en test, voir config/settings/test.py) n'est jamais
+    vidé entre deux tests par Django. Comme les PK SQLite sont réutilisées
+    après le rollback de transaction propre à chaque test (client1 est
+    quasi systématiquement pk=1), l'historique de requêtes laissé par un
+    AUTRE test ayant déjà sollicité la même vue sous le même scope pour
+    ce même pk (au taux normal, non abaissé) pollue le compteur ici. On
+    repart donc d'un cache vide à chaque test de cette classe.
+    """
+
+    def setUp(self):
+        super().setUp()
+        cache.clear()
+
+    def test_verifier_coupon_est_bien_throttle(self):
+        CouponReduction.objects.create(
+            code="THROTTLETEST",
+            type_reduction=CouponReduction.TypeReduction.POURCENTAGE,
+            valeur=Decimal("5.00"),
+        )
+        self.client.force_authenticate(user=self.client1)
+        url = reverse("fidelite:fidelite-verifier-coupon")
+        data = {"code": "THROTTLETEST", "montant_commande": "10000.00"}
+
+        with patch.dict(ScopedRateThrottle.THROTTLE_RATES, {"coupon_verification": "2/min"}):
+            # Les 2 premières passent (taux abaissé à 2/min pour ce test).
+            for _ in range(2):
+                response = self.client.post(url, data, format="json")
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+            # La 3e requête dans la même fenêtre doit être bloquée.
+            response = self.client.post(url, data, format="json")
+            self.assertEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_convertir_points_est_bien_throttle(self):
+        compte, _ = CompteFidelite.objects.get_or_create(utilisateur=self.client1)
+        compte.crediter_points(1000)
+
+        self.client.force_authenticate(user=self.client1)
+        url = reverse("fidelite:fidelite-convertir")
+        data = {"option": "50_PTS_5PCT"}
+
+        with patch.dict(ScopedRateThrottle.THROTTLE_RATES, {"fidelite_conversion": "1/min"}):
+            premiere = self.client.post(url, data, format="json")
+            self.assertEqual(premiere.status_code, status.HTTP_201_CREATED)
+
+            deuxieme = self.client.post(url, data, format="json")
+            self.assertEqual(deuxieme.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+
+class FideliteRemboursementTestCase(BaseFideliteTestCase):
+    """Sécurité (A04:2025 — Insecure Design) : un remboursement de retour
+    doit reprendre les points de fidélité gagnés sur la part remboursée,
+    sinon un client peut accumuler des points sans risque financier réel
+    en achetant puis en se faisant systématiquement rembourser."""
+
+    def _creer_retour_rembourse(self, montant_remboursement, client=None):
+        """Simule directement l'émission du signal de remboursement, sans
+        repasser par toute la machine à états de TraiterDemandeRetourView :
+        c'est le signal lui-même (et son écouteur côté fidelite) qui est
+        sous test ici, pas le flux retours dans son ensemble (déjà testé
+        dans apps.retours.tests)."""
+        demande = DemandeRetour.objects.create(
+            commande=self.commande,
+            client=client or self.client1,
+            boutique=self.boutique,
+            description="Produit défectueux, remboursement demandé.",
+            montant_remboursement=montant_remboursement,
+            statut=DemandeRetour.Statut.RECEPTIONNE,
+        )
+        demande.statut = DemandeRetour.Statut.REMBOURSE
+        demande.save(update_fields=["statut"])
+
+        retour_status_change.send(
+            sender=DemandeRetour,
+            demande_retour=demande,
+            ancien_statut=DemandeRetour.Statut.RECEPTIONNE,
+            nouveau_statut=DemandeRetour.Statut.REMBOURSE,
+        )
+        return demande
+
+    def test_reprise_integrale_des_points_gagnes_sur_achat_rembourse(self):
+        """25 000 FCFA payés puis intégralement remboursés -> les 25 points
+        gagnés au paiement doivent être intégralement repris."""
+        paiement = Paiement.objects.create(
+            client=self.client1,
+            commande=self.commande,
+            montant=Decimal("25000.00"),
+            methode=Paiement.Methode.WAVE,
+            adresse_livraison="Cocody, Abidjan",
+        )
+        paiement.valider(transaction_id_externe="wave_trx_remb_1")
+
+        compte = CompteFidelite.objects.get(utilisateur=self.client1)
+        self.assertEqual(compte.solde_points, 25)
+
+        demande = self._creer_retour_rembourse(Decimal("25000.00"))
+
+        compte.refresh_from_db()
+        self.assertEqual(compte.solde_points, 0)
+
+        reprise = TransactionFidelite.objects.filter(
+            compte=compte, reference_externe=demande.numero_retour
+        ).first()
+        self.assertIsNotNone(reprise)
+        self.assertEqual(reprise.points, -25)
+        self.assertEqual(reprise.type_transaction, TransactionFidelite.TypeTransaction.AJUSTEMENT_ADMIN)
+
+    def test_reprise_plafonnee_si_points_deja_depenses(self):
+        """Si le client a déjà converti ses points en coupon avant le
+        remboursement, la reprise doit se limiter au solde encore
+        disponible (jamais lever d'erreur ni faire échouer le retour)."""
+        compte, _ = CompteFidelite.objects.get_or_create(utilisateur=self.client1)
+        compte.crediter_points(25, description="Gain simulé")
+        # Le client dépense la totalité de son solde avant le remboursement.
+        compte.debiter_points(25, description="Conversion en coupon")
+        self.assertEqual(compte.solde_points, 0)
+
+        demande = self._creer_retour_rembourse(Decimal("25000.00"))
+
+        compte.refresh_from_db()
+        # Rien à reprendre (solde déjà à 0) : ne doit pas passer en négatif,
+        # et ne doit pas avoir levé d'exception dans le récepteur du signal.
+        self.assertEqual(compte.solde_points, 0)
+
+    def test_pas_de_reprise_si_client_absent(self):
+        """Un GroupeCommande sans client (SET_NULL) ne doit jamais faire
+        planter le récepteur du signal."""
+        demande = DemandeRetour.objects.create(
+            commande=self.commande,
+            client=self.client1,
+            boutique=self.boutique,
+            description="Test",
+            montant_remboursement=Decimal("25000.00"),
+            statut=DemandeRetour.Statut.RECEPTIONNE,
+        )
+        demande.client = None
+        # Émission directe du signal avec un objet dont client a été mis à
+        # None en mémoire (sans toucher la FK réelle en base, non-nullable
+        # ici) : vérifie uniquement que le garde-fou `if not client: return`
+        # est bien atteint sans lever d'exception.
+        retour_status_change.send(
+            sender=DemandeRetour,
+            demande_retour=demande,
+            ancien_statut=DemandeRetour.Statut.RECEPTIONNE,
+            nouveau_statut=DemandeRetour.Statut.REMBOURSE,
+        )
+
+    def test_pas_de_reprise_sur_transition_non_remboursement(self):
+        """Une transition vers un autre statut (ex: 'approuve') ne doit
+        jamais déclencher de reprise de points."""
+        paiement = Paiement.objects.create(
+            client=self.client1,
+            commande=self.commande,
+            montant=Decimal("25000.00"),
+            methode=Paiement.Methode.WAVE,
+            adresse_livraison="Cocody, Abidjan",
+        )
+        paiement.valider(transaction_id_externe="wave_trx_remb_2")
+        compte = CompteFidelite.objects.get(utilisateur=self.client1)
+        self.assertEqual(compte.solde_points, 25)
+
+        demande = DemandeRetour.objects.create(
+            commande=self.commande,
+            client=self.client1,
+            boutique=self.boutique,
+            description="Test",
+            montant_remboursement=Decimal("25000.00"),
+            statut=DemandeRetour.Statut.APPROUVE,
+        )
+        retour_status_change.send(
+            sender=DemandeRetour,
+            demande_retour=demande,
+            ancien_statut=DemandeRetour.Statut.DEMANDE,
+            nouveau_statut=DemandeRetour.Statut.APPROUVE,
+        )
+
+        compte.refresh_from_db()
+        self.assertEqual(compte.solde_points, 25)

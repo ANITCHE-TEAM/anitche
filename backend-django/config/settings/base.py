@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from decouple import config
+from celery.schedules import crontab
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 # ATTENTION : un niveau plus profond que l'ancien settings.py (config/settings/base.py)
@@ -152,17 +153,52 @@ REST_FRAMEWORK = {
         'login': '10/hour',
         'kyc': '5/hour',
         'boutique_creation': '10/hour',
-        'commande_validation': '20/hour'
+        'commande_validation': '20/hour',
+        # Fidélité (A04:2025 / A07:2025) : sans limite dédiée, ces deux
+        # endpoints ne dépendaient que du taux générique 'user' (300/heure).
+        # coupon_verification borne le bourrinage de codes au hasard sur
+        # VerifierCouponView (l'espace de codes générés reste très grand,
+        # mais un taux dédié plus bas est une défense en profondeur peu
+        # coûteuse) ; fidelite_conversion limite ConvertirPointsEnCouponView,
+        # une opération financière (débit réel de points), au même ordre de
+        # grandeur que commande_validation.
+        'coupon_verification': '30/hour',
+        'fidelite_conversion': '20/hour',
+        # LogoutView est en AllowAny (posséder le refresh token suffit,
+        # voir apps/utilisateurs/views.py) : taux dédié pour éviter que ce
+        # point d'entrée public serve de vecteur de spam/DoS low-cost.
+        'logout': '30/hour',
     },
+    # Sans cette ligne, config/exceptions.py::custom_exception_handler
+    # n'est jamais appelé : les 500 utilisent le handler DRF par défaut.
+    'EXCEPTION_HANDLER': 'config.exceptions.custom_exception_handler',
+    # A04:2025 (Unrestricted Resource Consumption) : sans pagination par
+    # défaut, chaque ListAPIView du projet renvoie l'intégralité des
+    # résultats en une requête — trivialement coûteux dès que le catalogue
+    # ou l'annuaire de boutiques grossit, et facilite un scraping complet
+    # en un seul appel sur les endpoints publics (ProduitPublicListView,
+    # BoutiquePubliqueListView). CategorieListView reste volontairement
+    # non paginée (pagination_class = None) car sa liste est petite par
+    # nature et ordonnée pour l'affichage.
+    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    'PAGE_SIZE': 20,
 }   
 
 from datetime import timedelta
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
+
+    # Invalide automatiquement tous les tokens déjà émis (access ET
+    # refresh, ce dernier transmettant son claim à l'access token créé
+    # à partir de lui) dès que le mot de passe de l'utilisateur change
+    # — reset actuel, ou tout futur changement de mot de passe "connecté".
+    # Sans ceci, un access token volé avant un changement de mot de passe
+    # reste valable jusqu'à son expiration naturelle malgré le changement.
+    'CHECK_REVOKE_TOKEN': True,
 }
 
 
@@ -170,6 +206,23 @@ SIMPLE_JWT = {
 
 CELERY_BROKER_URL = config('REDIS_URL', default='redis://localhost:6379/0')
 CELERY_RESULT_BACKEND = config('REDIS_URL', default='redis://localhost:6379/0')
+
+# Tâches planifiées (django-celery-beat, DatabaseScheduler — voir
+# config/celery.py). Déclarées ici plutôt que via une data migration
+# créant des PeriodicTask : la planification reste versionnée avec le
+# reste de la config, lisible au même endroit, et modifiable sans
+# nouvelle migration. Le DatabaseScheduler synchronise ces entrées en
+# base au démarrage de `celery beat`.
+CELERY_BEAT_SCHEDULE = {
+    'utilisateurs-nettoyer-otp-expires': {
+        'task': 'apps.utilisateurs.tasks.nettoyer_otp_expires',
+        'schedule': crontab(hour=3, minute=0),
+    },
+    'utilisateurs-purger-tokens-expires': {
+        'task': 'apps.utilisateurs.tasks.purger_tokens_expires',
+        'schedule': crontab(hour=3, minute=15),
+    },
+}
 
 # Cache Redis
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://redis:6379/0')
@@ -183,6 +236,19 @@ CACHES = {
 
 # Auth Google
 GOOGLE_OAUTH_CLIENT_ID = config('GOOGLE_OAUTH_CLIENT_ID', default='')
+
+# Chiffrement au repos de champs sensibles (ex: DocumentKYC.compte_bancaire)
+# via apps.core.fields.EncryptedCharField. Valeur de dev par défaut non
+# secrète et volontairement présente uniquement ici — jamais utilisée en
+# prod (voir le raise dans prod.py) : elle sert juste à ce que
+# `manage.py runserver` fonctionne sans configuration locale préalable.
+# Générée avec Fernet.generate_key() ; à définir en variable
+# d'environnement propre à chaque environnement (dev/staging/prod), jamais
+# committée pour un environnement réel.
+FIELD_ENCRYPTION_KEY = config(
+    'FIELD_ENCRYPTION_KEY',
+    default='mKvbTFkFfRPhMpb4ZJdZfHvz1pgUgx15Xhyn1ahJCiw='
+)
 
 # Secrets de signature des webhooks de paiement, un par fournisseur.
 # Jamais de valeur par défaut : un webhook dont le fournisseur n'a pas de

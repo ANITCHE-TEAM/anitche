@@ -4,6 +4,7 @@ from django.db import models
 from django.utils.text import slugify
 
 from apps.utilisateurs.models import Role, StatutKYC, Utilisateur
+from apps.core.validators import validateur_image_standard
 
 
 class BoutiqueQuerySet(models.QuerySet):
@@ -37,8 +38,14 @@ class Boutique(models.Model):
     slug = models.SlugField(max_length=140, unique=True, blank=True)
     description = models.TextField(blank=True)
 
-    logo = models.ImageField(upload_to='boutiques/logos/', null=True, blank=True)
-    banniere = models.ImageField(upload_to='boutiques/bannieres/', null=True, blank=True)
+    logo = models.ImageField(
+        upload_to='boutiques/logos/', null=True, blank=True,
+        validators=[validateur_image_standard],
+    )
+    banniere = models.ImageField(
+        upload_to='boutiques/bannieres/', null=True, blank=True,
+        validators=[validateur_image_standard],
+    )
 
     telephone_contact = models.CharField(max_length=20, blank=True)
     email_contact = models.EmailField(blank=True)
@@ -92,6 +99,17 @@ class Boutique(models.Model):
     def save(self, *args, **kwargs):
         if not self.slug:
             self.slug = self._generer_slug_unique()
+        if self._state.adding:
+            # Défense en profondeur (A04:2025) : le chemin API (DRF) ne
+            # déclenche jamais clean()/full_clean() sur un ModelSerializer
+            # — seul l'admin Django le fait automatiquement via ModelForm.
+            # Sans cet appel explicite, la règle "vendeur validé requis à
+            # la création" posée par clean() ci-dessus est aujourd'hui
+            # protégée uniquement par la permission EstVendeurValide de
+            # MaBoutiqueView : suffisant pour l'API actuelle, mais un
+            # futur appel direct (shell, script, tâche Celery) la
+            # contournerait silencieusement sans ce filet de sécurité.
+            self.full_clean()
         return super().save(*args, **kwargs)
 
     def __str__(self):

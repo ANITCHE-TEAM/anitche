@@ -43,6 +43,14 @@ class Commande(models.Model):
     )
 
     montant_total = models.DecimalField(max_digits=12, decimal_places=2)
+    # F-10 : trace, par commande (donc par boutique), le coupon appliqué au
+    # panier et la part de remise qui lui revient. Un coupon s'applique au
+    # panier entier (potentiellement multi-boutique) ; sa remise est donc
+    # répartie proportionnellement entre les commandes générées, plutôt que
+    # d'être arbitrairement portée par une seule boutique (voir
+    # ValiderPanierView). Vide si aucun coupon n'a été utilisé.
+    coupon_code = models.CharField(max_length=30, blank=True)
+    montant_remise = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     update_at = models.DateTimeField(auto_now=True)
 
@@ -82,7 +90,16 @@ class CommandeItem(models.Model):
         )
     variante = models.ForeignKey(
         "catalogue.VarianteProduit",
-        on_delete=models.CASCADE,
+        # PROTECT plutôt que CASCADE : nom_produit/prix_unitaire/quantite
+        # sont déjà dénormalisés ci-dessous pour figer l'historique de
+        # vente, mais un CASCADE ferait quand même disparaître la ligne
+        # CommandeItem (donc l'article facturé) si la variante est
+        # supprimée — inacceptable pour un historique de commande/
+        # facturation qui doit rester consultable indéfiniment, y compris
+        # après retrait du catalogue. PROTECT empêche la suppression tant
+        # qu'une commande y fait encore référence (désactiver la variante
+        # via est_active reste le chemin normal, voir Produit.est_achetable).
+        on_delete=models.PROTECT,
         related_name="variante_article"
         )
     nom_produit = models.CharField(max_length=100)

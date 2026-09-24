@@ -45,6 +45,12 @@ class UtilisateurManager(BaseUserManager):
 
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
+        # Import local (et non en haut du fichier) : models.py importe déjà
+        # UtilisateurManager depuis ce module, donc un import de niveau
+        # module de `.models` ici créerait une boucle d'import (models.py
+        # → managers.py → models.py) qui empêche Django de démarrer.
+        from .models import Role
+        extra_fields.setdefault('role', Role.SUPER_ADMIN)
 
         # Vérification de cohérence des permissions.
         if extra_fields.get('is_staff') is not True:

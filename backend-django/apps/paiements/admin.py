@@ -17,7 +17,14 @@ class PaiementAdmin(admin.ModelAdmin):
     )
     list_filter = ("statut", "methode", "devise", "date_creation")
     search_fields = ("reference", "client__email", "transaction_id_externe", "commande__numero_commande")
-    readonly_fields = ("id", "reference", "date_creation", "date_validation", "date_mise_a_jour")
+    readonly_fields = (
+        "id", "reference", "statut",
+        "date_creation", "date_validation", "date_mise_a_jour",
+    )
+    # 'statut' en lecture seule (F-14) : toute validation doit passer par
+    # ServicePaiement.traiter_webhook (HMAC, vérification du montant reçu,
+    # idempotence) — une édition libre ici permettrait à un compte staff
+    # de marquer un paiement VALIDE sans qu'aucun argent n'ait transité.
     ordering = ("-date_creation",)
 
 

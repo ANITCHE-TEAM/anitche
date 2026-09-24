@@ -139,3 +139,76 @@ class PasseportAPITestCase(BasePasseportTestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data), 1)
         self.assertEqual(response.data[0]["produit_nom"], "Masque Baoulé Traditionnel")
+
+
+class PasseportReassignationProduitTestCase(BasePasseportTestCase):
+    """F-21 (audit sécurité) : un vendeur ne doit pas pouvoir, via PATCH,
+    réassigner un passeport existant à un produit qui n'est pas le sien —
+    ce qui casserait la garantie d'authenticité que ce module est censé
+    apporter (le passeport resterait affiché sous SA boutique, tout en
+    certifiant le produit d'un autre vendeur)."""
+
+    def setUp(self):
+        super().setUp()
+        # Produit de Vendeur 2, cible de la tentative de réassignation
+        self.produit2 = Produit.objects.create(
+            boutique=self.boutique2,
+            nom="Sac en Raphia Bassam",
+            prix_base=Decimal("18000.00"),
+        )
+        self.variante2 = VarianteProduit.objects.create(
+            produit=self.produit2,
+            nom="Naturel",
+            prix=Decimal("18000.00"),
+        )
+
+        self.passeport1 = PasseportProduit.objects.create(
+            produit=self.produit1,
+            variante=self.variante1,
+            boutique=self.boutique1,
+            numero_lot="LOT-V1-01",
+        )
+
+    def test_vendeur_ne_peut_pas_reassigner_passeport_vers_produit_dun_autre_vendeur(self):
+        self.client.force_authenticate(user=self.vendeur1)
+        url = reverse("passeport_qr:passeport-vendeur-detail", kwargs={"pk": self.passeport1.pk})
+
+        response = self.client.patch(url, {"produit": self.produit2.id}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.passeport1.refresh_from_db()
+        self.assertEqual(self.passeport1.produit_id, self.produit1.id)
+
+    def test_vendeur_ne_peut_pas_assigner_variante_dun_autre_produit(self):
+        self.client.force_authenticate(user=self.vendeur1)
+        url = reverse("passeport_qr:passeport-vendeur-detail", kwargs={"pk": self.passeport1.pk})
+
+        # variante2 appartient à produit2, pas à produit1 (le produit courant du passeport)
+        response = self.client.patch(url, {"variante": self.variante2.id}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.passeport1.refresh_from_db()
+        self.assertEqual(self.passeport1.variante_id, self.variante1.id)
+
+    def test_vendeur_peut_toujours_corriger_vers_un_autre_produit_de_sa_propre_boutique(self):
+        # Cas légitime : un produit de la MÊME boutique reste autorisé (en
+        # remettant aussi la variante à zéro, puisque variante1 est liée à
+        # l'ancien produit1 — changer de produit sans y toucher serait
+        # justement l'incohérence que le correctif détecte à raison).
+        autre_produit_meme_boutique = Produit.objects.create(
+            boutique=self.boutique1,
+            nom="Masque Baoulé (variante fabrication)",
+            prix_base=Decimal("35000.00"),
+        )
+        self.client.force_authenticate(user=self.vendeur1)
+        url = reverse("passeport_qr:passeport-vendeur-detail", kwargs={"pk": self.passeport1.pk})
+
+        response = self.client.patch(
+            url,
+            {"produit": autre_produit_meme_boutique.id, "variante": None},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.passeport1.refresh_from_db()
+        self.assertEqual(self.passeport1.produit_id, autre_produit_meme_boutique.id)

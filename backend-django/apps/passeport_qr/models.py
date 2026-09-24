@@ -3,6 +3,8 @@ from django.db import models
 from django.conf import settings
 from django.utils import timezone
 
+from apps.core.validators import validateur_image_standard
+
 
 class PasseportProduit(models.Model):
     """Passeport numérique et certificat d'authenticité / traçabilité d'un produit."""
@@ -50,7 +52,10 @@ class PasseportProduit(models.Model):
         default=StatutCertification.CERTIFIE_AUTHENTIQUE,
     )
 
-    qr_code_image = models.ImageField(upload_to="passeports/qr/%Y/%m/", null=True, blank=True)
+    qr_code_image = models.ImageField(
+        upload_to="passeports/qr/%Y/%m/", null=True, blank=True,
+        validators=[validateur_image_standard],
+    )
     url_verification_publique = models.URLField(max_length=500, blank=True)
 
     nb_scans = models.PositiveIntegerField(default=0, help_text="Nombre total de scans effectués par les consommateurs")

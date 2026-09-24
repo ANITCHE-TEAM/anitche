@@ -65,6 +65,35 @@ class PasseportVendeurSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["id", "code_passeport", "boutique", "nb_scans", "dernier_scan", "url_verification_publique", "date_creation"]
 
+    def validate(self, attrs):
+        """F-21 (audit sécurité) : `produit` et `variante` restent modifiables
+        (un vendeur peut corriger une erreur de saisie), mais sans validation
+        d'appartenance ici, un vendeur pouvait réassigner un passeport
+        existant — dont `boutique` reste le sien et donc affiché comme
+        authentique — à un `produit_id` appartenant à N'IMPORTE QUEL AUTRE
+        vendeur (PATCH direct, en contournant CreerPasseportSerializer.validate
+        qui ne s'applique qu'à la création). Ça cassait la garantie même que
+        ce module est censé apporter : un passeport de traçabilité pourrait
+        certifier un produit qui n'est pas celui du vendeur affiché.
+        On revalide donc ici la même règle d'appartenance qu'à la création,
+        et on s'assure que la variante appartient bien au produit choisi.
+        """
+        produit = attrs.get("produit", getattr(self.instance, "produit", None))
+        variante = attrs.get("variante", getattr(self.instance, "variante", None))
+
+        boutique_cible = self.instance.boutique if self.instance else None
+        if produit is not None and boutique_cible is not None and produit.boutique_id != boutique_cible.id:
+            raise serializers.ValidationError(
+                {"produit": "Ce produit n'appartient pas à la boutique de ce passeport."}
+            )
+
+        if variante is not None and produit is not None and variante.produit_id != produit.id:
+            raise serializers.ValidationError(
+                {"variante": "Cette variante n'appartient pas à ce produit."}
+            )
+
+        return attrs
+
 
 class CreerPasseportSerializer(serializers.Serializer):
     produit_id = serializers.IntegerField()

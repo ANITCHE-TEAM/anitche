@@ -89,8 +89,8 @@ class NotificationAPITestCase(BaseNotificationTestCase):
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         # Client 1 doit voir exactement ses 2 notifications
-        self.assertEqual(len(response.data), 2)
-        notif_ids = [n["id"] for n in response.data]
+        self.assertEqual(len(response.data["results"]), 2)
+        notif_ids = [n["id"] for n in response.data["results"]]
         self.assertIn(str(self.notif1.id), notif_ids)
         self.assertIn(str(self.notif2.id), notif_ids)
         self.assertNotIn(str(self.notif_client2.id), notif_ids)
@@ -101,8 +101,8 @@ class NotificationAPITestCase(BaseNotificationTestCase):
 
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 1)
-        self.assertEqual(response.data[0]["id"], str(self.notif1.id))
+        self.assertEqual(len(response.data["results"]), 1)
+        self.assertEqual(response.data["results"][0]["id"], str(self.notif1.id))
 
     def test_compteur_non_lues(self):
         self.client.force_authenticate(user=self.client1)

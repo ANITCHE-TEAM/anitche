@@ -7,7 +7,7 @@ class CommandeSerializer(serializers.ModelSerializer):
         model = Commande
         fields = [
             "id", "numero_commande","groupe", "boutique", "status",
-            "client","montant_total", "created_at", "update_at"
+            "client","montant_total", "coupon_code", "montant_remise", "created_at", "update_at"
             ]
         read_only_fields = fields
 

@@ -17,6 +17,7 @@ from .serializers import CommandeSerializer, GroupeCommandeSerializer, CommandeI
 from apps.catalogue.models import Stock
 from apps.panier.models import Panier
 from apps.panier.views import get_or_create_panier
+from apps.fidelite.models import CouponReduction
 
 logger_securite = logging.getLogger('securite')
 
@@ -47,6 +48,23 @@ class ValiderPanierView(APIView):
             # elle relit alors un panier vide et échoue proprement en 400.
             panier = Panier.objects.select_for_update().get(pk=panier.pk)
 
+            # F-10 : verrouille la ligne du coupon (s'il y en a un) en même
+            # temps que le panier. Sans ce verrou, une double soumission
+            # pourrait faire lire "est_utilise=False" par les deux requêtes
+            # avant qu'aucune ne l'ait encore posé à True — le même coupon
+            # serait alors appliqué deux fois (double dépense, comme pour les
+            # points de fidélité, voir CompteFidelite.debiter_points).
+            coupon_code_saisi = str(request.data.get("coupon_code", "")).strip()
+            coupon = None
+            if coupon_code_saisi:
+                coupon = CouponReduction.objects.select_for_update().filter(
+                    code__iexact=coupon_code_saisi
+                ).first()
+                if coupon is None:
+                    raise ValidationError(
+                        {"coupon_code": f"Le code promo '{coupon_code_saisi}' n'existe pas."}
+                    )
+
             items = list(
                 panier.items.select_related("variante__produit__boutique", "variante__stock")
             )
@@ -54,12 +72,20 @@ class ValiderPanierView(APIView):
             if not items:
                 raise ValidationError("Le panier est vide.")
 
-            # Une variante retirée de la vente entre l'ajout au panier et le
-            # paiement ne doit pas pouvoir être commandée.
-            variante_inactive = next((item for item in items if not item.variante.est_active), None)
-            if variante_inactive is not None:
+            # Une variante retirée de la vente, un produit désactivé, ou une
+            # boutique suspendue (KYC révoqué, boutique désactivée, vendeur
+            # banni) entre l'ajout au panier et le paiement ne doivent jamais
+            # pouvoir être commandés. Produit.est_achetable est le point
+            # d'entrée unique documenté pour cette règle (voir
+            # Boutique.est_publiable) : on le réutilise tel quel plutôt que
+            # de ne vérifier qu'une partie de la condition (F-13).
+            item_non_achetable = next(
+                (item for item in items if not item.variante.est_active or not item.variante.produit.est_achetable),
+                None,
+            )
+            if item_non_achetable is not None:
                 raise ValidationError(
-                    f"{variante_inactive.variante.nom} n'est plus disponible à la vente."
+                    f"{item_non_achetable.variante.nom} n'est plus disponible à la vente."
                 )
 
             # 1. Regroupe les articles par boutique
@@ -67,6 +93,43 @@ class ValiderPanierView(APIView):
             for item in items:
                 boutique = item.variante.produit.boutique
                 items_par_boutique.setdefault(boutique, []).append(item)
+
+            montants_par_boutique = {
+                boutique: sum(
+                    (item.prix_unitaire * item.quantite for item in boutique_items),
+                    Decimal("0.00"),
+                )
+                for boutique, boutique_items in items_par_boutique.items()
+            }
+            montant_total_panier = sum(montants_par_boutique.values(), Decimal("0.00"))
+
+            # F-10 : un coupon s'applique au panier entier, qui peut couvrir
+            # plusieurs boutiques. On calcule ici la remise globale puis on la
+            # répartit au prorata du montant de chaque boutique, plutôt que
+            # de la porter en entier par une seule commande arbitraire.
+            remises_par_boutique = {boutique: Decimal("0.00") for boutique in items_par_boutique}
+            if coupon is not None:
+                valide, message = coupon.est_valide_pour(request.user, montant_total_panier)
+                if not valide:
+                    raise ValidationError({"coupon_code": message})
+
+                montant_remise_total = coupon.calculer_remise(montant_total_panier)
+
+                boutiques = list(items_par_boutique.keys())
+                remise_cumulee = Decimal("0.00")
+                for index, boutique in enumerate(boutiques):
+                    if index == len(boutiques) - 1:
+                        # Le dernier lot absorbe l'écart d'arrondi, pour que
+                        # la somme des remises corresponde exactement au
+                        # montant calculé sur le panier entier.
+                        part = montant_remise_total - remise_cumulee
+                    else:
+                        part = round(
+                            montant_remise_total * montants_par_boutique[boutique] / montant_total_panier,
+                            2,
+                        )
+                        remise_cumulee += part
+                    remises_par_boutique[boutique] = part
 
             # 2. Verrouille les lignes de stock concernées pour toute la durée
             # de la transaction : aucune autre commande ne peut décrémenter
@@ -89,16 +152,16 @@ class ValiderPanierView(APIView):
             commandes_creees = []
 
             for boutique, boutique_items in items_par_boutique.items():
-                montant_total = sum(
-                    (item.prix_unitaire * item.quantite for item in boutique_items),
-                    Decimal("0.00")
-                )
+                montant_boutique = montants_par_boutique[boutique]
+                remise_boutique = remises_par_boutique[boutique]
 
                 commande = Commande.objects.create(
                     groupe=groupe,
                     boutique=boutique,
                     client=request.user,
-                    montant_total=montant_total,
+                    montant_total=montant_boutique - remise_boutique,
+                    coupon_code=coupon.code if coupon is not None else "",
+                    montant_remise=remise_boutique,
                 )
 
                 for item in boutique_items:
@@ -118,6 +181,14 @@ class ValiderPanierView(APIView):
                         raise ValidationError(str(exc))
 
                 commandes_creees.append(commande)
+
+            # F-10 : le coupon n'est marqué utilisé qu'une fois toutes les
+            # commandes effectivement créées (dans la même transaction) —
+            # grâce au verrou posé plus haut, aucune autre requête n'a pu le
+            # consommer entre-temps.
+            if coupon is not None:
+                coupon.est_utilise = True
+                coupon.save(update_fields=["est_utilise"])
 
             # 3. Vide le panier une fois les commandes créées
             panier.items.all().delete()
@@ -169,4 +240,8 @@ class CommandeItemListView(generics.ListAPIView):
             Commande.objects.filter(client=self.request.user),
             pk=self.kwargs["commande_id"]
         )
-        return CommandeItem.objects.filter(commande=commande)
+        # CommandeItem n'a pas de champ date — tri par id (UUID) pour un
+        # ordre stable et déterministe entre les pages (sans ça, DRF émet
+        # UnorderedObjectListWarning : la pagination sur un queryset non
+        # trié peut sauter ou répéter des lignes d'une page à l'autre).
+        return CommandeItem.objects.filter(commande=commande).order_by("id")

@@ -3,6 +3,8 @@ from django.db import models
 from django.conf import settings
 from django.utils import timezone
 
+from apps.core.validators import validateur_document_standard
+
 
 class SupportTicket(models.Model):
     """Ticket de support ouvert par un client, vendeur ou courier.
@@ -176,7 +178,10 @@ class TicketAttachment(models.Model):
     )
 
     # Rangement par année/mois pour éviter d'entasser tous les fichiers dans un seul dossier.
-    file = models.FileField(upload_to="support/attachments/%Y/%m/")
+    file = models.FileField(
+        upload_to="support/attachments/%Y/%m/",
+        validators=[validateur_document_standard],
+    )
     file_type = models.CharField(max_length=10, choices=FileType.choices, default=FileType.OTHER)
 
     # Nom original conservé séparément : le nom stocké sur disque/serveur

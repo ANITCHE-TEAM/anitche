@@ -7,7 +7,7 @@ from rest_framework.test import APITestCase
 from apps.utilisateurs.models import Utilisateur, Role, StatutKYC
 from apps.vendeurs.models import Boutique
 from .models import Categorie, Produit, VarianteProduit, Stock, ImageProduit
-
+from django.test import TransactionTestCase 
 
 class BaseCatalogueTestCase(APITestCase):
     def setUp(self):
@@ -174,7 +174,7 @@ class VarianteEtStockModeleTests(BaseCatalogueTestCase):
         self.assertEqual(stock.quantite_disponible, 6)
 
         with self.assertRaises(ValidationError):
-            stock.decrementer(10)
+            stock.decrementer(10)     
 
 
 # =====================================================================
@@ -295,6 +295,28 @@ class CatalogueVendeurAPITests(BaseCatalogueTestCase):
         self.assertEqual(variante.stock.quantite_disponible, 20)
         self.assertEqual(variante.stock.seuil_alerte, 3)
 
+    def test_reponse_creation_variante_reflete_le_stock_initial(self):
+        """Non-régression : la réponse JSON de création doit refléter le
+        stock réellement enregistré, pas une version en cache de
+        `variante.stock` antérieure à sa mise à jour (le stock persisté
+        était correct, mais la réponse mentait au vendeur en affichant 0)."""
+        produit = Produit.objects.create(
+            boutique=self.vendeur1.boutique,
+            nom="Sac à main",
+            prix_base=Decimal("15000.00"),
+        )
+        self.client.force_authenticate(user=self.vendeur1)
+        url = reverse('catalogue:vendeur-variantes-liste', args=[produit.id])
+        response = self.client.post(url, {
+            'nom': 'Standard',
+            'prix': '15000.00',
+            'quantite_initiale': 20,
+            'seuil_alerte': 3,
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['stock']['quantite_disponible'], 20)
+        self.assertEqual(response.data['stock']['seuil_alerte'], 3)
+
     def test_vendeur_peut_mettre_a_jour_le_stock(self):
         produit = Produit.objects.create(boutique=self.boutique1, nom="Montre")
         variante = VarianteProduit.objects.create(produit=produit, nom="Argent", prix=Decimal("45000.00"))
@@ -306,3 +328,54 @@ class CatalogueVendeurAPITests(BaseCatalogueTestCase):
         
         variante.stock.refresh_from_db()
         self.assertEqual(variante.stock.quantite_disponible, 15)
+
+
+class StockConcurrenceTestCase(TransactionTestCase):
+    """F-09 : Stock.incrementer() doit être atomique, comme decrementer().
+    Nécessite TransactionTestCase (pas APITestCase/TestCase) : les threads
+    doivent voir une vraie transaction commitée en base, pas la transaction
+    unique enveloppant un TestCase classique."""
+
+    def setUp(self):
+        vendeur = Utilisateur.objects.create_user(
+            email="vendeur-stock@anitche.ci",
+            password="MotDePasse123!",
+            nom="Kouame",
+            prenom="Yao",
+            role=Role.VENDEUR,
+            statut_kyc=StatutKYC.VALIDE,
+        )
+        boutique = Boutique.objects.create(
+            proprietaire=vendeur,
+            nom="Boutique Stock Test",
+            est_active=True,
+        )
+        produit = Produit.objects.create(boutique=boutique, nom="Sac")
+        self.variante = VarianteProduit.objects.create(
+            produit=produit, nom="Standard", prix=Decimal("10000.00"),
+        )
+        self.variante.stock.quantite_disponible = 10
+        self.variante.stock.save(update_fields=["quantite_disponible"])
+
+    def test_incrementer_stock_est_atomique_sous_concurrence(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import django.db
+
+        def appel():
+            django.db.close_old_connections()
+            try:
+                Stock.objects.get(variante=self.variante).incrementer(1)
+            finally:
+                # Chaque thread ouvre sa propre connexion SQLite ; sans
+                # fermeture explicite, elle reste ouverte après la fin du
+                # thread et empêche Django de supprimer le fichier de base
+                # de test (PermissionError [WinError 32] sous Windows, qui
+                # bloque ensuite tous les runs suivants par une invite
+                # interactive).
+                django.db.connection.close()
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            list(executor.map(lambda _: appel(), range(5)))
+
+        self.variante.stock.refresh_from_db()
+        self.assertEqual(self.variante.stock.quantite_disponible, 15)  # 10 + 5, aucun incrément perdu

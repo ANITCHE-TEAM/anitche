@@ -50,6 +50,20 @@ class InitierPaiementSerializer(serializers.Serializer):
             if commande.status == Commande.Status.ANNULEE:
                 raise ValidationError("Impossible de payer une commande annulée.")
 
+            # A04:2025 (Unrestricted Resource Consumption) + risque de
+            # double-débit : sans ce contrôle, rien n'empêche un client
+            # d'initier un nombre illimité de paiements EN_ATTENTE pour la
+            # même commande (double-soumission frontend, ou usage
+            # délibéré) — si plusieurs de ces sessions de paiement
+            # distinctes aboutissent réellement chez la passerelle, le
+            # client est débité plusieurs fois pour une seule commande.
+            if Paiement.objects.filter(
+                commande=commande, statut=Paiement.Statut.EN_ATTENTE
+            ).exists():
+                raise ValidationError(
+                    "Un paiement est déjà en attente pour cette commande."
+                )
+
             attrs["_cible_objet"] = commande
             attrs["_type_cible"] = "commande"
             attrs["_montant"] = commande.montant_total
@@ -67,6 +81,13 @@ class InitierPaiementSerializer(serializers.Serializer):
             deja_payee = any(c.status != Commande.Status.CREEE for c in commandes)
             if deja_payee:
                 raise ValidationError("Une ou plusieurs commandes de ce groupe ont déjà été validées ou payées.")
+
+            if Paiement.objects.filter(
+                groupe_commande=groupe, statut=Paiement.Statut.EN_ATTENTE
+            ).exists():
+                raise ValidationError(
+                    "Un paiement est déjà en attente pour ce groupe de commandes."
+                )
 
             montant_total = sum((c.montant_total for c in commandes), Decimal("0.00"))
             attrs["_cible_objet"] = groupe
@@ -114,3 +135,18 @@ class WebhookPaiementSerializer(serializers.Serializer):
     statut = serializers.ChoiceField(choices=["succes", "echec", "annule"])
     transaction_id_externe = serializers.CharField(max_length=150, required=False, allow_blank=True)
     metadata = serializers.DictField(required=False, default=dict)
+
+    # Montant réellement débité côté passerelle. Requis sur un événement de
+    # succès : sans lui, on validerait un Paiement au montant attendu sans
+    # jamais vérifier que la passerelle a bien encaissé ce montant précis
+    # (A08:2025 — Software/Data Integrity Failures).
+    montant = serializers.DecimalField(
+        max_digits=12, decimal_places=2, required=False, allow_null=True,
+    )
+
+    def validate(self, attrs):
+        if attrs.get("statut") == "succes" and attrs.get("montant") is None:
+            raise serializers.ValidationError(
+                {"montant": "Requis pour valider un paiement réussi."}
+            )
+        return attrs

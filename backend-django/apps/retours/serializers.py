@@ -1,4 +1,5 @@
 from decimal import Decimal
+from django.db import models
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 
@@ -11,6 +12,21 @@ class PhotoRetourSerializer(serializers.ModelSerializer):
         model = PhotoRetour
         fields = ["id", "image", "date_ajout"]
         read_only_fields = ["id", "date_ajout"]
+
+    def validate_image(self, value):
+        """Limite taille et type (A04/A08) : sans ce contrôle, n'importe
+        quel fichier pouvait être uploadé comme "preuve" de retour, sans
+        limite de poids ni vérification qu'il s'agit bien d'une image."""
+        if not value:
+            return value
+        if value.size > 3 * 1024 * 1024:
+            raise serializers.ValidationError("L'image ne doit pas dépasser 3 Mo.")
+        content_type = getattr(value, 'content_type', None)
+        if content_type and content_type not in ('image/jpeg', 'image/png', 'image/webp'):
+            raise serializers.ValidationError(
+                "Format d'image non autorisé (JPEG, PNG ou WebP uniquement)."
+            )
+        return value
 
 
 class RetourItemSerializer(serializers.ModelSerializer):
@@ -93,6 +109,24 @@ class CreerDemandeRetourSerializer(serializers.Serializer):
         montant_total = Decimal("0.00")
         validated_items = []
 
+        # Quantités déjà couvertes par des demandes de retour antérieures sur
+        # ces mêmes lignes de commande, hors demandes rejetées (qui ne
+        # bloquent rien puisqu'aucun retour n'a réellement eu lieu). Sans ce
+        # calcul, chaque nouvelle demande n'était comparée qu'à la quantité
+        # commandée initiale : un client pouvait soumettre plusieurs demandes
+        # de retour distinctes sur le même article, chacune individuellement
+        # sous la limite, et cumuler un remboursement/restock supérieur à ce
+        # qu'il a réellement acheté (A04/A08 — intégrité des données).
+        deja_retourne = {}
+        anciens_items = RetourItem.objects.filter(
+            commande_item_id__in=[e["commande_item_id"] for e in articles_data],
+            demande_retour__commande=commande,
+        ).exclude(
+            demande_retour__statut=DemandeRetour.Statut.REJETE
+        ).values("commande_item_id").annotate(total=models.Sum("quantite"))
+        for row in anciens_items:
+            deja_retourne[row["commande_item_id"]] = row["total"]
+
         for item_entry in articles_data:
             c_item_id = item_entry["commande_item_id"]
             qte = item_entry["quantite"]
@@ -101,8 +135,16 @@ class CreerDemandeRetourSerializer(serializers.Serializer):
             if not c_item:
                 raise ValidationError({"articles": f"L'article {c_item_id} n'appartient pas à cette commande."})
 
-            if qte > c_item.quantite:
-                raise ValidationError({"articles": f"Quantité demandée ({qte}) supérieure à la quantité commandée ({c_item.quantite}) pour {c_item.nom_produit}."})
+            deja = deja_retourne.get(c_item_id, 0)
+            if deja + qte > c_item.quantite:
+                disponible = max(c_item.quantite - deja, 0)
+                raise ValidationError({
+                    "articles": (
+                        f"Quantité de retour indisponible pour {c_item.nom_produit} : "
+                        f"{disponible} restant(s) à retourner sur {c_item.quantite} commandé(s) "
+                        f"({deja} déjà couvert(s) par une demande existante)."
+                    )
+                })
 
             montant_total += c_item.prix_unitaire * qte
             validated_items.append((c_item, qte))

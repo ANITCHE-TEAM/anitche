@@ -8,6 +8,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.exceptions import TokenError
 from django.conf import settings
 import logging
 
@@ -15,13 +16,27 @@ logger_securite = logging.getLogger('securite')
 
 
 
-from .tasks import envoyer_code_otp_email
+from .tasks import envoyer_code_otp_email, envoyer_notification_connexion
+from .services import (
+    resoudre_utilisateur_google,
+    revoquer_tokens_actifs,
+    InfosGoogleIncompletes,
+    CompteDesactive,
+    LiaisonGoogleRefusee,
+)
 
+
+from django.http import FileResponse, Http404
+from django.shortcuts import get_object_or_404
+from rest_framework.exceptions import PermissionDenied
 
 from .models import (
     Utilisateur,
     CodeOTP,
+    TypeUsageOTP,
     StatutsKYCImpossibles,
+    DocumentKYC,
+    Role,
 )
 
 from .serializers import (
@@ -43,17 +58,53 @@ from .serializers import (
 class InscriptionView(generics.CreateAPIView):
     """
     Permet à un visiteur de créer un nouveau compte.
+
+    F-04 (audit sécurité) : la création seule ne prouve jamais que le
+    demandeur possède réellement l'adresse email fournie (contrairement
+    aux flux de changement d'email/téléphone ou de mot de passe oublié,
+    qui exigent tous une preuve par OTP). Un compte peut donc être créé
+    avec l'email de quelqu'un d'autre, mais reste marqué
+    `email_verifie=False` tant que le code envoyé sur cette adresse n'a
+    pas été confirmé via VerificationOTPView (même mécanisme que les
+    autres flux OTP de ce module) — et c'est justement cet état non
+    vérifié que F-01 s'appuie dessus pour refuser toute liaison Google
+    ultérieure sur ce compte.
     """
 
     queryset = Utilisateur.objects.all()
     serializer_class = InscriptionSerializer
     permission_classes = [AllowAny]
 
+    def perform_create(self, serializer):
+        utilisateur = serializer.save()
+
+        _, code = CodeOTP.generer(utilisateur, TypeUsageOTP.INSCRIPTION)
+        envoyer_code_otp_email.delay(utilisateur.email, code, TypeUsageOTP.INSCRIPTION)
+
 
 class LoginThrottleView(TokenObtainPairView):
     """Connexion JWT avec limite de fréquence (anti brute-force)."""
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'login'  # taux défini dans DEFAULT_THROTTLE_RATES
+
+    def post(self, request, *args, **kwargs):
+        """F-04 (audit sécurité) : notifie le titulaire du compte à chaque
+        connexion réussie, uniquement en cas de succès (jamais sur un
+        échec, pour ne pas alerter à tort sur une simple faute de frappe
+        de mot de passe ni révéler qu'un email existe)."""
+        response = super().post(request, *args, **kwargs)
+
+        if response.status_code == status.HTTP_200_OK:
+            email = request.data.get('email')
+            utilisateur = Utilisateur.objects.filter(email__iexact=email).first()
+            if utilisateur:
+                envoyer_notification_connexion.delay(
+                    utilisateur.email,
+                    request.META.get('REMOTE_ADDR', 'inconnue'),
+                    request.META.get('HTTP_USER_AGENT', 'inconnu'),
+                )
+
+        return response
 
 
 # =====================================================
@@ -170,6 +221,13 @@ class VerificationOTPView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Confirmation de l'inscription (F-04) : le compte a déjà été
+        # créé (email_verifie=False par défaut) ; on ne le marque vérifié
+        # qu'une fois l'OTP envoyé sur cette adresse confirmé.
+        if otp.type_usage == TypeUsageOTP.INSCRIPTION:
+            request.user.email_verifie = True
+            request.user.save(update_fields=['email_verifie'])
+
         # Mise à jour de l'email après validation.
         if (
             otp.type_usage == 'changement_email'
@@ -270,6 +328,52 @@ class UploadKYCView(generics.CreateAPIView):
     ]
 
 
+class TelechargerDocumentKYCView(APIView):
+    """
+    Sert un document KYC (pièce d'identité ou selfie) après vérification
+    des droits d'accès.
+
+    SÉCURITÉ CRITIQUE (Broken Access Control) : ces documents contiennent
+    des données personnelles sensibles (pièce d'identité, photo de visage).
+    Avant ce correctif, ils étaient accessibles directement via leur URL
+    MEDIA_URL, sans aucune authentification — n'importe qui connaissant ou
+    devinant le chemin du fichier pouvait le consulter. Cette vue est
+    désormais le SEUL point d'accès légitime : le champ FileField reste
+    techniquement dans MEDIA_ROOT, mais son URL brute ne doit plus jamais
+    être communiquée au frontend (voir DocumentKYCSerializer).
+
+    Accès autorisé :
+    - le propriétaire du dossier KYC (son propre document) ;
+    - un admin / super_admin, pour l'instruction de la demande vendeur.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    CHAMPS_AUTORISES = {"piece_identite_recto", "piece_identite_verso", "selfie"}
+
+    def get(self, request, utilisateur_id, champ):
+        if champ not in self.CHAMPS_AUTORISES:
+            raise Http404("Document demandé inconnu.")
+
+        dossier = get_object_or_404(DocumentKYC, utilisateur_id=utilisateur_id)
+
+        est_proprietaire = dossier.utilisateur_id == request.user.id
+        est_admin = request.user.role in (Role.ADMIN, Role.SUPER_ADMIN)
+
+        if not (est_proprietaire or est_admin):
+            logger_securite.warning(
+                "Accès refusé à un document KYC (utilisateur_id=%s, demandeur_id=%s).",
+                utilisateur_id, request.user.id,
+            )
+            raise PermissionDenied("Vous n'êtes pas autorisé à consulter ce document.")
+
+        fichier = getattr(dossier, champ)
+        if not fichier:
+            raise Http404("Ce document n'a pas été fourni.")
+
+        return FileResponse(fichier.open("rb"), filename=fichier.name.rsplit("/", 1)[-1])
+
+
 # =====================================================
 # MOT DE PASSE OUBLIÉ
 # =====================================================
@@ -340,13 +444,25 @@ class ConfirmationMotDePasseOublieView(APIView):
 
         data = serializer.validated_data
 
+        # SÉCURITÉ (énumération de comptes) : le message d'erreur ne doit
+        # JAMAIS varier selon que l'email existe ou non, ni selon qu'un
+        # OTP est en attente ou non — sinon on réintroduit exactement la
+        # fuite que DemandeMotDePasseOublieView évite volontairement plus
+        # haut ("Si ce compte existe, un code a été envoyé."). Avant ce
+        # correctif, un email inconnu renvoyait "Code invalide." tandis
+        # qu'un email connu sans OTP en attente renvoyait "Aucun code en
+        # attente." — un attaquant pouvait ainsi deviner quels emails sont
+        # inscrits en soumettant directement l'étape 2 avec des adresses
+        # au hasard, sans jamais passer par l'étape 1.
+        message_generique = "Code invalide ou expiré."
+
         utilisateur = Utilisateur.objects.filter(
             email__iexact=data['email']
         ).first()
 
         if not utilisateur:
             return Response(
-                {"message": "Code invalide."},
+                {"message": message_generique},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -359,21 +475,27 @@ class ConfirmationMotDePasseOublieView(APIView):
 
         if not otp:
             return Response(
-                {"message": "Aucun code en attente."},
+                {"message": message_generique},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        valide, message = otp.verifier(data['code'])
+        valide, _ = otp.verifier(data['code'])
 
         if not valide:
             return Response(
-                {"message": message},
+                {"message": message_generique},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Le mot de passe est automatiquement haché.
         utilisateur.set_password(data['nouveau_password'])
         utilisateur.save(update_fields=['password'])
+
+        # SÉCURITÉ : un reset de mot de passe répond au scénario d'un
+        # compte potentiellement compromis. Sans ceci, un refresh token
+        # déjà émis (à un attaquant ou sur un appareil perdu) resterait
+        # valable jusqu'à 7 jours après le changement de mot de passe.
+        revoquer_tokens_actifs(utilisateur)
 
         return Response(
             {"message": "Mot de passe réinitialisé."},
@@ -383,6 +505,16 @@ class ConfirmationMotDePasseOublieView(APIView):
 
 
 class ConnexionGoogleView(APIView):
+    """
+    Connexion/inscription via Google Identity Services.
+
+    La résolution du compte (création, liaison, garde-fous anti-
+    pré-hijacking et compte désactivé) est déléguée à
+    apps.utilisateurs.services.resoudre_utilisateur_google : cette vue
+    se limite à l'orchestration HTTP (vérification du token Google,
+    traduction des erreurs métier en réponses, émission du JWT).
+    """
+
     permission_classes = [AllowAny]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'login'
@@ -403,59 +535,40 @@ class ConnexionGoogleView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        google_id = infos.get('sub')
-        email = infos.get('email')
-        email_verifie_google = infos.get('email_verified', False)
-
-        if not google_id or not email or not email_verifie_google:
+        try:
+            utilisateur = resoudre_utilisateur_google(infos)
+        except InfosGoogleIncompletes as erreur:
             return Response(
-                {"message": "Informations Google incomplètes ou non vérifiées."},
+                {"message": str(erreur)},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
-        # 1. Compte déjà lié à ce google_id -> connexion directe.
-        utilisateur = Utilisateur.objects.filter(google_id=google_id).first()
-
-        if not utilisateur:
-            # 2. Sinon, un compte existe peut-être déjà avec cet email
-            #    (inscription classique) -> on le lie à Google.
-            utilisateur, cree = Utilisateur.objects.get_or_create(
-                email__iexact=email,
-                defaults={
-                    'email': email,
-                    'nom': infos.get('family_name', ''),
-                    'prenom': infos.get('given_name', ''),
-                    'email_verifie': True,
-                    'google_id': google_id,
-                },
-            )
-
-            if cree:
-                utilisateur.set_unusable_password()
-                utilisateur.save(update_fields=['password'])
-            else:
-                utilisateur.google_id = google_id
-                if not utilisateur.email_verifie:
-                    utilisateur.email_verifie = True
-                utilisateur.save(update_fields=['google_id', 'email_verifie'])
-
-        # Contrôle d'accès : un compte désactivé (banni, fraude, etc.)
-        # ne doit jamais recevoir de token, quel que soit le moyen de
-        # connexion. RefreshToken.for_user() ne fait volontairement AUCUNE
-        # vérification d'is_active (contrairement à authenticate()) donc
-        # ce garde-fou doit être posé explicitement ici.
-        if not utilisateur.is_active:
-            logger_securite.warning(
-                "Tentative de connexion Google refusée : compte désactivé "
-                "(utilisateur_id=%s, email=%s)",
-                utilisateur.id, utilisateur.email,
-            )
+        except CompteDesactive:
             return Response(
                 {"message": "Ce compte a été désactivé."},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        except LiaisonGoogleRefusee:
+            return Response(
+                {
+                    "message": (
+                        "Un compte existe déjà avec cet email mais n'a "
+                        "pas été vérifié. Réinitialisez le mot de passe "
+                        "de ce compte ou contactez le support avant de "
+                        "vous connecter avec Google."
+                    )
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
 
         refresh = RefreshToken.for_user(utilisateur)
+
+        # F-04 (audit sécurité) : même notification de connexion que le
+        # flux classique, uniquement en cas de succès.
+        envoyer_notification_connexion.delay(
+            utilisateur.email,
+            request.META.get('REMOTE_ADDR', 'inconnue'),
+            request.META.get('HTTP_USER_AGENT', 'inconnu'),
+        )
 
         return Response(
             {
@@ -464,3 +577,61 @@ class ConnexionGoogleView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+# =====================================================
+# DÉCONNEXION
+# =====================================================
+
+class LogoutView(APIView):
+    """
+    Déconnecte l'utilisateur en révoquant son refresh token.
+
+    Sans ceci, le token_blacklist installé (SIMPLE_JWT +
+    rest_framework_simplejwt.token_blacklist) n'avait aucun point
+    d'entrée : un refresh token restait valable jusqu'à son expiration
+    naturelle (7 jours) même après une déconnexion explicite.
+
+    Même modèle que rest_framework_simplejwt.views.TokenBlacklistView
+    (et que LoginThrottleView / TokenRefreshView déjà utilisées dans ce
+    module) : authentication_classes = () et permission_classes =
+    [AllowAny]. Posséder le refresh token EST la preuve d'autorisation ;
+    aucune vérification de propriété via un access token n'est donc
+    nécessaire ni souhaitable ici. Exiger IsAuthenticated obligerait le
+    frontend à rafraîchir un access token expiré avant de pouvoir se
+    déconnecter — et un Authorization header expiré/invalide envoyé en
+    plus du corps ferait de toute façon échouer JWTAuthentication avant
+    même d'atteindre la vue, malgré permission_classes.
+
+    Un scope de throttle dédié (et non le seul throttle 'anon' générique
+    déjà actif) : sans authentification ni CSRF, cette vue reste un
+    point d'entrée public qui provoque une écriture en base
+    (BlacklistedToken) à chaque appel — une limite basse et spécifique
+    évite qu'elle serve de vecteur de spam/déni de service low-cost.
+    """
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'logout'
+
+    def post(self, request):
+        refresh_token = request.data.get('refresh')
+
+        if not refresh_token:
+            return Response(
+                {"message": "Le refresh token est requis."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            token = RefreshToken(refresh_token)
+        except TokenError:
+            return Response(
+                {"message": "Token invalide ou déjà expiré."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        token.blacklist()
+
+        return Response(status=status.HTTP_205_RESET_CONTENT)
