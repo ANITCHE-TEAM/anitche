@@ -12,6 +12,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
+.pytest_cache/
 
 # Variables d'environnement / secrets
 .env

@@ -1631,6 +1631,10 @@ class TelechargerDocumentKYCTests(TestCase):
             email='kyc-tiers@anitche.ci', password='TestPassword123!',
             nom='Tiers', prenom='Intrus',
         )
+        self.utilisateur_sans_dossier = Utilisateur.objects.create_user(
+            email='kyc-sans-dossier@anitche.ci', password='TestPassword123!',
+            nom='Sans', prenom='Dossier',
+        )
         DocumentKYC.objects.create(
             utilisateur=self.proprietaire,
             type_piece=TypePieceIdentite.CNI,
@@ -1662,6 +1666,19 @@ class TelechargerDocumentKYCTests(TestCase):
     def test_autre_utilisateur_refuse_sur_le_verso(self):
         self.client.force_authenticate(user=self.autre_utilisateur)
         response = self.client.get(self._url('piece_identite_verso'))
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_autre_utilisateur_sur_cible_sans_dossier_recoit_403_pas_404(self):
+        """
+        Broken Access Control : l'autorisation est vérifiée AVANT toute
+        recherche du dossier. Un tiers non autorisé doit recevoir le même
+        403 que la cible ait ou non soumis un KYC — sinon un 404 ici et
+        un 403 là (test_autre_utilisateur_refuse_sur_le_recto) servirait
+        d'oracle pour deviner qui a soumis un dossier KYC.
+        """
+        self.client.force_authenticate(user=self.autre_utilisateur)
+        url = f'/api/utilisateurs/kyc/{self.utilisateur_sans_dossier.id}/piece_identite_recto/'
+        response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
 

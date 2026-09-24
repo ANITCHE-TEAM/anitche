@@ -355,9 +355,11 @@ class TelechargerDocumentKYCView(APIView):
         if champ not in self.CHAMPS_AUTORISES:
             raise Http404("Document demandé inconnu.")
 
-        dossier = get_object_or_404(DocumentKYC, utilisateur_id=utilisateur_id)
-
-        est_proprietaire = dossier.utilisateur_id == request.user.id
+        # Authorization is checked BEFORE looking up the file: a non-owner,
+        # non-admin requester always gets 403, whether or not a KYC file
+        # exists. Checking afterwards returned 404 for users without a file
+        # and 403 for users with one, revealing who submitted a KYC.
+        est_proprietaire = utilisateur_id == request.user.id
         est_admin = request.user.role in (Role.ADMIN, Role.SUPER_ADMIN)
 
         if not (est_proprietaire or est_admin):
@@ -366,6 +368,8 @@ class TelechargerDocumentKYCView(APIView):
                 utilisateur_id, request.user.id,
             )
             raise PermissionDenied("Vous n'êtes pas autorisé à consulter ce document.")
+
+        dossier = get_object_or_404(DocumentKYC, utilisateur_id=utilisateur_id)
 
         fichier = getattr(dossier, champ)
         if not fichier:

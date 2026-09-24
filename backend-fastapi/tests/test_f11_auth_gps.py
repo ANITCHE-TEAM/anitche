@@ -1,13 +1,17 @@
-"""F-11 (audit sécurité) : cas d'accès refusé sur les routes de suivi GPS.
+"""F-11 (security audit): access-denied cases on the GPS tracking routes.
 
-Référencé depuis test_api.py::test_mise_a_jour_position_gps_et_consultation
-mais jamais créé — ce fichier couvre les chemins de rejet qui manquaient :
-absence de jeton, rôle non autorisé, usurpation d'un autre livreur, et
-refus explicite de verifier_acces_livraison (scoping par rôle côté Django).
+Referenced from test_api.py::test_mise_a_jour_position_gps_et_consultation
+but never created — this file covers the missing rejection paths:
+missing token, unauthorized role, impersonation of another driver, and
+explicit refusal by verifier_acces_livraison (role scoping on the Django side).
 """
 from unittest.mock import patch, AsyncMock
-from fastapi.testclient import TestClient
+
+import pytest
 from fastapi import HTTPException, status
+from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+
 from app.main import app
 from app.core.securite import utilisateur_courant
 
@@ -21,9 +25,13 @@ PAYLOAD = {
     "longitude": -4.0020,
 }
 
+# Application-level close code sent by the server when the WebSocket
+# handshake is rejected for missing or invalid authentication.
+CODE_FERMETURE_NON_AUTHENTIFIE = 4401
+
 
 def test_position_refuse_sans_authentification():
-    """Aucun header Authorization : HTTPBearer doit rejeter avant d'atteindre la vue."""
+    """No Authorization header: HTTPBearer must reject before reaching the view."""
     response = client.post("/livraison/position", json=PAYLOAD)
     assert response.status_code == status.HTTP_403_FORBIDDEN
 
@@ -34,7 +42,7 @@ def test_consultation_position_refuse_sans_authentification():
 
 
 def test_position_refuse_role_non_livreur():
-    """Un client authentifié ne peut pas publier de position GPS."""
+    """An authenticated client cannot publish a GPS position."""
     app.dependency_overrides[utilisateur_courant] = lambda: {
         "id": 42, "role": "client", "_token": "faketoken",
     }
@@ -46,7 +54,7 @@ def test_position_refuse_role_non_livreur():
 
 
 def test_position_refuse_usurpation_autre_livreur():
-    """Un livreur authentifié (id=99) ne peut pas publier pour livreur_id=42."""
+    """An authenticated driver (id=99) cannot publish for livreur_id=42."""
     app.dependency_overrides[utilisateur_courant] = lambda: {
         "id": 99, "role": "livreur", "_token": "faketoken",
     }
@@ -58,7 +66,7 @@ def test_position_refuse_usurpation_autre_livreur():
 
 
 def test_position_refuse_si_livraison_non_accessible():
-    """verifier_acces_livraison (scoping Django) refuse -> doit se propager."""
+    """verifier_acces_livraison (Django scoping) refuses -> must propagate."""
     app.dependency_overrides[utilisateur_courant] = lambda: {
         "id": 42, "role": "livreur", "_token": "faketoken",
     }
@@ -76,10 +84,16 @@ def test_position_refuse_si_livraison_non_accessible():
 
 
 def test_websocket_ferme_sans_token():
-    with client.websocket_connect(f"/livraison/ws/{LIVRAISON_ID}") as ws:
-        data = ws.receive()
-        assert data.get("type") == "websocket.close"
-        assert data.get("code") == 4401
+    """
+    The server closes the handshake before accepting it. Starlette's
+    TestClient raises WebSocketDisconnect as soon as the connection opens,
+    so the close code is checked on the exception.
+    """
+    with pytest.raises(WebSocketDisconnect) as erreur:
+        with client.websocket_connect(f"/livraison/ws/{LIVRAISON_ID}"):
+            pass
+
+    assert erreur.value.code == CODE_FERMETURE_NON_AUTHENTIFIE
 
 
 def test_websocket_ferme_token_invalide():
@@ -87,7 +101,8 @@ def test_websocket_ferme_token_invalide():
         "app.routeurs.suivi_temps_reel.verifier_jwt_brut",
         new=AsyncMock(side_effect=HTTPException(status.HTTP_401_UNAUTHORIZED, "Jeton invalide ou expiré.")),
     ):
-        with client.websocket_connect(f"/livraison/ws/{LIVRAISON_ID}?token=invalide") as ws:
-            data = ws.receive()
-            assert data.get("type") == "websocket.close"
-            assert data.get("code") == 4401
+        with pytest.raises(WebSocketDisconnect) as erreur:
+            with client.websocket_connect(f"/livraison/ws/{LIVRAISON_ID}?token=invalide"):
+                pass
+
+    assert erreur.value.code == CODE_FERMETURE_NON_AUTHENTIFIE
