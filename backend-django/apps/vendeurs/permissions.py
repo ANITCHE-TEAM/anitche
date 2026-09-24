@@ -5,7 +5,7 @@ autres modules (catalogue, commandes, retours...) : c'est le garde-fou unique
 qui empêche un vendeur non validé de publier ou de vendre.
 """
 
-from rest_framework.permissions import BasePermission
+from rest_framework.permissions import SAFE_METHODS, BasePermission
 
 from apps.utilisateurs.models import Role, StatutKYC
 
@@ -59,3 +59,21 @@ class EstProprietaireDeLaBoutique(BasePermission):
 
     def has_object_permission(self, request, view, obj):
         return obj.proprietaire_id == request.user.id
+
+
+class BoutiqueNonSuspendue(BasePermission):
+    """Une boutique suspendue par l'administration est gelée côté vendeur.
+
+    Lecture seule : le vendeur voit sa boutique (et `est_suspendue`), mais
+    toute écriture est refusée (403) tant que la suspension n'est pas
+    levée — y compris la fermeture/réouverture volontaire (`est_active`).
+    """
+
+    message = (
+        "Votre boutique est suspendue par l'administration : elle reste "
+        "consultable, mais aucune modification n'est possible tant que la "
+        "suspension n'est pas levée."
+    )
+
+    def has_object_permission(self, request, view, obj):
+        return request.method in SAFE_METHODS or not obj.est_suspendue

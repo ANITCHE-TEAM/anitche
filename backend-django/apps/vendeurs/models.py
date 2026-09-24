@@ -1,10 +1,24 @@
+import unicodedata
+
 from django.conf import settings
-from django.core.exceptions import ValidationError
+from django.core.exceptions import NON_FIELD_ERRORS, ValidationError
 from django.db import models
 from django.utils.text import slugify
 
 from apps.utilisateurs.models import Role, StatutKYC, Utilisateur
 from apps.core.validators import validateur_image_standard
+
+
+def normaliser_nom_boutique(nom):
+    """Forme de comparaison d'un nom de boutique.
+
+    Insensible à la casse, aux accents, aux espaces et à la ponctuation :
+    « Chez Awa », « chez-awa » et « CHÉZ  AWA ! » donnent tous `chezawa`.
+    Sert uniquement à empêcher des noms trop proches (usurpation d'une
+    boutique existante) ; le nom affiché reste celui saisi par le vendeur.
+    """
+    decompose = unicodedata.normalize('NFKD', nom.casefold())
+    return ''.join(caractere for caractere in decompose if caractere.isalnum())
 
 
 class BoutiqueQuerySet(models.QuerySet):
@@ -36,6 +50,8 @@ class Boutique(models.Model):
     )
 
     nom = models.CharField(max_length=120, unique=True)
+    # Recalculé à chaque save() depuis `nom` : jamais saisi directement.
+    nom_normalise = models.CharField(max_length=120, unique=True, editable=False)
     slug = models.SlugField(max_length=140, unique=True, blank=True)
     description = models.TextField(blank=True)
 
@@ -95,12 +111,21 @@ class Boutique(models.Model):
         )
 
     def clean(self):
-        # Contrôle uniquement à la création : une boutique déjà existante doit
-        # rester modifiable même si le vendeur est suspendu par la suite.
+        erreurs = {}
+        # Création seulement : sur une boutique existante, l'accès du vendeur
+        # est coupé en amont par EstVendeurValide (403 sur toutes les routes
+        # ma-boutique/, lecture comprise) dès que son KYC n'est plus validé.
         if self._state.adding and not self.vendeur_est_valide:
-            raise ValidationError(
+            erreurs[NON_FIELD_ERRORS] = [
                 "Seul un compte vendeur validé (statut_kyc = validé) peut ouvrir une boutique."
-            )
+            ]
+        if self.nom:
+            try:
+                verifier_nom_boutique_disponible(self.nom, boutique_pk=self.pk)
+            except ValidationError as erreur:
+                erreurs['nom'] = erreur.messages
+        if erreurs:
+            raise ValidationError(erreurs)
 
     def _generer_slug_unique(self):
         base = slugify(self.nom)[:120] or 'boutique'
@@ -112,6 +137,10 @@ class Boutique(models.Model):
         return slug
 
     def save(self, *args, **kwargs):
+        self.nom_normalise = normaliser_nom_boutique(self.nom)
+        update_fields = kwargs.get('update_fields')
+        if update_fields is not None and 'nom' in update_fields:
+            kwargs['update_fields'] = {*update_fields, 'nom_normalise'}
         if not self.slug:
             self.slug = self._generer_slug_unique()
         if self._state.adding:
@@ -124,7 +153,9 @@ class Boutique(models.Model):
             # MaBoutiqueView : suffisant pour l'API actuelle, mais un
             # futur appel direct (shell, script, tâche Celery) la
             # contournerait silencieusement sans ce filet de sécurité.
-            self.full_clean()
+            # `nom_normalise` est exclu : clean() le vérifie déjà (message
+            # porté par `nom`), inutile de doubler l'erreur.
+            self.full_clean(exclude=['nom_normalise'])
         return super().save(*args, **kwargs)
 
     def __str__(self):
@@ -134,6 +165,42 @@ class Boutique(models.Model):
         verbose_name = "Boutique"
         verbose_name_plural = "Boutiques"
         ordering = ['nom']
+
+
+def verifier_nom_boutique_disponible(nom, boutique_pk=None):
+    """Refuse un nom vide de sens, déjà pris, ou trop proche d'un nom pris.
+
+    Partagé par Boutique.clean() (django-admin, full_clean) et le serializer
+    (API), avec des messages distincts pour que le vendeur sache s'il doit
+    simplement changer de nom ou s'en éloigner davantage. La contrainte
+    unique sur `nom_normalise` reste le filet de sécurité en cas de course.
+    """
+    nom_normalise = normaliser_nom_boutique(nom)
+    if not nom_normalise:
+        raise ValidationError(
+            "Le nom de la boutique doit contenir au moins une lettre ou un chiffre.",
+            code='nom_sans_caractere_significatif',
+        )
+    autres = Boutique.objects.exclude(pk=boutique_pk) if boutique_pk else Boutique.objects.all()
+    # Au plus un conflit possible : nom_normalise est unique en base.
+    nom_existant = autres.filter(nom_normalise=nom_normalise).values_list('nom', flat=True).first()
+    if nom_existant is None:
+        return nom_normalise
+
+    # « Identique » : même nom à la casse et aux espaces (répétés ou en
+    # bordure) près. Toute autre différence (accents, ponctuation) ne
+    # disparaît qu'à la normalisation complète : « trop proche ».
+    def cle_nom_identique(valeur):
+        return ' '.join(valeur.split()).casefold()
+
+    if cle_nom_identique(nom_existant) == cle_nom_identique(nom):
+        raise ValidationError("Ce nom de boutique est déjà utilisé.", code='nom_identique')
+    raise ValidationError(
+        "Ce nom est trop proche de celui d'une boutique existante "
+        "(il ne s'en distingue que par des accents, de la ponctuation ou l'espacement entre les mots). "
+        "Choisissez un nom plus distinct.",
+        code='nom_trop_proche',
+    )
 
 
 class DemandeVendeurManager(models.Manager):

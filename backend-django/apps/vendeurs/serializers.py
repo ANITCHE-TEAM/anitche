@@ -5,11 +5,18 @@ from rest_framework import serializers
 
 from apps.utilisateurs.models import DocumentKYC, Utilisateur
 
-from .models import Boutique
+from .models import Boutique, verifier_nom_boutique_disponible
 
 
 class BoutiquePubliqueSerializer(serializers.ModelSerializer):
-    """Fiche boutique côté client — aucune donnée personnelle du vendeur."""
+    """Fiche boutique côté client.
+
+    Aucune donnée du COMPTE propriétaire (email et téléphone du compte,
+    identité, KYC) n'est exposée. En revanche, les coordonnées de contact de
+    la boutique (`telephone_contact`, `email_contact`), saisies par le
+    vendeur, le sont — elles peuvent être personnelles s'il y reporte les
+    siennes. Décision équipe en attente sur ce point ; comportement inchangé.
+    """
 
     class Meta:
         model = Boutique
@@ -43,6 +50,19 @@ class BoutiqueSerializer(serializers.ModelSerializer):
             'id', 'slug', 'est_suspendue', 'est_publiable', 'proprietaire_email',
             'date_creation', 'date_mise_a_jour',
         ]
+        # Le UniqueValidator généré automatiquement pour `nom` est retiré :
+        # validate_nom() couvre le cas « identique » avec son propre message,
+        # plus le cas « trop proche » qu'un UniqueValidator ne voit pas.
+        extra_kwargs = {'nom': {'validators': []}}
+
+    def validate_nom(self, value):
+        try:
+            verifier_nom_boutique_disponible(
+                value, boutique_pk=self.instance.pk if self.instance else None
+            )
+        except DjangoValidationError as erreur:
+            raise serializers.ValidationError(erreur.messages)
+        return value
 
     def validate(self, data):
         # Pré-vérification rapide pour un message d'erreur immédiat dans
@@ -55,8 +75,9 @@ class BoutiqueSerializer(serializers.ModelSerializer):
                 "Ce compte possède déjà une boutique."
             )
         return data
+
     def _valider_image(self, value, taille_max_mo, types_autorises=('image/jpeg', 'image/png', 'image/webp')):
-        """Garde-fou commun aux champs logo/banniere : taille et type MIME."""
+        """Garde-fou API sur une image envoyée : taille et type MIME déclaré."""
         if not value:
             return value
         if value.size > taille_max_mo * 1024 * 1024:
@@ -71,10 +92,11 @@ class BoutiqueSerializer(serializers.ModelSerializer):
         return value
 
     def validate_logo(self, value):
+        # Limite plus stricte que celle du modèle (validateur_image_standard,
+        # 5 Mo), volontairement posée ici et pas sur le champ : elle vise les
+        # envois des vendeurs via l'API, pas le django-admin (usage interne).
+        # La bannière n'a pas de règle propre : celle du modèle suffit.
         return self._valider_image(value, taille_max_mo=2)
-
-    def validate_banniere(self, value):
-        return self._valider_image(value, taille_max_mo=5)
 
     def create(self, validated_data):
         """
@@ -117,6 +139,19 @@ class BoutiqueSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     erreur.message_dict if hasattr(erreur, 'message_dict') else erreur.messages
                 )
+
+    def update(self, instance, validated_data):
+        # validate_nom() a déjà écarté les noms pris ; seule une course entre
+        # deux renommages simultanés peut encore percuter une contrainte
+        # unique (nom / nom_normalise) : 400 plutôt que 500.
+        try:
+            with transaction.atomic():
+                return super().update(instance, validated_data)
+        except IntegrityError:
+            raise serializers.ValidationError(
+                "Ce nom de boutique vient d'être pris par une autre "
+                "modification simultanée. Réessayez avec un nom différent."
+            )
 
 
 class BoutiqueAdministrationSerializer(BoutiqueSerializer):

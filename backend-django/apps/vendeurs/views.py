@@ -17,6 +17,7 @@ from rest_framework.views import APIView
 
 from .models import Boutique, DemandeVendeur
 from .permissions import (
+    BoutiqueNonSuspendue,
     EstAdministrateur,
     EstProprietaireDeLaBoutique,
     EstVendeurValide,
@@ -81,12 +82,15 @@ class BoutiquePubliqueDetailView(generics.RetrieveAPIView):
 class MaBoutiqueView(generics.RetrieveUpdateAPIView):
     """GET / PATCH / PUT : la boutique du vendeur connecté. POST : la créer.
 
-    La création exige un compte vendeur validé ; la consultation et la mise à
-    jour sont réservées au propriétaire.
+    Toutes les méthodes, lecture comprise, exigent un compte vendeur validé
+    (403 sinon) ; consultation et mise à jour sont réservées au propriétaire,
+    et une boutique suspendue n'est plus modifiable (403).
     """
 
     serializer_class = BoutiqueSerializer
-    permission_classes = [IsAuthenticated, EstVendeurValide, EstProprietaireDeLaBoutique]
+    permission_classes = [
+        IsAuthenticated, EstVendeurValide, EstProprietaireDeLaBoutique, BoutiqueNonSuspendue,
+    ]
 
     def get_throttles(self):
         """

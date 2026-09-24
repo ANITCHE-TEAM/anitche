@@ -1,16 +1,23 @@
+import io
+import os
+import shutil
+import tempfile
 from unittest import skipUnless
 from unittest.mock import patch
 
 from django.core.cache import cache
+from django.core.exceptions import ValidationError
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection
-from django.test import TestCase, TransactionTestCase
+from django.test import TestCase, TransactionTestCase, override_settings
+from PIL import Image
 from rest_framework import status
 from rest_framework.test import APIClient
 from rest_framework.throttling import ScopedRateThrottle
 
 from apps.utilisateurs.models import DocumentKYC, Role, StatutKYC, TypePieceIdentite, Utilisateur
 
-from .models import Boutique
+from .models import Boutique, normaliser_nom_boutique
 from .services import (
     AutoApprobationInterdite,
     TransitionVendeurImpossible,
@@ -53,16 +60,73 @@ def creer_administrateur(email='admin@anitche.ci'):
     return creer_utilisateur(email, role=Role.ADMIN)
 
 
+def image_png(nom, taille_min_mo):
+    """PNG valide (bruit aléatoire, donc peu compressible) d'au moins
+    `taille_min_mo` Mo : nécessaire pour tester une limite de taille sans
+    que le fichier soit d'abord rejeté comme image invalide."""
+    cote = int((taille_min_mo * 1024 * 1024 / 3) ** 0.5) + 50
+    tampon = io.BytesIO()
+    Image.frombytes('RGB', (cote, cote), os.urandom(cote * cote * 3)).save(tampon, format='PNG')
+    contenu = tampon.getvalue()
+    assert len(contenu) > taille_min_mo * 1024 * 1024
+    return SimpleUploadedFile(nom, contenu, content_type='image/png')
+
+
 class BoutiqueModeleTests(TestCase):
     def test_slug_genere_et_unique(self):
+        # Deux noms « trop proches » sont désormais refusés (nom_normalise) :
+        # une collision de slug ne survient plus qu'après un renommage, le
+        # slug n'étant jamais régénéré.
         premiere = Boutique.objects.create(
             proprietaire=creer_vendeur_valide('v1@anitche.ci'), nom="Chez Awa"
         )
+        premiere.nom = "Maison Awa"
+        premiere.save()
         seconde = Boutique.objects.create(
-            proprietaire=creer_vendeur_valide('v2@anitche.ci'), nom="Chez  Awa!"
+            proprietaire=creer_vendeur_valide('v2@anitche.ci'), nom="Chez Awa"
         )
         self.assertEqual(premiere.slug, 'chez-awa')
         self.assertEqual(seconde.slug, 'chez-awa-2')
+
+    def test_normalisation_du_nom(self):
+        self.assertEqual(normaliser_nom_boutique("Chez Awa"), 'chezawa')
+        self.assertEqual(normaliser_nom_boutique("  CHÉZ-awa !! "), 'chezawa')
+        self.assertEqual(normaliser_nom_boutique("Boutique n°1"), 'boutiquen1')
+        self.assertEqual(normaliser_nom_boutique("-- !! --"), '')
+
+    def test_nom_normalise_suit_le_renommage(self):
+        boutique = Boutique.objects.create(proprietaire=creer_vendeur_valide(), nom="Chez Awa")
+        self.assertEqual(boutique.nom_normalise, 'chezawa')
+
+        boutique.nom = "Pagnes d'Awa"
+        boutique.save(update_fields=['nom'])
+
+        boutique.refresh_from_db()
+        self.assertEqual(boutique.nom_normalise, 'pagnesdawa')
+
+    def test_creation_directe_nom_trop_proche_refusee(self):
+        """Filet côté modèle (full_clean) : même hors API, un nom qui ne
+        diffère que par la casse, les accents ou la ponctuation est refusé."""
+        Boutique.objects.create(proprietaire=creer_vendeur_valide('v1@anitche.ci'), nom="Chez Awa")
+
+        with self.assertRaises(ValidationError) as contexte:
+            Boutique.objects.create(
+                proprietaire=creer_vendeur_valide('v2@anitche.ci'), nom="chez-AWÂ"
+            )
+        self.assertIn('trop proche', contexte.exception.message_dict['nom'][0])
+
+    def test_creation_directe_nom_identique_avec_espaces_en_bordure(self):
+        """Hors API (pas de trim DRF), les espaces en bordure et la casse
+        ne suffisent pas à distinguer deux noms : message « identique »."""
+        Boutique.objects.create(proprietaire=creer_vendeur_valide('v1@anitche.ci'), nom="Chez Awa")
+
+        with self.assertRaises(ValidationError) as contexte:
+            Boutique.objects.create(
+                proprietaire=creer_vendeur_valide('v2@anitche.ci'), nom="  CHEZ AWA  "
+            )
+        self.assertEqual(
+            contexte.exception.message_dict['nom'], ["Ce nom de boutique est déjà utilisé."]
+        )
 
     def test_est_publiable_seulement_si_vendeur_valide(self):
         boutique = Boutique.objects.create(
@@ -237,7 +301,19 @@ class BoutiquePubliqueAPITests(TestCase):
         self.assertEqual(reponse.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_recherche_par_ville(self):
+        # ville__iexact : insensible à la casse, mais correspondance exacte.
+        reponse = self.client.get(URL_BOUTIQUES_PUBLIQUES, {'ville': 'abidjan'})
+        self.assertEqual([b['nom'] for b in reponse.data["results"]], ["Chez Awa"])
+
         reponse = self.client.get(URL_BOUTIQUES_PUBLIQUES, {'ville': 'bouake'})
+        self.assertEqual(len(reponse.data["results"]), 0)
+
+    def test_recherche_par_nom(self):
+        # nom__icontains : fragment du nom, insensible à la casse.
+        reponse = self.client.get(URL_BOUTIQUES_PUBLIQUES, {'recherche': 'awa'})
+        self.assertEqual([b['nom'] for b in reponse.data["results"]], ["Chez Awa"])
+
+        reponse = self.client.get(URL_BOUTIQUES_PUBLIQUES, {'recherche': 'introuvable'})
         self.assertEqual(len(reponse.data["results"]), 0)
 
 
@@ -301,7 +377,76 @@ class MaBoutiqueAPITests(TestCase):
         reponse = self.client.post(URL_MA_BOUTIQUE, {'nom': "Chez Awa"})
 
         self.assertEqual(reponse.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(reponse.data['errors']['nom'], ["Ce nom de boutique est déjà utilisé."])
         self.assertFalse(Boutique.objects.filter(proprietaire=second_vendeur).exists())
+
+    def test_nom_trop_proche_refuse_avec_message_distinct(self):
+        Boutique.objects.create(proprietaire=creer_vendeur_valide('premier@anitche.ci'), nom="Chez Awa")
+        self.client.force_authenticate(user=creer_vendeur_valide('second@anitche.ci'))
+
+        for variante in ("CHEZ-AWA", "ChezAwa", "Chéz Awa!"):
+            with self.subTest(variante=variante):
+                reponse = self.client.post(URL_MA_BOUTIQUE, {'nom': variante})
+                self.assertEqual(reponse.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("trop proche", reponse.data['errors']['nom'][0])
+                self.assertNotIn("déjà utilisé", reponse.data['errors']['nom'][0])
+        self.assertEqual(Boutique.objects.count(), 1)
+
+    def test_nom_identique_a_la_casse_et_aux_espaces_pres(self):
+        """« Identique » = même nom à la casse et aux espaces répétés ou en
+        bordure près ; accents et ponctuation relèvent de « trop proche »."""
+        Boutique.objects.create(proprietaire=creer_vendeur_valide('premier@anitche.ci'), nom="Chez Awa")
+        self.client.force_authenticate(user=creer_vendeur_valide('second@anitche.ci'))
+
+        cas = [
+            ("chez  awa", ["Ce nom de boutique est déjà utilisé."]),
+            ("Chéz Awa!", None),
+        ]
+        for nom, attendu in cas:
+            with self.subTest(nom=nom):
+                reponse = self.client.post(URL_MA_BOUTIQUE, {'nom': nom})
+                self.assertEqual(reponse.status_code, status.HTTP_400_BAD_REQUEST)
+                if attendu:
+                    self.assertEqual(reponse.data['errors']['nom'], attendu)
+                else:
+                    self.assertIn("trop proche", reponse.data['errors']['nom'][0])
+        self.assertEqual(Boutique.objects.count(), 1)
+
+    def test_nom_sans_lettre_ni_chiffre_refuse(self):
+        self.client.force_authenticate(user=creer_vendeur_valide())
+
+        reponse = self.client.post(URL_MA_BOUTIQUE, {'nom': "*** --- !!!"})
+
+        self.assertEqual(reponse.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            reponse.data['errors']['nom'],
+            ["Le nom de la boutique doit contenir au moins une lettre ou un chiffre."],
+        )
+        self.assertFalse(Boutique.objects.exists())
+
+    def test_renommage_vers_un_nom_trop_proche_refuse(self):
+        Boutique.objects.create(proprietaire=creer_vendeur_valide('autre@anitche.ci'), nom="Chez Awa")
+        vendeur = creer_vendeur_valide()
+        boutique = Boutique.objects.create(proprietaire=vendeur, nom="Maison Koffi")
+        self.client.force_authenticate(user=vendeur)
+
+        reponse = self.client.patch(URL_MA_BOUTIQUE, {'nom': "Chez-Awa"}, format='json')
+
+        self.assertEqual(reponse.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("trop proche", reponse.data['errors']['nom'][0])
+        boutique.refresh_from_db()
+        self.assertEqual(boutique.nom, "Maison Koffi")
+
+    def test_renommage_de_sa_propre_casse_autorise(self):
+        """Le vendeur n'entre pas en conflit avec son propre nom."""
+        vendeur = creer_vendeur_valide()
+        Boutique.objects.create(proprietaire=vendeur, nom="Chez Awa")
+        self.client.force_authenticate(user=vendeur)
+
+        reponse = self.client.patch(URL_MA_BOUTIQUE, {'nom': "CHEZ AWA"}, format='json')
+
+        self.assertEqual(reponse.status_code, status.HTTP_200_OK)
+        self.assertEqual(Boutique.objects.get().nom, "CHEZ AWA")
 
     def test_consultation_et_mise_a_jour_par_le_proprietaire(self):
         vendeur = creer_vendeur_valide()
@@ -332,29 +477,61 @@ class MaBoutiqueAPITests(TestCase):
 
         self.assertEqual(Boutique.objects.get().proprietaire, vendeur)
 
-    def test_vendeur_suspendu_qui_se_rouvre_reste_invisible(self):
-        """La fermeture volontaire (est_active) reste au vendeur, mais ne
-        lève jamais une suspension de l'administration."""
+    def test_vendeur_dont_le_kyc_nest_plus_valide_perd_tout_acces(self):
+        """Décision C : si le KYC d'un vendeur quitte l'état validé après la
+        création de sa boutique, EstVendeurValide renvoie 403 sur toutes les
+        méthodes de ma-boutique/, lecture comprise."""
+        vendeur = creer_vendeur_valide()
+        boutique = Boutique.objects.create(proprietaire=vendeur, nom="Chez Awa")
+        vendeur.statut_kyc = StatutKYC.REFUSE
+        vendeur.save(update_fields=['statut_kyc'])
+        self.client.force_authenticate(user=vendeur)
+
+        self.assertEqual(self.client.get(URL_MA_BOUTIQUE).status_code, status.HTTP_403_FORBIDDEN)
+        for methode in (self.client.patch, self.client.put):
+            with self.subTest(methode=methode.__name__):
+                reponse = methode(
+                    URL_MA_BOUTIQUE, {'nom': "Chez Awa", 'description': "Modifiée"}, format='json'
+                )
+                self.assertEqual(reponse.status_code, status.HTTP_403_FORBIDDEN)
+        boutique.refresh_from_db()
+        self.assertEqual(boutique.description, "")
+
+    def test_boutique_suspendue_consultable_par_son_vendeur(self):
+        vendeur = creer_vendeur_valide()
+        Boutique.objects.create(proprietaire=vendeur, nom="Chez Awa", est_suspendue=True)
+        self.client.force_authenticate(user=vendeur)
+
+        reponse = self.client.get(URL_MA_BOUTIQUE)
+
+        self.assertEqual(reponse.status_code, status.HTTP_200_OK)
+        self.assertTrue(reponse.data['est_suspendue'])
+        self.assertFalse(reponse.data['est_publiable'])
+
+    def test_boutique_suspendue_gelee_en_ecriture(self):
+        """Décision B : pendant une suspension, toute écriture du vendeur est
+        refusée en 403 explicite — contenu comme fermeture/réouverture."""
         vendeur = creer_vendeur_valide()
         boutique = Boutique.objects.create(
             proprietaire=vendeur, nom="Chez Awa", est_active=False, est_suspendue=True
         )
         self.client.force_authenticate(user=vendeur)
 
-        reponse = self.client.patch(URL_MA_BOUTIQUE, {'est_active': True}, format='json')
+        tentatives = [
+            ('patch', {'est_active': True}),
+            ('patch', {'description': "Modifiée"}),
+            ('put', {'nom': "Chez Awa", 'description': "Modifiée", 'est_active': True}),
+        ]
+        for methode, corps in tentatives:
+            with self.subTest(methode=methode, corps=corps):
+                reponse = getattr(self.client, methode)(URL_MA_BOUTIQUE, corps, format='json')
+                self.assertEqual(reponse.status_code, status.HTTP_403_FORBIDDEN)
+                self.assertIn("suspendue", str(reponse.data['detail']))
 
-        self.assertEqual(reponse.status_code, status.HTTP_200_OK)
         boutique.refresh_from_db()
-        self.assertTrue(boutique.est_active)
-        self.assertTrue(boutique.est_suspendue)
+        self.assertFalse(boutique.est_active)
+        self.assertEqual(boutique.description, "")
         self.assertFalse(boutique.est_publiable)
-
-        self.client.force_authenticate(user=None)
-        self.assertEqual(
-            self.client.get(f'{URL_BOUTIQUES_PUBLIQUES}{boutique.slug}/').status_code,
-            status.HTTP_404_NOT_FOUND,
-        )
-        self.assertEqual(self.client.get(URL_BOUTIQUES_PUBLIQUES).data['results'], [])
 
     def test_vendeur_ferme_puis_rouvre_sa_boutique(self):
         vendeur = creer_vendeur_valide()
@@ -378,10 +555,81 @@ class MaBoutiqueAPITests(TestCase):
 
         reponse = self.client.patch(URL_MA_BOUTIQUE, {'est_suspendue': False}, format='json')
 
-        self.assertEqual(reponse.status_code, status.HTTP_200_OK)
-        self.assertTrue(reponse.data['est_suspendue'])
+        self.assertEqual(reponse.status_code, status.HTTP_403_FORBIDDEN)
         boutique.refresh_from_db()
         self.assertTrue(boutique.est_suspendue)
+
+    def test_vendeur_ne_peut_pas_se_suspendre(self):
+        """Hors suspension, est_suspendue envoyé par le vendeur est ignoré
+        (lecture seule dans le serializer)."""
+        vendeur = creer_vendeur_valide()
+        boutique = Boutique.objects.create(proprietaire=vendeur, nom="Chez Awa")
+        self.client.force_authenticate(user=vendeur)
+
+        reponse = self.client.patch(URL_MA_BOUTIQUE, {'est_suspendue': True}, format='json')
+
+        self.assertEqual(reponse.status_code, status.HTTP_200_OK)
+        boutique.refresh_from_db()
+        self.assertFalse(boutique.est_suspendue)
+
+    def test_ecriture_retablie_apres_levee_de_la_suspension(self):
+        vendeur = creer_vendeur_valide()
+        boutique = Boutique.objects.create(proprietaire=vendeur, nom="Chez Awa", est_suspendue=True)
+        self.client.force_authenticate(user=vendeur)
+        self.assertEqual(
+            self.client.patch(URL_MA_BOUTIQUE, {'description': "x"}, format='json').status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+        boutique.est_suspendue = False
+        boutique.save(update_fields=['est_suspendue'])
+
+        reponse = self.client.patch(URL_MA_BOUTIQUE, {'description': "Pagnes"}, format='json')
+        self.assertEqual(reponse.status_code, status.HTTP_200_OK)
+        boutique.refresh_from_db()
+        self.assertEqual(boutique.description, "Pagnes")
+
+
+class MaBoutiqueImagesTests(TestCase):
+    """Logo : 2 Mo (règle API du serializer). Bannière : 5 Mo (règle du
+    modèle, validateur_image_standard) — pas de règle API propre."""
+
+    def setUp(self):
+        self.media = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.media, ignore_errors=True)
+        reglage = override_settings(MEDIA_ROOT=self.media)
+        reglage.enable()
+        self.addCleanup(reglage.disable)
+
+        self.client = APIClient()
+        vendeur = creer_vendeur_valide()
+        self.boutique = Boutique.objects.create(proprietaire=vendeur, nom="Chez Awa")
+        self.client.force_authenticate(user=vendeur)
+
+    def test_logo_de_plus_de_2_mo_refuse(self):
+        reponse = self.client.patch(
+            URL_MA_BOUTIQUE, {'logo': image_png('logo.png', 2)}, format='multipart'
+        )
+
+        self.assertEqual(reponse.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("2 Mo", reponse.data['errors']['logo'][0])
+
+    def test_banniere_entre_2_et_5_mo_acceptee(self):
+        reponse = self.client.patch(
+            URL_MA_BOUTIQUE, {'banniere': image_png('banniere.png', 2)}, format='multipart'
+        )
+
+        self.assertEqual(reponse.status_code, status.HTTP_200_OK)
+        self.boutique.refresh_from_db()
+        self.assertTrue(self.boutique.banniere)
+
+    def test_banniere_de_plus_de_5_mo_refusee_par_le_modele(self):
+        reponse = self.client.patch(
+            URL_MA_BOUTIQUE, {'banniere': image_png('banniere.png', 5)}, format='multipart'
+        )
+
+        self.assertEqual(reponse.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("5 Mo", reponse.data['errors']['banniere'][0])
 
 
 class MaBoutiqueThrottleTestCase(TestCase):
