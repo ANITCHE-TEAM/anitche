@@ -19,12 +19,21 @@ class PasseportProduitAdmin(admin.ModelAdmin):
         "nb_scans",
         "dernier_scan",
         "est_actif",
+        "desactive_par",
     )
-    list_filter = ("statut_certification", "est_actif", "date_creation")
+    list_filter = ("statut_certification", "est_actif", "desactive_par", "date_creation")
     search_fields = ("code_passeport", "produit__nom", "boutique__nom", "numero_lot", "artisan_createur")
-    readonly_fields = ("id", "code_passeport", "nb_scans", "dernier_scan", "url_verification_publique", "date_creation", "date_mise_a_jour")
+    # url_verification_publique est une propriété calculée (affichage seul).
+    readonly_fields = ("id", "code_passeport", "nb_scans", "dernier_scan", "desactive_par", "url_verification_publique", "date_creation", "date_mise_a_jour")
     inlines = [HistoriqueScanInline]
     ordering = ("-date_creation",)
+
+    def save_model(self, request, obj, form, change):
+        """Une (dés)activation depuis le Django admin est une décision de
+        l'administration : même règle que l'API (desactive_par cohérent)."""
+        if "est_actif" in form.changed_data:
+            obj.desactive_par = "" if obj.est_actif else PasseportProduit.OrigineDesactivation.ADMINISTRATION
+        super().save_model(request, obj, form, change)
 
 
 @admin.register(HistoriqueScanPasseport)

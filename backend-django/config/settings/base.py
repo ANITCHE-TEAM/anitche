@@ -168,6 +168,12 @@ REST_FRAMEWORK = {
         # voir apps/utilisateurs/views.py) : taux dédié pour éviter que ce
         # point d'entrée public serve de vecteur de spam/DoS low-cost.
         'logout': '30/hour',
+        # Vérification publique d'un passeport QR (par IP pour un visiteur).
+        # Plus large que 'anon' : derrière le CGNAT des opérateurs mobiles,
+        # des dizaines de clients d'un même quartier ou d'un même marché
+        # partagent une IP publique. 600/h (10 scans/min en moyenne) reste
+        # négligeable face aux 4 milliards de codes possibles par an.
+        'passeport_verification': '600/hour',
     },
     # Sans cette ligne, config/exceptions.py::custom_exception_handler
     # n'est jamais appelé : les 500 utilisent le handler DRF par défaut.
@@ -266,6 +272,13 @@ WEBHOOK_SECRETS = {
     'mtn_money': config('WEBHOOK_SECRET_MTN_MONEY', default=''),
     'moov_money': config('WEBHOOK_SECRET_MOOV_MONEY', default=''),
 }
+
+# Adresse publique du frontend, utilisée pour construire les liens qui y
+# mènent (ex : URL de vérification encodée dans le QR d'un passeport,
+# apps.passeport_qr). Défaut = serveur Vite de dev ; en production,
+# docker-compose.prod.yml la fournit. Domaine définitif en attente de
+# confirmation par l'équipe (docs/MODULE_PASSEPORT_QR.md).
+FRONTEND_BASE_URL = config('FRONTEND_BASE_URL', default='http://localhost:5173')
 
 
 
