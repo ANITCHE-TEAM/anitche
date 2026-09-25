@@ -182,7 +182,14 @@ REST_FRAMEWORK = {
     # nature et ordonnée pour l'affichage.
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 20,
-}   
+    # Nombre de proxys de confiance devant Django. Laissé à None (défaut
+    # DRF), l'identifiant des limites de débit anonymes est l'en-tête
+    # X-Forwarded-For entier, que le client écrit lui-même : changer cet
+    # en-tête à chaque requête contournait toutes les limites (login, otp,
+    # logout...). 0 = aucun proxy : seul REMOTE_ADDR compte (dev, tests).
+    # En production, prod.py le passe à 1 (Nginx, qui réécrit l'en-tête).
+    'NUM_PROXIES': 0,
+}
 
 from datetime import timedelta
 

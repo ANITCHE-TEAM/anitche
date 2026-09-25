@@ -100,6 +100,15 @@ CSRF_COOKIE_SECURE = True
 # Django tant que ce dernier reste inaccessible autrement que via Nginx.
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
+# Adresse IP du client (limites de débit DRF, apps.core.reseau) : un seul
+# proxy de confiance, Nginx. Il résout lui-même l'IP réelle du visiteur
+# (module real_ip, uniquement pour les connexions venant des plages
+# Cloudflare) puis ÉCRASE X-Forwarded-For avec cette seule valeur — voir
+# infra/nginx/nginx.conf. Django lit donc la dernière (et unique) entrée.
+# Même raisonnement que SECURE_PROXY_SSL_HEADER : valable tant que Django
+# n'est joignable que via Nginx.
+REST_FRAMEWORK['NUM_PROXIES'] = 1
+
 # HSTS : force le navigateur à toujours utiliser HTTPS pour ce domaine, même
 # si un lien ou un attaquant en position MITM essaie de forcer un retour en
 # HTTP. Sans ça, SECURE_SSL_REDIRECT ne protège pas la toute première requête.
