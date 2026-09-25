@@ -16,7 +16,7 @@ from .models import Commande, GroupeCommande, CommandeItem
 from .serializers import CommandeSerializer, GroupeCommandeSerializer, CommandeItemSerializer
 from apps.catalogue.models import Stock
 from apps.panier.models import Panier
-from apps.panier.views import get_or_create_panier
+from apps.panier.services import get_or_create_panier
 from apps.fidelite.models import CouponReduction
 
 logger_securite = logging.getLogger('securite')
@@ -65,9 +65,7 @@ class ValiderPanierView(APIView):
                         {"coupon_code": f"Le code promo '{coupon_code_saisi}' n'existe pas."}
                     )
 
-            items = list(
-                panier.items.select_related("variante__produit__boutique", "variante__stock")
-            )
+            items = list(panier.items.avec_details())
 
             if not items:
                 raise ValidationError("Le panier est vide.")
@@ -77,15 +75,19 @@ class ValiderPanierView(APIView):
             # banni) entre l'ajout au panier et le paiement ne doivent jamais
             # pouvoir être commandés. Produit.est_achetable est le point
             # d'entrée unique documenté pour cette règle (voir
-            # Boutique.est_publiable) : on le réutilise tel quel plutôt que
-            # de ne vérifier qu'une partie de la condition (F-13).
-            item_non_achetable = next(
-                (item for item in items if not item.variante.est_active or not item.variante.produit.est_achetable),
-                None,
-            )
-            if item_non_achetable is not None:
+            # Boutique.est_publiable) : PanierItem.est_disponible l'applique
+            # (avec variante.est_active), la même règle que l'API panier (F-13).
+            # Toutes les lignes concernées sont listées, pas seulement la
+            # première, pour que le client les retire en une fois.
+            items_non_achetables = [item for item in items if not item.est_disponible]
+            if items_non_achetables:
+                libelles = ", ".join(
+                    f"{item.variante.produit.nom} ({item.variante.nom})"
+                    for item in items_non_achetables
+                )
                 raise ValidationError(
-                    f"{item_non_achetable.variante.nom} n'est plus disponible à la vente."
+                    f"Ces articles ne sont plus disponibles à la vente : {libelles}. "
+                    "Retirez-les du panier pour valider la commande."
                 )
 
             # 1. Regroupe les articles par boutique

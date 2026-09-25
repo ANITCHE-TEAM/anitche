@@ -123,6 +123,33 @@ class ValiderPanierTestCase(APITestCase):
         response = self.client.post(self.url)
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
+    def test_articles_indisponibles_tous_listes_et_validation_refusee(self):
+        """Toutes les lignes indisponibles sont nommées dans le refus, pas
+        seulement la première ; rien n'est créé ni décrémenté."""
+        troisieme = VarianteProduit.objects.create(produit=self.produit1, nom="Premium", prix=Decimal("1500"))
+        troisieme.stock.quantite_disponible = 10
+        troisieme.stock.save()
+        self._ajouter_au_panier(self.variante1, 1)   # reste disponible
+        self._ajouter_au_panier(troisieme, 1)        # variante désactivée
+        self._ajouter_au_panier(self.variante2, 1)   # boutique suspendue
+        troisieme.est_active = False
+        troisieme.save(update_fields=["est_active"])
+        self.boutique2.est_suspendue = True
+        self.boutique2.save(update_fields=["est_suspendue"])
+
+        self.client.force_authenticate(user=self.client_user)
+        response = self.client.post(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        message = str(response.data["errors"])
+        self.assertIn("Produit A (Premium)", message)
+        self.assertIn("Produit B (Standard)", message)
+        self.assertNotIn("Produit A (Standard)", message)
+        self.assertEqual(Commande.objects.count(), 0)
+        self.variante1.stock.refresh_from_db()
+        self.assertEqual(self.variante1.stock.quantite_disponible, 10)
+        self.assertEqual(Panier.objects.get(utilisateur=self.client_user).items.count(), 3)
+
 
 class CommandeAccessTestCase(APITestCase):
 
