@@ -1,4 +1,5 @@
 from django.db import IntegrityError
+from django.db.models import Exists, OuterRef
 from rest_framework import generics, status
 from rest_framework.exceptions import ValidationError
 from rest_framework.views import APIView
@@ -16,6 +17,7 @@ from .serializers import (
     CreerPasseportSerializer,
     origine_desactivation,
 )
+from apps.catalogue.models import Produit
 from apps.core.reseau import adresse_ip_client
 from apps.vendeurs.permissions import ROLES_ADMINISTRATION
 
@@ -44,7 +46,11 @@ class PasseportPublicVerificationView(APIView):
         code = code_passeport.strip().upper()
         passeport = (
             PasseportProduit.objects
-            .select_related("produit__boutique__proprietaire", "variante", "boutique")
+            .select_related("produit", "variante", "boutique")
+            # Même règle que la fiche publique du catalogue (404 si absent).
+            .annotate(produit_visible=Exists(
+                Produit.objects.visibles_publiquement().filter(pk=OuterRef("produit_id"))
+            ))
             .filter(code_passeport=code)
             .first()
         )

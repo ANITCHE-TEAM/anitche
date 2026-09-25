@@ -11,7 +11,9 @@ class SupportTicket(models.Model):
 
     Le ticket peut être lié à une commande, une boutique ou un produit
     selon le motif (category), mais reste vivant même si l'objet référencé
-    est supprimé (on_delete=SET_NULL) pour préserver l'historique support.
+    est supprimé (on_delete=SET_NULL) pour préserver l'historique support —
+    sauf le produit, protégé (PROTECT) : il n'est jamais supprimé, seulement
+    désactivé (catalogue).
     """
 
     class Status(models.TextChoices):
@@ -74,7 +76,9 @@ class SupportTicket(models.Model):
 
    
     order = models.ForeignKey("commandes.Commande", on_delete=models.SET_NULL, null=True, blank=True, related_name="support_tickets")
-    product = models.ForeignKey("catalogue.Produit", on_delete=models.SET_NULL, null=True, blank=True, related_name="support_tickets")
+    # PROTECT (et non SET_NULL) : un ticket ne perd jamais le produit qu'il
+    # concerne. L'API du catalogue désactive au lieu de supprimer.
+    product = models.ForeignKey("catalogue.Produit", on_delete=models.PROTECT, null=True, blank=True, related_name="support_tickets")
 
     subject = models.CharField(max_length=255)
     description = models.TextField()

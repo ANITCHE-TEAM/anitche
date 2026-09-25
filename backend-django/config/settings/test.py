@@ -39,6 +39,7 @@ REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {
     'fidelite_conversion': '100000/day',
     'logout': '100000/day',
     'passeport_verification': '100000/day',
+    'catalogue_public': '100000/day',
 }
 # Cache en mémoire rapide pour les tests
 CACHES = {

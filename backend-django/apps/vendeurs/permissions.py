@@ -9,6 +9,8 @@ from rest_framework.permissions import SAFE_METHODS, BasePermission
 
 from apps.utilisateurs.models import Role, StatutKYC
 
+from .models import Boutique
+
 #: Rôles considérés comme « administration ANITCHE ».
 ROLES_ADMINISTRATION = (Role.ADMIN, Role.SUPER_ADMIN)
 
@@ -77,3 +79,21 @@ class BoutiqueNonSuspendue(BasePermission):
 
     def has_object_permission(self, request, view, obj):
         return request.method in SAFE_METHODS or not obj.est_suspendue
+
+
+class BoutiqueDuVendeurNonSuspendue(BasePermission):
+    """Boutique suspendue : lecture autorisée, toute écriture refusée (403).
+
+    Transposition de `BoutiqueNonSuspendue` pour les modules qui gèrent des
+    objets de la boutique (catalogue, passeports) : le vendeur n'agit que sur
+    ses propres objets (querysets filtrés), c'est donc SA boutique qui est
+    vérifiée. L'administration n'est pas concernée (elle doit pouvoir
+    modérer les objets d'une boutique suspendue).
+    """
+
+    message = BoutiqueNonSuspendue.message
+
+    def has_permission(self, request, view):
+        if request.method in SAFE_METHODS or request.user.role in ROLES_ADMINISTRATION:
+            return True
+        return not Boutique.objects.filter(proprietaire_id=request.user.pk, est_suspendue=True).exists()

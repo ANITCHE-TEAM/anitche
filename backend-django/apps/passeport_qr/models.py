@@ -1,10 +1,13 @@
 import ipaddress
 import uuid
+from functools import cached_property
 
 from django.conf import settings
 from django.db import IntegrityError, models, transaction
 from django.db.models import F, Q
 from django.utils import timezone
+
+from apps.catalogue.models import Produit
 
 #: Page publique de vérification côté frontend. Décision en attente : le
 #: domaine (FRONTEND_BASE_URL) et cette route restent à confirmer par
@@ -56,16 +59,19 @@ class PasseportProduit(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     code_passeport = models.CharField(max_length=35, unique=True, editable=False, db_index=True)
 
+    # PROTECT : supprimer un produit ou une variante effaçait (ou modifiait)
+    # le certificat et son historique de scans. L'API du catalogue désactive
+    # au lieu de supprimer ; ce filet vaut pour le Django admin.
     produit = models.ForeignKey(
         "catalogue.Produit",
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name="passeports",
         verbose_name="Produit associé",
     )
 
     variante = models.ForeignKey(
         "catalogue.VarianteProduit",
-        on_delete=models.SET_NULL,
+        on_delete=models.PROTECT,
         null=True,
         blank=True,
         related_name="passeports",
@@ -141,13 +147,23 @@ class PasseportProduit(models.Model):
         base = settings.FRONTEND_BASE_URL.rstrip("/")
         return base + CHEMIN_VERIFICATION_PUBLIQUE.format(code=self.code_passeport)
 
-    @property
+    @cached_property
     def est_disponible_a_la_vente(self):
-        """Même règle que le panier : variante active et `produit.est_achetable`
-        (produit actif, boutique ouverte et non suspendue, vendeur validé et actif)."""
+        """Exactement la règle de la fiche publique du catalogue : le produit
+        doit figurer dans `Produit.objects.visibles_publiquement()` (produit
+        actif, boutique publiable, au moins une variante active — sinon la
+        fiche répond 404), et la variante certifiée, s'il y en a une, doit
+        être active (la fiche n'affiche que les variantes actives).
+
+        La vue publique précalcule `produit_visible` en SQL (annotation
+        `Exists` sur ce même queryset) ; à défaut, une requête est faite.
+        """
         if self.variante is not None and not self.variante.est_active:
             return False
-        return self.produit.est_achetable
+        produit_visible = getattr(self, "produit_visible", None)
+        if produit_visible is None:
+            produit_visible = Produit.objects.visibles_publiquement().filter(pk=self.produit_id).exists()
+        return produit_visible
 
     def save(self, *args, **kwargs):
         if self.code_passeport:

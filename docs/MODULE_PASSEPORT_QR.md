@@ -8,7 +8,7 @@
 | Élément | Où | Rôle |
 |---|---|---|
 | `EstVendeurValide`, `EstAdministrateur`, `ROLES_ADMINISTRATION`, `BoutiqueNonSuspendue` | `apps/vendeurs/permissions.py` | Accès à l'espace vendeur (mêmes règles que `ma-boutique/`). `is_staff` ne donne **aucun** pouvoir métier |
-| `Produit.est_achetable` | `apps/catalogue/models.py` | Produit actif **et** `boutique.est_publiable` : décide si un article est encore « disponible à la vente » |
+| `Produit.objects.visibles_publiquement()` | `apps/catalogue/models.py` | **La** règle de visibilité du catalogue (produit actif, boutique publiable, au moins une variante active ; sinon la fiche répond 404). Décide si un article est encore « disponible à la vente » : aucune règle propre au passeport |
 | `Boutique.est_publiable` | `apps/vendeurs/models.py` | Boutique ouverte, non suspendue, vendeur validé et actif |
 | `adresse_ip_client()` | `apps/core/reseau.py` | IP du client derrière les proxys de confiance (même source que les limites de débit DRF) |
 | `FRONTEND_BASE_URL` | `config/settings/base.py` | Base de l'URL encodée dans le QR |
@@ -18,6 +18,7 @@ Aucun autre module n'importe `passeport_qr`. Aucun consommateur n'existe encore 
 ## 2. Modèle
 
 - `PasseportProduit` : **un passeport = un lot** d'un produit (et éventuellement d'une variante).
+  - `produit` et `variante` sont en `on_delete=PROTECT` (migration 0006) : un produit ou une variante certifiés ne peuvent pas être supprimés, même depuis le Django admin. L'API du catalogue ne supprime jamais, elle désactive (voir `MODULE_CATALOGUE.md`).
   - `code_passeport` : `PAS-<année>-<8 hex majuscules>`, unique, généré à la création. En cas de collision, nouvel essai (5 au maximum) au lieu d'une erreur 500. Format inchangé.
   - **Un seul passeport par (produit, variante, numero_lot)** quand `numero_lot` est renseigné : contrainte `passeport_unique_par_lot` (index unique partiel, `NULLS NOT DISTINCT` : « sans variante » compte comme une valeur ; PostgreSQL ≥ 15). Sans numéro de lot, pas de contrainte. La contrainte couvre aussi les passeports révoqués : pour un lot révoqué, on réactive le passeport, on n'en recrée pas un.
   - `statut_certification` : `standard` (défaut), `label_local`, `certifie_authentique`. Voir § 5.
@@ -67,14 +68,15 @@ Accès :
 | Situation | Statut HTTP | Réponse |
 |---|---|---|
 | Passeport actif, article vendable | 200 | Certificat complet, `statut_passeport: "valide"`, `boutique_nom`, `produit_slug`, `disponible_a_la_vente: true`, `motif_indisponibilite: null` |
-| Passeport actif, article **non vendable** (boutique suspendue ou fermée, vendeur non validé ou désactivé, produit inactif, variante inactive) | 200 | Certificat complet (il atteste la fabrication), mais `boutique_nom: "Vendeur indisponible"`, `produit_slug: null`, `disponible_a_la_vente: false`, `motif_indisponibilite: "Ce produit n'est plus proposé à la vente sur ANITCHE."` |
+| Passeport actif, article **non vendable** = produit absent de `Produit.objects.visibles_publiquement()` (boutique suspendue ou fermée, vendeur non validé ou désactivé, produit inactif, **aucune variante active**, produit sans variante), ou variante certifiée inactive | 200 | Certificat complet (il atteste la fabrication), mais `boutique_nom: "Vendeur indisponible"`, `produit_slug: null`, `disponible_a_la_vente: false`, `motif_indisponibilite: "Ce produit n'est plus proposé à la vente sur ANITCHE."` |
 | Passeport révoqué (`est_actif = false`) | 200 | Uniquement `code_passeport`, `statut_passeport: "revoque"`, `statut_passeport_display: "Certificat révoqué"`, `disponible_a_la_vente: false` |
 | Code inconnu | 404 | `Passeport numérique introuvable pour le code '…'.` |
 
 - Le motif est **volontairement générique** : la réponse publique ne contient jamais le mot « suspendue » ni le nom d'une boutique non publiable.
 - Champs du certificat : `code_passeport`, `statut_passeport`, `statut_passeport_display`, `produit_nom`, `produit_slug`, `boutique_nom`, `variante_nom`, `numero_lot`, `origine_geographique`, `materiaux_utilises`, `date_fabrication`, `artisan_createur`, `statut_certification`, `statut_certification_display`, `nb_scans`, `url_verification_publique`, `disponible_a_la_vente`, `motif_indisponibilite`.
 - `dernier_scan` n'est **pas** public (il révélait quand quelqu'un d'autre avait scanné). `nb_scans` reste public : un nombre de scans anormal signale un QR recopié.
-- Coût : 1 lecture (`select_related`), puis UPDATE + INSERT du scan en transaction et relecture du compteur.
+- Règle unique : `est_disponible_a_la_vente` ⇔ la fiche catalogue du produit répond 200 (et la variante certifiée, s'il y en a une, est active). La vue calcule la visibilité en SQL (`Exists` sur `Produit.objects.visibles_publiquement()`, dans la même requête que la lecture du passeport). Testé état par état contre la fiche catalogue (`test_meme_regle_que_la_fiche_catalogue`).
+- Coût : 1 lecture (`select_related` + annotation de visibilité), puis UPDATE + INSERT du scan en transaction et relecture du compteur.
 
 ## 5. Certification « Certifié Authentique ANITCHE »
 
@@ -154,7 +156,7 @@ DJANGO_SETTINGS_MODULE=config.settings.ci DB_NAME=anitche_test DB_USER=postgres 
 
 Vérifier dans la sortie `-v 2` que `test_scans_simultanes_aucun_increment_perdu` et `test_creations_simultanees_du_meme_lot_une_seule_acceptee` affichent `ok` et non `skipped`.
 
-Couverture : accès (client, anonyme, `is_staff`, admin/super_admin, vendeur non validé, boutique suspendue, passeports d'autrui), certification, révocation, désactivation/réactivation selon l'origine (§ 5 bis, y compris modification concurrente et contrainte en base), migration 0005, unicité par lot (API, base, concurrence), produit/variante inactifs, vérification publique (6 cas non vendables, révoqué, 404, champs exposés, URL calculée, nombre de requêtes), IP (en-tête forgé, chaîne multi-adresses, proxy de confiance, troncature), atomicité du scan, limite de débit dédiée, collision de code, F-21.
+Couverture : accès (client, anonyme, `is_staff`, admin/super_admin, vendeur non validé, boutique suspendue, passeports d'autrui), certification, révocation, désactivation/réactivation selon l'origine (§ 5 bis, y compris modification concurrente et contrainte en base), migration 0005, unicité par lot (API, base, concurrence), produit/variante inactifs, vérification publique (6 cas non vendables, produit sans variante active ou sans variante, équivalence avec la fiche catalogue, révoqué, 404, champs exposés, URL calculée, nombre de requêtes), IP (en-tête forgé, chaîne multi-adresses, proxy de confiance, troncature), atomicité du scan, limite de débit dédiée, collision de code, F-21.
 
 ## 12. Migration `0003_passeport_par_lot_sans_image_ni_url`
 

@@ -11,6 +11,7 @@ from .views import (
     StockUpdateView,
     ImageProduitListCreateView,
     ImageProduitDeleteView,
+    ProduitAdministrationDetailView,
 )
 
 app_name = 'catalogue'
@@ -30,4 +31,7 @@ urlpatterns = [
     path('vendeur/variantes/<int:pk>/stock/', StockUpdateView.as_view(), name='vendeur-stock-update'),
     path('vendeur/produits/<int:produit_pk>/images/', ImageProduitListCreateView.as_view(), name='vendeur-images-liste'),
     path('vendeur/images/<int:pk>/', ImageProduitDeleteView.as_view(), name='vendeur-image-detail'),
+
+    # --- Administration (modération : activation uniquement) ---
+    path('administration/produits/<int:pk>/', ProduitAdministrationDetailView.as_view(), name='administration-produit-detail'),
 ]

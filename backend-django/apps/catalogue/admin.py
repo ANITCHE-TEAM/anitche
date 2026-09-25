@@ -22,11 +22,19 @@ class CategorieAdmin(admin.ModelAdmin):
 
 @admin.register(Produit)
 class ProduitAdmin(admin.ModelAdmin):
-    list_display = ('nom', 'boutique', 'categorie', 'prix_base', 'est_actif', 'date_creation')
-    list_filter = ('est_actif', 'categorie', 'date_creation')
+    list_display = ('nom', 'boutique', 'categorie', 'prix_base', 'est_actif', 'desactive_par', 'date_creation')
+    list_filter = ('est_actif', 'desactive_par', 'categorie', 'date_creation')
     search_fields = ('nom', 'description', 'boutique__nom')
     prepopulated_fields = {'slug': ('nom',)}
+    readonly_fields = ('desactive_par',)
     inlines = [ImageProduitInline, VarianteProduitInline]
+
+    def save_model(self, request, obj, form, change):
+        """Une (dés)activation depuis le Django admin est une décision de
+        l'administration : même règle que l'API (desactive_par cohérent)."""
+        if 'est_actif' in form.changed_data or (not change and not obj.est_actif):
+            obj.desactive_par = '' if obj.est_actif else Produit.OrigineDesactivation.ADMINISTRATION
+        super().save_model(request, obj, form, change)
 
 
 @admin.register(VarianteProduit)

@@ -1,6 +1,7 @@
 import uuid
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 from django.utils.text import slugify
 
@@ -101,6 +102,18 @@ class ProduitQuerySet(models.QuerySet):
             boutique__proprietaire__is_active=True,
         )
 
+    def visibles_publiquement(self):
+        """Ce que le public voit : produits publiés ayant au moins une
+        variante active. Sans variante active, rien ne peut être mis au
+        panier : le produit n'apparaît ni dans les listes ni en fiche (404)."""
+        return self.publies().filter(
+            Exists(VarianteProduit.objects.filter(produit=OuterRef('pk'), est_active=True))
+        )
+
+
+#: Nombre maximal d'images dans la galerie d'un produit.
+MAX_IMAGES_PAR_PRODUIT = 10
+
 
 class Produit(models.Model):
     """Produit commercialisé par une boutique sur la marketplace."""
@@ -132,9 +145,22 @@ class Produit(models.Model):
         help_text="Prix de base ou prix indicatif en FCFA",
     )
 
+    class OrigineDesactivation(models.TextChoices):
+        VENDEUR = 'vendeur', 'Vendeur'
+        ADMINISTRATION = 'administration', 'Administration ANITCHE'
+
+    # Ne se modifie que par desactiver() / reactiver() : l'API ne supprime
+    # jamais un produit (commandes, passeports et paniers y restent liés).
     est_actif = models.BooleanField(
         default=True,
         help_text="Décochez pour retirer le produit du catalogue public.",
+    )
+    desactive_par = models.CharField(
+        max_length=20,
+        choices=OrigineDesactivation.choices,
+        blank=True,
+        help_text="Qui a désactivé le produit (vide s'il est actif). Une désactivation "
+                  "de l'administration (modération) ne peut être levée que par elle.",
     )
 
     date_creation = models.DateTimeField(auto_now_add=True)
@@ -160,6 +186,36 @@ class Produit(models.Model):
             self.slug = self._generer_slug_unique()
         return super().save(*args, **kwargs)
 
+    # Mêmes transitions que PasseportProduit (apps.passeport_qr) : UPDATE
+    # conditionnels, sûrs quand vendeur et administration agissent en même
+    # temps ; l'origine enregistrée est toujours celle qui fait foi.
+
+    def desactiver(self, par):
+        """Retire le produit du catalogue.
+
+        Vendeur : sans effet sur un produit déjà désactivé (il ne prend pas
+        la main sur une désactivation de l'administration).
+        Administration : s'impose toujours, y compris sur une désactivation
+        du vendeur, qui ne pourra alors plus la lever.
+        """
+        lignes = Produit.objects.filter(pk=self.pk)
+        if par == self.OrigineDesactivation.ADMINISTRATION:
+            lignes = lignes.exclude(est_actif=False, desactive_par=par)
+        else:
+            lignes = lignes.filter(est_actif=True)
+        lignes.update(est_actif=False, desactive_par=par, date_mise_a_jour=timezone.now())
+        self.refresh_from_db(fields=['est_actif', 'desactive_par', 'date_mise_a_jour'])
+
+    def reactiver(self, par):
+        """Remet le produit au catalogue. Renvoie False si c'est interdit :
+        une désactivation de l'administration ne peut être levée que par elle."""
+        lignes = Produit.objects.filter(pk=self.pk, est_actif=False)
+        if par != self.OrigineDesactivation.ADMINISTRATION:
+            lignes = lignes.filter(desactive_par=self.OrigineDesactivation.VENDEUR)
+        lignes.update(est_actif=True, desactive_par='', date_mise_a_jour=timezone.now())
+        self.refresh_from_db(fields=['est_actif', 'desactive_par', 'date_mise_a_jour'])
+        return self.est_actif
+
     def __str__(self):
         return f"{self.nom} ({self.boutique.nom})"
 
@@ -167,6 +223,14 @@ class Produit(models.Model):
         verbose_name = "Produit"
         verbose_name_plural = "Produits"
         ordering = ['-date_creation']
+        constraints = [
+            models.CheckConstraint(condition=Q(prix_base__gte=0), name='produit_prix_base_positif'),
+            # Actif ⇔ aucune origine de désactivation.
+            models.CheckConstraint(
+                condition=Q(est_actif=True, desactive_par='') | (Q(est_actif=False) & ~Q(desactive_par='')),
+                name='produit_desactivation_coherente',
+            ),
+        ]
 
 
 class ImageProduit(models.Model):
@@ -286,6 +350,20 @@ class VarianteProduit(models.Model):
         verbose_name = "Variante produit"
         verbose_name_plural = "Variantes produits"
         ordering = ['id']
+        # Filet de sécurité des règles de prix validées par l'API
+        # (serializers.valider_prix_variante) : un prix nul permettrait une
+        # commande gratuite au checkout.
+        constraints = [
+            models.CheckConstraint(condition=Q(prix__gt=0), name='variante_prix_strictement_positif'),
+            models.CheckConstraint(
+                condition=Q(prix_promo__isnull=True) | Q(prix_promo__gt=0, prix_promo__lt=models.F('prix')),
+                name='variante_prix_promo_coherent',
+            ),
+            models.CheckConstraint(
+                condition=Q(poids_kg__isnull=True) | Q(poids_kg__gte=0),
+                name='variante_poids_positif',
+            ),
+        ]
 
 
 class Stock(models.Model):

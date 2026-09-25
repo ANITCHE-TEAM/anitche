@@ -203,8 +203,7 @@ class PanierFaillesCorrigeesTestCase(PanierBaseTestCase):
             self.boutique.est_active = False
             self.boutique.save(update_fields=["est_active"])
         elif cas == "produit_inactif":
-            self.produit.est_actif = False
-            self.produit.save(update_fields=["est_actif"])
+            self.produit.desactiver(par="vendeur")
         elif cas == "variante_inactive":
             self.variante.est_active = False
             self.variante.save(update_fields=["est_active"])

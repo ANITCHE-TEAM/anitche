@@ -1,5 +1,12 @@
+"""Contrôle d'appartenance de l'espace vendeur (défense en profondeur).
+
+Les querysets des vues sont déjà filtrés sur le propriétaire (404 pour les
+objets d'une autre boutique) ; ces permissions le revérifient au niveau de
+l'objet. L'administration n'a pas accès à l'espace vendeur (EstVendeurValide) :
+elle modère les produits via administration/produits/ (EstAdministrateur).
+"""
+
 from rest_framework.permissions import BasePermission
-from apps.utilisateurs.models import Role
 
 
 class EstProprietaireDuProduit(BasePermission):
@@ -8,9 +15,7 @@ class EstProprietaireDuProduit(BasePermission):
     message = "Vous n'avez pas la permission de modifier ce produit."
 
     def has_object_permission(self, request, view, obj):
-        if request.user.role in [Role.ADMIN, Role.SUPER_ADMIN]:
-            return True
-        return obj.boutique.proprietaire == request.user
+        return obj.boutique.proprietaire_id == request.user.id
 
 
 class EstProprietaireDeLaVariante(BasePermission):
@@ -19,9 +24,7 @@ class EstProprietaireDeLaVariante(BasePermission):
     message = "Vous n'avez pas la permission de modifier cette variante."
 
     def has_object_permission(self, request, view, obj):
-        if request.user.role in [Role.ADMIN, Role.SUPER_ADMIN]:
-            return True
-        return obj.produit.boutique.proprietaire == request.user
+        return obj.produit.boutique.proprietaire_id == request.user.id
 
 
 class EstProprietaireDeLImage(BasePermission):
@@ -30,6 +33,4 @@ class EstProprietaireDeLImage(BasePermission):
     message = "Vous n'avez pas la permission de modifier ou supprimer cette image."
 
     def has_object_permission(self, request, view, obj):
-        if request.user.role in [Role.ADMIN, Role.SUPER_ADMIN]:
-            return True
-        return obj.produit.boutique.proprietaire == request.user
+        return obj.produit.boutique.proprietaire_id == request.user.id

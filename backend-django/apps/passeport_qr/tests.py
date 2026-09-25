@@ -581,7 +581,7 @@ class PasseportLotTestCase(BasePasseportTestCase):
 
 class PasseportProduitInactifTestCase(BasePasseportTestCase):
     def test_creation_refusee_sur_produit_inactif(self):
-        Produit.objects.filter(pk=self.produit1.pk).update(est_actif=False)
+        Produit.objects.filter(pk=self.produit1.pk).update(est_actif=False, desactive_par="vendeur")
         self.client.force_authenticate(self.vendeur1)
         response = self.client.post(URL_LISTE, {"produit_id": self.produit1.id}, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
@@ -597,14 +597,14 @@ class PasseportProduitInactifTestCase(BasePasseportTestCase):
         self.assertIn("variante_id", response.data["errors"])
 
     def test_etat_dun_produit_dautrui_non_revele(self):
-        Produit.objects.filter(pk=self.produit2.pk).update(est_actif=False)
+        Produit.objects.filter(pk=self.produit2.pk).update(est_actif=False, desactive_par="vendeur")
         self.client.force_authenticate(self.vendeur1)
         response = self.client.post(URL_LISTE, {"produit_id": self.produit2.id}, format="json")
         self.assertEqual(str(response.data["errors"]["produit_id"][0]), "Ce produit n'appartient pas à votre boutique.")
 
     def test_patch_vers_produit_ou_variante_inactifs_refuse(self):
         passeport = self.creer_passeport()
-        produit_inactif = Produit.objects.create(boutique=self.boutique1, nom="Ancien", est_actif=False)
+        produit_inactif = Produit.objects.create(boutique=self.boutique1, nom="Ancien", est_actif=False, desactive_par="vendeur")
         VarianteProduit.objects.filter(pk=self.variante1.pk).update(est_active=False)
         self.client.force_authenticate(self.vendeur1)
         response = self.client.patch(url_detail(passeport), {"produit": produit_inactif.id}, format="json")
@@ -614,7 +614,7 @@ class PasseportProduitInactifTestCase(BasePasseportTestCase):
 
     def test_produit_desactive_apres_coup_reste_modifiable(self):
         passeport = self.creer_passeport(variante=self.variante1)
-        Produit.objects.filter(pk=self.produit1.pk).update(est_actif=False)
+        Produit.objects.filter(pk=self.produit1.pk).update(est_actif=False, desactive_par="vendeur")
         VarianteProduit.objects.filter(pk=self.variante1.pk).update(est_active=False)
         self.client.force_authenticate(self.vendeur1)
         response = self.client.patch(url_detail(passeport), {"artisan_createur": "Atelier"}, format="json")
@@ -637,7 +637,7 @@ class PasseportVerificationPubliqueTestCase(BasePasseportTestCase):
             "boutique fermée": lambda: Boutique.objects.filter(pk=self.boutique1.pk).update(est_active=False),
             "vendeur non validé": lambda: Utilisateur.objects.filter(pk=self.vendeur1.pk).update(statut_kyc=StatutKYC.REFUSE),
             "vendeur désactivé": lambda: Utilisateur.objects.filter(pk=self.vendeur1.pk).update(is_active=False),
-            "produit inactif": lambda: Produit.objects.filter(pk=self.produit1.pk).update(est_actif=False),
+            "produit inactif": lambda: Produit.objects.filter(pk=self.produit1.pk).update(est_actif=False, desactive_par="vendeur"),
             "variante inactive": lambda: VarianteProduit.objects.filter(pk=self.variante1.pk).update(est_active=False),
         }
         for libelle, rendre_non_vendable in cas.items():
@@ -663,13 +663,61 @@ class PasseportVerificationPubliqueTestCase(BasePasseportTestCase):
         return {
             Boutique: (self.boutique1.pk, {"est_suspendue": False, "est_active": True}),
             Utilisateur: (self.vendeur1.pk, {"statut_kyc": StatutKYC.VALIDE, "is_active": True}),
-            Produit: (self.produit1.pk, {"est_actif": True}),
+            Produit: (self.produit1.pk, {"est_actif": True, "desactive_par": ""}),
             VarianteProduit: (self.variante1.pk, {"est_active": True}),
         }
 
     def restaurer_etats(self, sauvegarde):
         for modele, (pk, valeurs) in sauvegarde.items():
             modele.objects.filter(pk=pk).update(**valeurs)
+
+    def verifier_certificat_masque(self, passeport):
+        response = self.client.get(url_verification(passeport.code_passeport))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["statut_passeport"], "valide")
+        self.assertEqual(response.data["boutique_nom"], VENDEUR_INDISPONIBLE)
+        self.assertIsNone(response.data["produit_slug"])
+        self.assertFalse(response.data["disponible_a_la_vente"])
+        self.assertEqual(response.data["motif_indisponibilite"], MOTIF_INDISPONIBILITE)
+        self.assertNotIn("suspend", response.content.decode().lower())
+
+    def test_passeport_sans_variante_dun_produit_sans_variante_active(self):
+        # Avant : « disponible à la vente » et lien vers une fiche catalogue en 404.
+        passeport = self.creer_passeport(numero_lot="LOT-SANS-VARIANTE")
+        VarianteProduit.objects.filter(pk=self.variante1.pk).update(est_active=False)
+        self.assertEqual(self.client.get(f"/api/catalogue/produits/{self.produit1.slug}/").status_code, 404)
+        self.verifier_certificat_masque(passeport)
+
+    def test_passeport_dun_produit_sans_aucune_variante(self):
+        produit_nu = Produit.objects.create(boutique=self.boutique1, nom="Sans variante", prix_base=Decimal("5000"))
+        passeport = self.creer_passeport(produit=produit_nu, numero_lot="LOT-NU")
+        self.assertEqual(self.client.get(f"/api/catalogue/produits/{produit_nu.slug}/").status_code, 404)
+        self.verifier_certificat_masque(passeport)
+
+    def test_meme_regle_que_la_fiche_catalogue(self):
+        # Disponible à la vente ⇔ la fiche catalogue du produit répond 200,
+        # quel que soit l'état (passeport sans variante : seule la règle
+        # produit s'applique).
+        passeport = self.creer_passeport(numero_lot="LOT-EQUIVALENCE")
+        etats = {
+            "vendable": lambda: None,
+            "boutique suspendue": lambda: Boutique.objects.filter(pk=self.boutique1.pk).update(est_suspendue=True),
+            "boutique fermée": lambda: Boutique.objects.filter(pk=self.boutique1.pk).update(est_active=False),
+            "vendeur non validé": lambda: Utilisateur.objects.filter(pk=self.vendeur1.pk).update(statut_kyc=StatutKYC.REFUSE),
+            "vendeur désactivé": lambda: Utilisateur.objects.filter(pk=self.vendeur1.pk).update(is_active=False),
+            "produit inactif": lambda: Produit.objects.filter(pk=self.produit1.pk).update(est_actif=False, desactive_par="vendeur"),
+            "aucune variante active": lambda: VarianteProduit.objects.filter(pk=self.variante1.pk).update(est_active=False),
+        }
+        for libelle, appliquer in etats.items():
+            with self.subTest(libelle):
+                sauvegarde = self.sauvegarder_etats()
+                appliquer()
+                fiche = self.client.get(f"/api/catalogue/produits/{self.produit1.slug}/")
+                certificat = self.client.get(url_verification(passeport.code_passeport))
+                self.assertIn(fiche.status_code, (200, 404))
+                self.assertEqual(certificat.data["disponible_a_la_vente"], fiche.status_code == 200)
+                self.assertEqual(certificat.data["produit_slug"] is not None, fiche.status_code == 200)
+                self.restaurer_etats(sauvegarde)
 
     def test_donnees_publiques_exposees(self):
         response = self.verifier()

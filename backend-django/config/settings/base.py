@@ -174,6 +174,10 @@ REST_FRAMEWORK = {
         # partagent une IP publique. 600/h (10 scans/min en moyenne) reste
         # négligeable face aux 4 milliards de codes possibles par an.
         'passeport_verification': '600/hour',
+        # Catalogue public (listes, fiches, catégories), par IP pour un
+        # visiteur : même raison CGNAT, et une navigation normale enchaîne
+        # beaucoup plus de requêtes qu'un scan (20/min en moyenne).
+        'catalogue_public': '1200/hour',
     },
     # Sans cette ligne, config/exceptions.py::custom_exception_handler
     # n'est jamais appelé : les 500 utilisent le handler DRF par défaut.
