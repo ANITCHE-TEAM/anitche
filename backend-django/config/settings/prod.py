@@ -1,5 +1,7 @@
 from django.core.exceptions import ImproperlyConfigured
 
+from decouple import Csv
+
 from .base import *
 
 
@@ -42,16 +44,33 @@ if not SECRET_KEY or SECRET_KEY.startswith('django-insecure-') or len(SECRET_KEY
         "get_random_secret_key; print(get_random_secret_key())\""
     )
 
+# Clés de chiffrement des données KYC (apps.core.fields, MultiFernet) :
+# FIELD_ENCRYPTION_KEYS (clé active en premier), ou à défaut la clé unique
+# FIELD_ENCRYPTION_KEY. Transmises par docker-compose.prod.yml.
+CLE_DE_DEVELOPPEMENT = 'mKvbTFkFfRPhMpb4ZJdZfHvz1pgUgx15Xhyn1ahJCiw='
 FIELD_ENCRYPTION_KEY = config('FIELD_ENCRYPTION_KEY', default='')
-if not FIELD_ENCRYPTION_KEY or FIELD_ENCRYPTION_KEY == 'mKvbTFkFfRPhMpb4ZJdZfHvz1pgUgx15Xhyn1ahJCiw=':
+FIELD_ENCRYPTION_KEYS = config('FIELD_ENCRYPTION_KEYS', default='', cast=Csv()) or (
+    [FIELD_ENCRYPTION_KEY] if FIELD_ENCRYPTION_KEY else []
+)
+if not FIELD_ENCRYPTION_KEYS or CLE_DE_DEVELOPPEMENT in FIELD_ENCRYPTION_KEYS:
     raise ImproperlyConfigured(
-        "FIELD_ENCRYPTION_KEY doit être défini explicitement en production, "
-        "différent de la clé de développement par défaut. Cette clé chiffre "
-        "des données sensibles (ex: compte bancaire KYC) : la clé de dev "
+        "FIELD_ENCRYPTION_KEYS doit être défini explicitement en production, "
+        "sans la clé de développement par défaut. Ces clés chiffrent des données "
+        "sensibles (compte bancaire, numéro mobile money du KYC) : la clé de dev "
         "étant publique (présente dans le dépôt), l'utiliser en production "
         "reviendrait à ne pas chiffrer du tout. Générez-en une avec : "
         "python -c \"from cryptography.fernet import Fernet; "
         "print(Fernet.generate_key().decode())\""
+    )
+try:
+    from cryptography.fernet import Fernet
+
+    for _cle in FIELD_ENCRYPTION_KEYS:
+        Fernet(_cle.encode())
+except ValueError as erreur:
+    raise ImproperlyConfigured(
+        "FIELD_ENCRYPTION_KEYS contient une clé invalide (clé Fernet attendue : "
+        f"32 octets encodés en base64 URL) : {erreur}"
     )
 
 ALLOWED_HOSTS = _parse_liste_env(config('ALLOWED_HOSTS', default=''))

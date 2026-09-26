@@ -4,13 +4,16 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.throttling import ScopedRateThrottle
-from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 from django.conf import settings
 import logging
+
+from apps.core.reseau import adresse_ip_client
+from .permissions import EmailVerifie
 
 logger_securite = logging.getLogger('securite')
 
@@ -73,6 +76,8 @@ class InscriptionView(generics.CreateAPIView):
     queryset = Utilisateur.objects.all()
     serializer_class = InscriptionSerializer
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'inscription'
 
     def perform_create(self, serializer):
         utilisateur = serializer.save()
@@ -99,11 +104,27 @@ class LoginThrottleView(TokenObtainPairView):
             if utilisateur:
                 envoyer_notification_connexion.delay(
                     utilisateur.email,
-                    request.META.get('REMOTE_ADDR', 'inconnue'),
+                    adresse_ip_client(request) or 'inconnue',
                     request.META.get('HTTP_USER_AGENT', 'inconnu'),
                 )
 
         return response
+
+
+class RafraichissementView(TokenRefreshView):
+    """Rafraîchissement du jeton (simplejwt) avec une limite dédiée.
+
+    Sans authentification, la limite porte sur l'IP : avec un access token
+    de 15 minutes, chaque session active rafraîchit ~4 fois par heure, et
+    derrière le CGNAT des opérateurs mobiles de nombreux utilisateurs
+    partagent une IP. Le taux 'anon' global (partagé avec toute l'API) était
+    épuisé par une dizaine d'utilisateurs. Aucun risque de force brute (le
+    refresh token est signé) : la limite borne les écritures en base
+    (rotation et liste noire).
+    """
+
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'rafraichissement'
 
 
 # =====================================================
@@ -134,9 +155,9 @@ class DemandeChangementContactView(APIView):
     un changement d'adresse email ou de téléphone.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, EmailVerifie]
     throttle_classes = [ScopedRateThrottle]
-    throttle_scope = 'otp'
+    throttle_scope = 'otp_envoi'
 
     def post(self, request):
         serializer = DemandeChangementContactSerializer(
@@ -165,9 +186,10 @@ class DemandeChangementContactView(APIView):
         if type_usage == 'changement_email':
             envoyer_code_otp_email.delay(nouvelle_valeur, code, type_usage)
         else:
-            # TODO : brancher un fournisseur SMS. En attendant, le code
-            # part sur l'email courant et vérifié du compte — c'est un
-            # canal déjà prouvé, contrairement au nouveau numéro.
+            # Aucun fournisseur SMS branché : le code part sur l'email
+            # courant et vérifié du compte. Il prouve que le titulaire du
+            # compte demande le changement, PAS qu'il possède le numéro —
+            # d'où telephone_verifie laissé à False (VerificationOTPView).
             envoyer_code_otp_email.delay(request.user.email, code, type_usage)
 
         return Response(
@@ -188,7 +210,7 @@ class VerificationOTPView(APIView):
 
     permission_classes = [IsAuthenticated]
     throttle_classes = [ScopedRateThrottle]
-    throttle_scope = 'otp'
+    throttle_scope = 'otp_verification'
 
     def post(self, request):
         serializer = VerificationOTPSerializer(
@@ -242,13 +264,15 @@ class VerificationOTPView(APIView):
                 ]
             )
 
-        # Mise à jour du téléphone après validation.
+        # Mise à jour du téléphone après validation. Décision d'équipe :
+        # telephone_verifie reste False tant que le code n'est pas envoyé
+        # par SMS au numéro lui-même (il part aujourd'hui sur l'email).
         elif (
             otp.type_usage == 'changement_telephone'
             and otp.nouvelle_valeur
         ):
             request.user.telephone = otp.nouvelle_valeur
-            request.user.telephone_verifie = True
+            request.user.telephone_verifie = False
 
             request.user.save(
                 update_fields=[
@@ -264,6 +288,40 @@ class VerificationOTPView(APIView):
 
 
 # =====================================================
+# RENVOI DU CODE D'INSCRIPTION
+# =====================================================
+
+class RenvoyerCodeInscriptionView(APIView):
+    """
+    Envoie un nouveau code de vérification de l'email du compte.
+
+    Sans cet endpoint, un code d'inscription expiré (10 minutes) ou perdu
+    rendait l'email invérifiable pour toujours — et donc, avec EmailVerifie,
+    les actions sensibles inaccessibles. Même compteur que les autres
+    envois de code (otp_envoi).
+    """
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'otp_envoi'
+
+    def post(self, request):
+        if request.user.email_verifie:
+            return Response(
+                {"message": "Votre adresse email est déjà vérifiée."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        _, code = CodeOTP.generer(request.user, TypeUsageOTP.INSCRIPTION)
+        envoyer_code_otp_email.delay(request.user.email, code, TypeUsageOTP.INSCRIPTION)
+
+        return Response(
+            {"message": "Code envoyé."},
+            status=status.HTTP_200_OK,
+        )
+
+
+# =====================================================
 # ENVOI DU DOSSIER KYC
 # =====================================================
 
@@ -274,7 +332,8 @@ class UploadKYCView(generics.CreateAPIView):
     """
 
     serializer_class = DocumentKYCSerializer
-    permission_classes = [IsAuthenticated]
+    # Le dépôt vaut demande vendeur : email vérifié obligatoire.
+    permission_classes = [IsAuthenticated, EmailVerifie]
     throttle_scope = 'kyc'
 
     # Autorise l'envoi de fichiers.
@@ -331,7 +390,18 @@ class TelechargerDocumentKYCView(APIView):
         if not fichier:
             raise Http404("Ce document n'a pas été fourni.")
 
-        return FileResponse(fichier.open("rb"), filename=fichier.name.rsplit("/", 1)[-1])
+        # Référencé en base mais absent du stockage (fichier perdu) : 404
+        # explicite et trace, au lieu d'une erreur 500 (FileNotFoundError).
+        try:
+            contenu = fichier.open("rb")
+        except FileNotFoundError:
+            logger_securite.error(
+                "Document KYC référencé mais absent du stockage (utilisateur_id=%s, champ=%s).",
+                utilisateur_id, champ,
+            )
+            raise Http404("Ce document n'est plus disponible.")
+
+        return FileResponse(contenu, filename=fichier.name.rsplit("/", 1)[-1])
 
 
 # =====================================================
@@ -346,7 +416,7 @@ class DemandeMotDePasseOublieView(APIView):
 
     permission_classes = [AllowAny]
     throttle_classes = [ScopedRateThrottle]
-    throttle_scope = 'otp'
+    throttle_scope = 'otp_envoi'
 
     def post(self, request):
 
@@ -365,8 +435,6 @@ class DemandeMotDePasseOublieView(APIView):
         if utilisateur:
             _, code = CodeOTP.generer(utilisateur, 'mdp_oublie')
             envoyer_code_otp_email.delay(utilisateur.email, code, 'mdp_oublie')
-
-            # TODO : envoyer le code par email.
 
         # Réponse identique afin de ne pas révéler
         # si un compte existe (protection contre
@@ -392,7 +460,7 @@ class ConfirmationMotDePasseOublieView(APIView):
 
     permission_classes = [AllowAny]
     throttle_classes = [ScopedRateThrottle]
-    throttle_scope = 'otp'
+    throttle_scope = 'otp_verification'
 
     def post(self, request):
 
@@ -526,7 +594,7 @@ class ConnexionGoogleView(APIView):
         # flux classique, uniquement en cas de succès.
         envoyer_notification_connexion.delay(
             utilisateur.email,
-            request.META.get('REMOTE_ADDR', 'inconnue'),
+            adresse_ip_client(request) or 'inconnue',
             request.META.get('HTTP_USER_AGENT', 'inconnu'),
         )
 

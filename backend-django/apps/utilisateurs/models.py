@@ -8,6 +8,7 @@ from .managers import UtilisateurManager
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
 from django.contrib.auth.hashers import make_password, check_password
 from apps.core.validators import validateur_document_kyc, validateur_image_standard
+from apps.core.fields import EncryptedCharField
 from apps.core.storage import CheminUploadUUID
 
 logger_securite = logging.getLogger('securite')
@@ -189,11 +190,15 @@ class DocumentKYC(models.Model):
         validators=[validateur_image_standard],
     )
 
-    numero_mobile_money = models.CharField(max_length=20)
+    # Chiffrés au repos (Fernet, voir apps.core.fields) : identifiants
+    # financiers jamais recherchés en base. Longueurs métier (20 et 50)
+    # validées par DocumentKYCSerializer.
+    numero_mobile_money = EncryptedCharField()
     adresse = models.TextField()
 
-    # Facultatif selon le mode de paiement.
-    compte_bancaire = models.CharField(max_length=50, null=True, blank=True)
+    # Facultatif selon le mode de paiement. Minimisation à trancher avec le
+    # module paiements selon le canal de reversement aux vendeurs.
+    compte_bancaire = EncryptedCharField(null=True, blank=True)
 
     date_soumission = models.DateTimeField(auto_now_add=True)
     date_traitement = models.DateTimeField(null=True, blank=True)

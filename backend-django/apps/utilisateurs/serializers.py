@@ -26,13 +26,27 @@ class InscriptionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Utilisateur
+        # Pas de téléphone à l'inscription : l'unicité du numéro révélait
+        # à qui l'essayait qu'il appartient déjà à un compte. Il s'ajoute
+        # ensuite via changement-contact/ (compte connecté, email vérifié).
         fields = [
             'email',
             'password',
             'nom',
             'prenom',
-            'telephone'
         ]
+
+    def validate(self, attrs):
+        # Refus explicite plutôt qu'ignoré : un client qui enverrait encore
+        # le téléphone croirait l'avoir enregistré.
+        if 'telephone' in self.initial_data:
+            raise serializers.ValidationError({
+                'telephone': (
+                    "Le téléphone ne se renseigne plus à l'inscription : ajoutez-le "
+                    "ensuite depuis votre compte (changement-contact/)."
+                )
+            })
+        return attrs
 
     def validate_password(self, value):
         """
@@ -72,9 +86,13 @@ class ProfilSerializer(serializers.ModelSerializer):
     """
     Returns the private profile of the authenticated user.
 
-    'id' is read-only: required by the FastAPI microservice
-    (app/core/securite.py) to check that a delivery driver publishes
-    their own GPS position (F-11).
+    'id' is read-only. It is meant for the FastAPI service (F-11: checking
+    that a delivery driver publishes their own GPS position); that check
+    does not exist yet in backend-fastapi.
+
+    telephone_verifie stays False as long as no SMS provider is plugged in
+    (team decision): the phone-change code is sent by email, which proves
+    the account holder asked for it, not that they own the number.
 
     email and telephone are read-only: they can only be changed through
     changement-contact/ with OTP verification. Making them writable here
@@ -211,6 +229,10 @@ class DocumentKYCSerializer(serializers.ModelSerializer):
         TypePieceIdentite.PASSEPORT,
         TypePieceIdentite.ATTESTATION_IDENTITE,
     }
+
+    # Champs chiffrés en base (TextField) : la longueur métier est validée ici.
+    numero_mobile_money = serializers.CharField(max_length=20)
+    compte_bancaire = serializers.CharField(max_length=50, required=False, allow_null=True, allow_blank=True)
 
     class Meta:
         model = DocumentKYC

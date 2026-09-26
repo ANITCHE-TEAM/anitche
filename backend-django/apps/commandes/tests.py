@@ -37,7 +37,7 @@ class ValiderPanierTestCase(APITestCase):
     def _create_user(self, email, role, statut_kyc=StatutKYC.NON_SOUMIS):
         return Utilisateur.objects.create_user(
             email=email, password="testpass123", nom="Test", prenom="User",
-            role=role, statut_kyc=statut_kyc,
+            role=role, statut_kyc=statut_kyc, email_verifie=True,
         )
 
     def _ajouter_au_panier(self, variante, quantite):
@@ -175,7 +175,7 @@ class CommandeAccessTestCase(APITestCase):
     def _create_user(self, email, role, statut_kyc=StatutKYC.NON_SOUMIS):
         return Utilisateur.objects.create_user(
             email=email, password="testpass123", nom="Test", prenom="User",
-            role=role, statut_kyc=statut_kyc,
+            role=role, statut_kyc=statut_kyc, email_verifie=True,
         )
 
     def test_owner_can_see_own_commande(self):
@@ -258,7 +258,7 @@ class ValiderPanierCouponTestCase(APITestCase):
     def _create_user(self, email, role, statut_kyc=StatutKYC.NON_SOUMIS):
         return Utilisateur.objects.create_user(
             email=email, password="testpass123", nom="Test", prenom="User",
-            role=role, statut_kyc=statut_kyc,
+            role=role, statut_kyc=statut_kyc, email_verifie=True,
         )
 
     def _ajouter_au_panier(self, variante, quantite):

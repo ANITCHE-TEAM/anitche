@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from decouple import config
+from decouple import Csv, config
 from celery.schedules import crontab
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -149,7 +149,17 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'user': '300/hour',
         'anon': '50/hour',
-        'otp': '5/hour',
+        # Codes OTP : envoi (changement de contact, mot de passe oublié,
+        # renvoi du code d'inscription) et vérification comptés à part —
+        # un compteur commun bloquait la vérification après quelques
+        # demandes de code. Chaque code reste limité à 5 essais (CodeOTP).
+        'otp_envoi': '5/hour',
+        'otp_verification': '10/hour',
+        # Inscription, par IP : borne l'énumération des emails inscrits.
+        'inscription': '10/hour',
+        # Rafraîchissement du jeton, par IP (CGNAT : ~4 rafraîchissements
+        # par heure et par session active).
+        'rafraichissement': '300/hour',
         'login': '10/hour',
         'kyc': '5/hour',
         'boutique_creation': '10/hour',
@@ -254,7 +264,8 @@ CACHES = {
 # Auth Google
 GOOGLE_OAUTH_CLIENT_ID = config('GOOGLE_OAUTH_CLIENT_ID', default='')
 
-# Chiffrement au repos de champs sensibles (ex: DocumentKYC.compte_bancaire)
+# Chiffrement au repos de champs sensibles (DocumentKYC.compte_bancaire et
+# numero_mobile_money)
 # via apps.core.fields.EncryptedCharField. Valeur de dev par défaut non
 # secrète et volontairement présente uniquement ici — jamais utilisée en
 # prod (voir le raise dans prod.py) : elle sert juste à ce que
@@ -266,6 +277,11 @@ FIELD_ENCRYPTION_KEY = config(
     'FIELD_ENCRYPTION_KEY',
     default='mKvbTFkFfRPhMpb4ZJdZfHvz1pgUgx15Xhyn1ahJCiw='
 )
+# Rotation (MultiFernet) : liste de clés séparées par des virgules, la clé
+# ACTIVE (qui chiffre) en premier, les anciennes ensuite (elles ne servent
+# plus qu'à déchiffrer). Vide = FIELD_ENCRYPTION_KEY seule. Procédure :
+# docs/MODULE_UTILISATEURS.md, « Gestion de la clé ».
+FIELD_ENCRYPTION_KEYS = config('FIELD_ENCRYPTION_KEYS', default='', cast=Csv())
 
 # Secrets de signature des webhooks de paiement, un par fournisseur.
 # Jamais de valeur par défaut : un webhook dont le fournisseur n'a pas de

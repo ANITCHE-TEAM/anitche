@@ -1,9 +1,10 @@
 from django.urls import path
-from rest_framework_simplejwt.views import TokenRefreshView
 
 from .views import (
     InscriptionView,
     LoginThrottleView,
+    RafraichissementView,
+    RenvoyerCodeInscriptionView,
     ProfilView,
     DemandeChangementContactView,
     VerificationOTPView,
@@ -39,7 +40,7 @@ urlpatterns = [
     # à partir d'un refresh token valide.
     path(
         'connexion/rafraichir/',
-        TokenRefreshView.as_view(),
+        RafraichissementView.as_view(),
         name='connexion-refresh'
     ),
 
@@ -55,6 +56,14 @@ urlpatterns = [
         'changement-contact/',
         DemandeChangementContactView.as_view(),
         name='changement-contact'
+    ),
+
+    # Nouveau code de vérification de l'email (code d'inscription expiré
+    # ou perdu).
+    path(
+        'renvoyer-code-inscription/',
+        RenvoyerCodeInscriptionView.as_view(),
+        name='renvoyer-code-inscription'
     ),
 
     # Validation d'un code OTP.

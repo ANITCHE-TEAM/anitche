@@ -24,9 +24,11 @@ def revoquer_tokens_actifs(utilisateur):
     déjà émis à un attaquant ne reste pas valable jusqu'à 7 jours après
     le changement de mot de passe.
 
-    Les access tokens (durée de vie courte, 30 minutes) ne sont pas
-    concernés : simplejwt ne blackliste que les refresh tokens
-    (seule la classe RefreshToken hérite de BlacklistMixin).
+    Les access tokens (durée de vie courte, 15 minutes : SIMPLE_JWT) ne
+    sont pas mis en liste noire : simplejwt ne blackliste que les refresh
+    tokens (seule la classe RefreshToken hérite de BlacklistMixin). Après
+    un changement de mot de passe, ils sont de toute façon refusés grâce à
+    CHECK_REVOKE_TOKEN.
     """
     tokens = OutstandingToken.objects.filter(user=utilisateur)
     BlacklistedToken.objects.bulk_create(

@@ -573,6 +573,7 @@ class DemandeChangementContactTests(TestCase):
             password='xxx',
             nom='A',
             prenom='B',
+            email_verifie=True,
         )
         self.autre_utilisateur = Utilisateur.objects.create_user(
             email='dejapris@anitche.ci',
@@ -1238,7 +1239,7 @@ class UploadKYCTests(TestCase):
         self.url = '/api/utilisateurs/upload-kyc/'
         self.utilisateur = Utilisateur.objects.create_user(
             email='kyc-upload@anitche.ci', password='TestPassword123!',
-            nom='Test', prenom='KYC',
+            nom='Test', prenom='KYC', email_verifie=True,
         )
         self.client.force_authenticate(user=self.utilisateur)
 
@@ -1351,7 +1352,7 @@ class ResoumissionKYCTests(TestCase):
         self.url = '/api/utilisateurs/upload-kyc/'
         self.utilisateur = Utilisateur.objects.create_user(
             email='kyc-resoumission@anitche.ci', password='TestPassword123!',
-            nom='Test', prenom='KYC',
+            nom='Test', prenom='KYC', email_verifie=True,
         )
         self.client.force_authenticate(user=self.utilisateur)
 
@@ -1535,7 +1536,7 @@ class ResoumissionKYCConcurrenceTestCase(TransactionTestCase):
     def setUp(self):
         self.utilisateur = Utilisateur.objects.create_user(
             email='kyc-concurrence@anitche.ci', password='TestPassword123!',
-            nom='Test', prenom='KYC',
+            nom='Test', prenom='KYC', email_verifie=True,
         )
 
     @skipUnless(
@@ -1693,3 +1694,388 @@ class UtilisateurManagerTestCase(TestCase):
         self.assertEqual(client.role, Role.CLIENT)
         self.assertFalse(client.is_staff)
         self.assertFalse(client.is_superuser)
+
+# =====================================================
+# PASSE 2 (septembre 2026) : chiffrement, IP, OTP, email vérifié, limites
+# =====================================================
+
+import importlib
+import io as _io
+from pathlib import Path
+
+from cryptography.fernet import Fernet
+from django.conf import settings
+from django.core import mail
+from django.core.cache import cache
+from django.core.management import call_command
+from django.db.migrations.executor import MigrationExecutor
+from django.test import override_settings
+from rest_framework.throttling import SimpleRateThrottle
+
+from apps.core.fields import MESSAGE_VALEUR_ILLISIBLE, ValeurIllisible, chiffreur
+from .models import DocumentKYC, StatutKYC
+from .permissions import CODE_EMAIL_NON_VERIFIE
+
+CLE_A = Fernet.generate_key().decode()
+CLE_B = Fernet.generate_key().decode()
+
+
+def avec_proxys(nombre):
+    return override_settings(REST_FRAMEWORK={**settings.REST_FRAMEWORK, 'NUM_PROXIES': nombre})
+
+
+def colonnes_brutes(dossier):
+    with connection.cursor() as curseur:
+        curseur.execute(
+            "SELECT numero_mobile_money, compte_bancaire FROM utilisateurs_documentkyc WHERE id = %s",
+            [dossier.pk],
+        )
+        return curseur.fetchone()
+
+
+def ecrire_jeton_brut(dossier, colonne, jeton):
+    """Écrit un jeton tel quel (sans passer par le champ, qui le chiffrerait)."""
+    with connection.cursor() as curseur:
+        curseur.execute(f"UPDATE utilisateurs_documentkyc SET {colonne} = %s WHERE id = %s", [jeton, dossier.pk])
+
+
+def creer_dossier(utilisateur, **champs):
+    valeurs = {
+        'type_piece': 'passeport', 'piece_identite_recto': 'kyc/recto.pdf', 'selfie': 'kyc/selfie.png',
+        'numero_mobile_money': '0707070707', 'adresse': 'Cocody', 'compte_bancaire': 'CI93 CI0080 1112',
+        **champs,
+    }
+    return DocumentKYC.objects.create(utilisateur=utilisateur, **valeurs)
+
+
+class ChiffrementDonneesKYCTests(TestCase):
+    """1.1 : numero_mobile_money et compte_bancaire chiffrés au repos (Fernet)."""
+
+    def setUp(self):
+        self.utilisateur = Utilisateur.objects.create_user(
+            email='kyc-chiffrement@anitche.ci', password='TestPassword123!', nom='T', prenom='K', email_verifie=True,
+        )
+
+    def test_depot_chiffre_en_base_et_lisible_par_lapplication(self):
+        # Avant : les deux valeurs étaient stockées en clair.
+        client = APIClient()
+        client.force_authenticate(self.utilisateur)
+        response = client.post('/api/utilisateurs/upload-kyc/', {
+            'type_piece': 'passeport', 'piece_identite_recto': _fichier_pdf_valide('r.pdf'),
+            'selfie': _fichier_selfie_valide(), 'numero_mobile_money': '0707070707',
+            'adresse': 'Cocody', 'compte_bancaire': 'CI93 CI0080 1112',
+        }, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        dossier = DocumentKYC.objects.get(utilisateur=self.utilisateur)
+        mobile_brut, bancaire_brut = colonnes_brutes(dossier)
+        self.assertNotIn('0707070707', mobile_brut)
+        self.assertNotIn('CI93', bancaire_brut)
+        self.assertEqual(chiffreur().decrypt(mobile_brut.encode()).decode(), '0707070707')
+        self.assertEqual((dossier.numero_mobile_money, dossier.compte_bancaire), ('0707070707', 'CI93 CI0080 1112'))
+
+    def test_longueurs_metier_toujours_validees(self):
+        client = APIClient()
+        client.force_authenticate(self.utilisateur)
+        response = client.post('/api/utilisateurs/upload-kyc/', {
+            'type_piece': 'passeport', 'piece_identite_recto': _fichier_pdf_valide('r.pdf'),
+            'selfie': _fichier_selfie_valide(), 'numero_mobile_money': '0' * 21,
+            'adresse': 'Cocody', 'compte_bancaire': 'X' * 51,
+        }, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('numero_mobile_money', response.data['errors'])
+        self.assertIn('compte_bancaire', response.data['errors'])
+
+    def test_valeur_illisible_jamais_ecrasee(self):
+        # Avant : une clé erronée faisait lire « [valeur illisible…] », et
+        # la sauvegarde suivante chiffrait ce message à la place de l'IBAN.
+        dossier = creer_dossier(self.utilisateur)
+        jeton_etranger = Fernet(Fernet.generate_key()).encrypt(b'CI93 AUTRE CLE').decode()
+        ecrire_jeton_brut(dossier, 'compte_bancaire', jeton_etranger)
+
+        dossier = DocumentKYC.objects.get(pk=dossier.pk)
+        self.assertIsInstance(dossier.compte_bancaire, ValeurIllisible)
+        self.assertEqual(dossier.compte_bancaire, MESSAGE_VALEUR_ILLISIBLE)
+        dossier.adresse = 'Plateau'
+        dossier.save()
+
+        self.assertEqual(colonnes_brutes(dossier)[1], jeton_etranger)
+        self.assertEqual(DocumentKYC.objects.get(pk=dossier.pk).numero_mobile_money, '0707070707')
+
+    def test_rotation_de_cle(self):
+        with override_settings(FIELD_ENCRYPTION_KEYS=[CLE_A]):
+            dossier = creer_dossier(self.utilisateur)
+        # Nouvelle clé en tête, ancienne derrière : tout reste lisible.
+        with override_settings(FIELD_ENCRYPTION_KEYS=[CLE_B, CLE_A]):
+            self.assertEqual(DocumentKYC.objects.get(pk=dossier.pk).compte_bancaire, 'CI93 CI0080 1112')
+            sortie = _io.StringIO()
+            call_command('rechiffrer_donnees_sensibles', stdout=sortie)
+            self.assertIn('Total : 2 re-chiffrée(s), 0 illisible(s)', sortie.getvalue())
+        # Ancienne clé retirée : toujours lisible, car tout a été re-chiffré.
+        with override_settings(FIELD_ENCRYPTION_KEYS=[CLE_B]):
+            dossier = DocumentKYC.objects.get(pk=dossier.pk)
+            self.assertEqual((dossier.numero_mobile_money, dossier.compte_bancaire), ('0707070707', 'CI93 CI0080 1112'))
+
+    def test_simulation_et_valeurs_illisibles_signalees(self):
+        dossier = creer_dossier(self.utilisateur)
+        jeton_etranger = Fernet(Fernet.generate_key()).encrypt(b'X').decode()
+        ecrire_jeton_brut(dossier, 'compte_bancaire', jeton_etranger)
+        avant = colonnes_brutes(dossier)
+
+        sortie, erreurs = _io.StringIO(), _io.StringIO()
+        call_command('rechiffrer_donnees_sensibles', '--simulation', stdout=sortie, stderr=erreurs)
+        self.assertIn('Total : 1 re-chiffrée(s), 1 illisible(s) (simulation', sortie.getvalue())
+        self.assertIn('Ne retirez aucune ancienne clé', erreurs.getvalue())
+        self.assertEqual(colonnes_brutes(dossier), avant)
+
+
+class MigrationChiffrementKYCTests(TransactionTestCase):
+    """Migration 0008 : les valeurs existantes en clair sont chiffrées ; le
+    retour arrière les déchiffre."""
+
+    AVANT = [('utilisateurs', '0007_kyc_upload_to_uuid')]
+    APRES = [('utilisateurs', '0008_chiffrement_donnees_financieres_kyc')]
+
+    def tearDown(self):
+        executeur = MigrationExecutor(connection)
+        executeur.migrate(executeur.loader.graph.leaf_nodes())
+
+    def test_migration_aller_retour(self):
+        executeur = MigrationExecutor(connection)
+        executeur.migrate(self.AVANT)
+        anciennes_apps = executeur.loader.project_state(self.AVANT).apps
+        AncienUtilisateur = anciennes_apps.get_model('utilisateurs', 'Utilisateur')
+        AncienDossier = anciennes_apps.get_model('utilisateurs', 'DocumentKYC')
+        utilisateur = AncienUtilisateur.objects.create(email='migration@anitche.ci', nom='M', prenom='G', password='x')
+        dossier = AncienDossier.objects.create(
+            utilisateur=utilisateur, type_piece='passeport', piece_identite_recto='kyc/r.pdf', selfie='kyc/s.png',
+            numero_mobile_money='0707070707', adresse='Cocody', compte_bancaire='CI93 CI0080 1112',
+        )
+
+        executeur = MigrationExecutor(connection)
+        executeur.migrate(self.APRES)
+        mobile_brut, bancaire_brut = colonnes_brutes(dossier)
+        self.assertEqual(chiffreur().decrypt(mobile_brut.encode()).decode(), '0707070707')
+        self.assertEqual(chiffreur().decrypt(bancaire_brut.encode()).decode(), 'CI93 CI0080 1112')
+
+        executeur = MigrationExecutor(connection)
+        executeur.migrate(self.AVANT)
+        self.assertEqual(colonnes_brutes(dossier), ('0707070707', 'CI93 CI0080 1112'))
+
+
+class NotificationConnexionIPTests(TestCase):
+    """1.2 : l'IP de la notification vient de adresse_ip_client (proxy de confiance)."""
+
+    def setUp(self):
+        self.client = APIClient()
+        Utilisateur.objects.create_user(
+            email='notif@anitche.ci', password='TestPassword123!', nom='N', prenom='T', email_verifie=True,
+        )
+
+    def test_connexion_par_mot_de_passe(self):
+        # Avant : REMOTE_ADDR, c'est-à-dire l'IP du conteneur Nginx en production.
+        with avec_proxys(1), patch('apps.utilisateurs.views.envoyer_notification_connexion.delay') as envoi:
+            response = self.client.post(
+                '/api/utilisateurs/connexion/', {'email': 'notif@anitche.ci', 'password': 'TestPassword123!'},
+                REMOTE_ADDR='172.18.0.5', HTTP_X_FORWARDED_FOR='41.66.1.2',
+            )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(envoi.call_args.args[1], '41.66.1.2')
+
+    def test_connexion_google(self):
+        infos = {'sub': 'g-notif', 'email': 'notif@anitche.ci', 'email_verified': True}
+        with avec_proxys(1), \
+                patch('apps.utilisateurs.views.google_id_token.verify_oauth2_token', return_value=infos), \
+                patch('apps.utilisateurs.views.envoyer_notification_connexion.delay') as envoi:
+            response = self.client.post(
+                '/api/utilisateurs/connexion-google/', {'id_token': 'x'},
+                REMOTE_ADDR='172.18.0.5', HTTP_X_FORWARDED_FOR='41.66.1.2',
+            )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(envoi.call_args.args[1], '41.66.1.2')
+
+    def test_sans_proxy_en_tete_ignore(self):
+        with patch('apps.utilisateurs.views.envoyer_notification_connexion.delay') as envoi:
+            self.client.post(
+                '/api/utilisateurs/connexion/', {'email': 'notif@anitche.ci', 'password': 'TestPassword123!'},
+                REMOTE_ADDR='10.0.0.7', HTTP_X_FORWARDED_FOR='6.6.6.6',
+            )
+        self.assertEqual(envoi.call_args.args[1], '10.0.0.7')
+
+
+class MessageOTPDureeTests(TestCase):
+    def test_duree_affichee_egale_a_la_duree_reelle(self):
+        # Avant : « 10 minutes » en dur (réglage OTP_DUREE_VALIDITE_MINUTES inexistant).
+        Utilisateur.objects.create_user(email='otp-duree@anitche.ci', password='TestPassword123!', nom='O', prenom='D')
+        with patch.object(CodeOTP, 'DUREE_VALIDITE_MINUTES', 3):
+            APIClient().post('/api/utilisateurs/mot-de-passe-oublie/', {'email': 'otp-duree@anitche.ci'})
+        self.assertIn('Ce code expire dans 3 minutes.', mail.outbox[-1].body)
+
+
+class DocumentKYCAbsentDuStockageTests(TestCase):
+    def test_piece_perdue_404_et_non_500(self):
+        utilisateur = Utilisateur.objects.create_user(email='kyc-perdu@anitche.ci', password='x', nom='K', prenom='P')
+        creer_dossier(utilisateur, piece_identite_recto='kyc/fichier-disparu.pdf')
+        client = APIClient()
+        client.force_authenticate(utilisateur)
+        with self.assertLogs('securite', level='ERROR'):
+            response = client.get(f'/api/utilisateurs/kyc/{utilisateur.pk}/piece_identite_recto/')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class EmailVerifieTests(TestCase):
+    """Q1 : connexion libre, actions sensibles réservées aux emails vérifiés."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.utilisateur = Utilisateur.objects.create_user(
+            email='non-verifie@anitche.ci', password='TestPassword123!', nom='N', prenom='V',
+        )
+
+    def test_connexion_toujours_possible(self):
+        response = self.client.post(
+            '/api/utilisateurs/connexion/', {'email': 'non-verifie@anitche.ci', 'password': 'TestPassword123!'},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_actions_sensibles_refusees_avec_code_machine(self):
+        self.client.force_authenticate(self.utilisateur)
+        actions = {
+            'dépôt KYC': ('/api/utilisateurs/upload-kyc/', {}),
+            'changement de contact': ('/api/utilisateurs/changement-contact/', {'nouvel_email': 'x@anitche.ci'}),
+            'validation du panier': ('/api/commandes/valider-panier/', {}),
+        }
+        for libelle, (url, corps) in actions.items():
+            with self.subTest(libelle):
+                response = self.client.post(url, corps)
+                self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+                self.assertEqual(response.data['errors']['code'], CODE_EMAIL_NON_VERIFIE)
+        self.assertFalse(DocumentKYC.objects.exists())
+        self.assertEqual(mail.outbox, [])
+
+    def test_renvoi_du_code_puis_verification(self):
+        self.client.force_authenticate(self.utilisateur)
+        response = self.client.post('/api/utilisateurs/renvoyer-code-inscription/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(mail.outbox[-1].to, ['non-verifie@anitche.ci'])
+        code = mail.outbox[-1].body.split('est : ')[1][:6]
+
+        response = self.client.post('/api/utilisateurs/verification-otp/', {'code': code, 'type_usage': 'inscription'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.utilisateur.refresh_from_db()
+        self.assertTrue(self.utilisateur.email_verifie)
+
+        response = self.client.post('/api/utilisateurs/renvoyer-code-inscription/')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_renvoi_reserve_aux_comptes_connectes(self):
+        response = self.client.post('/api/utilisateurs/renvoyer-code-inscription/')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class InscriptionPasse2Tests(TestCase):
+    """Q2 : téléphone retiré de l'inscription ; limite dédiée par IP."""
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.corps = {'password': 'TestPassword123!', 'nom': 'I', 'prenom': 'N'}
+
+    def test_telephone_refuse_explicitement(self):
+        response = self.client.post('/api/utilisateurs/inscription/', {
+            **self.corps, 'email': 'tel@anitche.ci', 'telephone': '0101010101',
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('telephone', response.data['errors'])
+        self.assertFalse(Utilisateur.objects.filter(email='tel@anitche.ci').exists())
+
+    def test_inscription_sans_telephone(self):
+        response = self.client.post('/api/utilisateurs/inscription/', {**self.corps, 'email': 'neuf@anitche.ci'})
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertNotIn('telephone', response.data)
+
+    def test_limite_dediee_par_ip_non_contournable(self):
+        with patch.object(SimpleRateThrottle, 'THROTTLE_RATES', {'inscription': '2/hour'}):
+            codes = [
+                self.client.post('/api/utilisateurs/inscription/', {**self.corps, 'email': f'i{i}@anitche.ci'},
+                                 REMOTE_ADDR='9.9.9.9', HTTP_X_FORWARDED_FOR=f'1.1.1.{i}').status_code
+                for i in range(3)
+            ]
+        self.assertEqual(codes, [201, 201, 429])
+
+
+class LimitesOTPSepareesTests(TestCase):
+    """Q5 : envoi et vérification des codes comptés séparément."""
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.utilisateur = Utilisateur.objects.create_user(
+            email='otp-scopes@anitche.ci', password='TestPassword123!', nom='O', prenom='S', email_verifie=True,
+        )
+
+    def test_verification_possible_apres_plusieurs_envois(self):
+        # Avant : un seul compteur 'otp' ; quelques demandes de code bloquaient la vérification.
+        taux = {'otp_envoi': '2/hour', 'otp_verification': '10/hour'}
+        self.client.force_authenticate(self.utilisateur)
+        with patch.object(SimpleRateThrottle, 'THROTTLE_RATES', taux):
+            envois = [
+                self.client.post('/api/utilisateurs/changement-contact/', {'nouvel_email': f'n{i}@anitche.ci'}).status_code
+                for i in range(3)
+            ]
+            verification = self.client.post(
+                '/api/utilisateurs/verification-otp/', {'code': '000000', 'type_usage': 'changement_email'},
+            ).status_code
+        self.assertEqual(envois, [200, 200, 429])
+        self.assertEqual(verification, status.HTTP_400_BAD_REQUEST)  # code faux, mais pas bloqué
+
+    def test_mot_de_passe_oublie_confirmation_apres_plusieurs_demandes(self):
+        taux = {'otp_envoi': '2/hour', 'otp_verification': '10/hour'}
+        with patch.object(SimpleRateThrottle, 'THROTTLE_RATES', taux):
+            for _ in range(2):
+                self.client.post('/api/utilisateurs/mot-de-passe-oublie/', {'email': 'otp-scopes@anitche.ci'})
+            confirmation = self.client.post('/api/utilisateurs/mot-de-passe-oublie/confirmer/', {
+                'email': 'otp-scopes@anitche.ci', 'code': '000000', 'nouveau_password': 'NouveauMotDePasse123!',
+            }).status_code
+        self.assertEqual(confirmation, status.HTTP_400_BAD_REQUEST)
+
+
+class RafraichissementLimiteTests(TestCase):
+    """Q6 : le rafraîchissement ne partage plus le compteur 'anon' de l'API."""
+
+    def test_limite_dediee(self):
+        cache.clear()
+        client = APIClient()
+        Utilisateur.objects.create_user(email='refresh@anitche.ci', password='TestPassword123!', nom='R', prenom='F')
+        refresh = client.post(
+            '/api/utilisateurs/connexion/', {'email': 'refresh@anitche.ci', 'password': 'TestPassword123!'},
+        ).data['refresh']
+        taux = {'anon': '1/hour', 'rafraichissement': '2/hour', 'inscription': '100/hour'}
+        with patch.object(SimpleRateThrottle, 'THROTTLE_RATES', taux):
+            client.get('/api/vendeurs/boutiques/')  # épuise 'anon'
+            premier = client.post('/api/utilisateurs/connexion/rafraichir/', {'refresh': refresh})
+            second = client.post('/api/utilisateurs/connexion/rafraichir/', {'refresh': premier.data['refresh']})
+            troisieme = client.post('/api/utilisateurs/connexion/rafraichir/', {'refresh': second.data['refresh']})
+        self.assertEqual((premier.status_code, second.status_code, troisieme.status_code), (200, 200, 429))
+
+
+class TelephoneNonVerifieSansSMSTests(TestCase):
+    def test_changement_de_telephone_ne_le_marque_pas_verifie(self):
+        # Décision d'équipe (Q7) : le code part sur l'email, pas au numéro.
+        utilisateur = Utilisateur.objects.create_user(
+            email='tel-sms@anitche.ci', password='TestPassword123!', nom='T', prenom='S', email_verifie=True,
+        )
+        client = APIClient()
+        client.force_authenticate(utilisateur)
+        client.post('/api/utilisateurs/changement-contact/', {'nouveau_telephone': '0505050505'})
+        self.assertEqual(mail.outbox[-1].to, ['tel-sms@anitche.ci'])
+        code = mail.outbox[-1].body.split('est : ')[1][:6]
+        response = client.post('/api/utilisateurs/verification-otp/', {'code': code, 'type_usage': 'changement_telephone'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        utilisateur.refresh_from_db()
+        self.assertEqual((utilisateur.telephone, utilisateur.telephone_verifie), ('0505050505', False))
+
+
+class MediaDeTestIsoleTests(TestCase):
+    def test_les_tests_necrivent_pas_dans_le_media_du_projet(self):
+        self.assertNotEqual(Path(settings.MEDIA_ROOT).resolve(), (Path(settings.BASE_DIR) / 'media').resolve())

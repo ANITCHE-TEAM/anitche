@@ -68,7 +68,7 @@ def envoyer_code_otp_email(email_destinataire, code, type_usage):
 
     message = (
         f"Votre code de vérification est : {code}\n\n"
-        f"Ce code expire dans {settings.__dict__.get('OTP_DUREE_VALIDITE_MINUTES', 10)} minutes.\n"
+        f"Ce code expire dans {CodeOTP.DUREE_VALIDITE_MINUTES} minutes.\n"
         "Si vous n'êtes pas à l'origine de cette demande, ignorez ce message."
     )
 

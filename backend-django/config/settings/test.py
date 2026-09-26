@@ -1,8 +1,17 @@
+import atexit
+import shutil
 import tempfile
 from .base import *
 from pathlib import Path
 
 DEBUG = True
+
+# Fichiers écrits par les tests (pièces KYC, logos, images produit,
+# pièces jointes...) : dossier temporaire propre à chaque exécution,
+# supprimé à la fin. Sans ceci, chaque lancement de la suite déposait des
+# dizaines de faux documents dans le vrai media/ (mêlés aux données de dev).
+MEDIA_ROOT = tempfile.mkdtemp(prefix='anitche-tests-media-')
+atexit.register(shutil.rmtree, MEDIA_ROOT, ignore_errors=True)
 PASSWORD_HASHERS = [
     'django.contrib.auth.hashers.MD5PasswordHasher',
 ]
@@ -28,7 +37,10 @@ CELERY_TASK_EAGER_PROPAGATES = True
 REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {
     'anon': '100000/day',
     'user': '100000/day',
-    'otp': '100000/day',
+    'otp_envoi': '100000/day',
+    'otp_verification': '100000/day',
+    'inscription': '100000/day',
+    'rafraichissement': '100000/day',
     'login': '100000/day',
     'paiements': '100000/day',
     'support': '100000/day',

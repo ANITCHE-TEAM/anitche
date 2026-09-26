@@ -18,6 +18,7 @@ from apps.catalogue.models import Stock
 from apps.panier.models import Panier
 from apps.panier.services import get_or_create_panier
 from apps.fidelite.models import CouponReduction
+from apps.utilisateurs.permissions import EmailVerifie
 
 logger_securite = logging.getLogger('securite')
 
@@ -29,7 +30,8 @@ class ValiderPanierView(APIView):
     Toute la logique tourne dans une transaction atomique : si une seule
     étape échoue (stock insuffisant, etc.), rien n'est enregistré.
     """
-    permission_classes = [IsAuthenticated]
+    # Email vérifié obligatoire pour commander (apps.utilisateurs.permissions).
+    permission_classes = [IsAuthenticated, EmailVerifie]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'commande_validation'
 

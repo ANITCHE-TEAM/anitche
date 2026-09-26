@@ -43,6 +43,9 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.prod
       SECRET_KEY: ${SECRET_KEY}
+      # Clés de chiffrement des données KYC (apps.core.fields), clé active en
+      # premier. Sans elles, prod.py refuse de démarrer (Django et Celery).
+      FIELD_ENCRYPTION_KEYS: ${FIELD_ENCRYPTION_KEYS}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
       # URL de vérification des passeports QR (apps.passeport_qr).
@@ -74,6 +77,9 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.prod
       SECRET_KEY: ${SECRET_KEY}
+      # Clés de chiffrement des données KYC (apps.core.fields), clé active en
+      # premier. Sans elles, prod.py refuse de démarrer (Django et Celery).
+      FIELD_ENCRYPTION_KEYS: ${FIELD_ENCRYPTION_KEYS}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS}
       DB_NAME: ${DB_NAME}
       DB_USER: ${DB_USER}
@@ -95,6 +101,9 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.prod
       SECRET_KEY: ${SECRET_KEY}
+      # Clés de chiffrement des données KYC (apps.core.fields), clé active en
+      # premier. Sans elles, prod.py refuse de démarrer (Django et Celery).
+      FIELD_ENCRYPTION_KEYS: ${FIELD_ENCRYPTION_KEYS}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS}
       DB_NAME: ${DB_NAME}
       DB_USER: ${DB_USER}
