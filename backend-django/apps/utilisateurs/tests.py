@@ -2079,3 +2079,51 @@ class TelephoneNonVerifieSansSMSTests(TestCase):
 class MediaDeTestIsoleTests(TestCase):
     def test_les_tests_necrivent_pas_dans_le_media_du_projet(self):
         self.assertNotEqual(Path(settings.MEDIA_ROOT).resolve(), (Path(settings.BASE_DIR) / 'media').resolve())
+
+
+class LimitesDeProductionTests(TestCase):
+    """Les limites testées avec les VRAIES valeurs de base.py (test.py les
+    relâche pour le reste de la suite ; dev.py les relève pour Postman)."""
+
+    def setUp(self):
+        from apps.core.tests import taux_de_production
+
+        cache.clear()
+        self.taux = taux_de_production()
+        self.client = APIClient()
+        Utilisateur.objects.create_user(
+            email='limites@anitche.ci', password='TestPassword123!', nom='L', prenom='P', email_verifie=True,
+        )
+
+    def seuil(self, scope):
+        return int(self.taux[scope].split('/')[0])
+
+    def codes(self, nombre, appel):
+        with patch.object(SimpleRateThrottle, 'THROTTLE_RATES', self.taux):
+            return [appel(i) for i in range(nombre)]
+
+    def test_connexion(self):
+        n = self.seuil('login')
+        codes = self.codes(n + 1, lambda i: self.client.post(
+            '/api/utilisateurs/connexion/', {'email': 'limites@anitche.ci', 'password': 'TestPassword123!'},
+        ).status_code)
+        self.assertEqual(codes, [200] * n + [429])
+
+    def test_inscription(self):
+        n = self.seuil('inscription')
+        codes = self.codes(n + 1, lambda i: self.client.post('/api/utilisateurs/inscription/', {
+            'email': f'insc{i}@anitche.ci', 'password': 'TestPassword123!', 'nom': 'I', 'prenom': 'N',
+        }).status_code)
+        self.assertEqual(codes, [201] * n + [429])
+
+    def test_envoi_et_verification_de_codes(self):
+        n_envoi, n_verif = self.seuil('otp_envoi'), self.seuil('otp_verification')
+        envois = self.codes(n_envoi + 1, lambda i: self.client.post(
+            '/api/utilisateurs/mot-de-passe-oublie/', {'email': 'limites@anitche.ci'},
+        ).status_code)
+        self.assertEqual(envois, [200] * n_envoi + [429])
+        verifications = self.codes(n_verif + 1, lambda i: self.client.post(
+            '/api/utilisateurs/mot-de-passe-oublie/confirmer/',
+            {'email': 'limites@anitche.ci', 'code': '000000', 'nouveau_password': 'NouveauMotDePasse123!'},
+        ).status_code)
+        self.assertEqual(verifications, [400] * n_verif + [429])

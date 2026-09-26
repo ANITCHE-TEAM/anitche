@@ -7,6 +7,8 @@ version: "3.9"
 #   Frontend  -> http://localhost:5173
 #   Django    -> http://localhost:8000
 #   FastAPI   -> http://localhost:8001/docs (Swagger auto-généré)
+#   Mailpit   -> http://localhost:8025 (emails envoyés en dev : codes OTP,
+#                notifications ; aucun email ne sort vers l'extérieur)
 
 services:
   db:
@@ -49,6 +51,8 @@ services:
       DB_HOST: db
       DB_PORT: 5432
       REDIS_URL: redis://redis:6379/0
+      # Emails de dev capturés par Mailpit (config/settings/dev.py).
+      EMAIL_HOST: mailpit
     volumes:
       - ../backend-django:/app
     ports:
@@ -61,6 +65,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      mailpit:
+        condition: service_started
   celery-worker:
     build:
       context: ../backend-django
@@ -73,6 +79,8 @@ services:
       DB_HOST: db
       DB_PORT: 5432
       REDIS_URL: redis://redis:6379/0
+      # Emails de dev capturés par Mailpit (config/settings/dev.py).
+      EMAIL_HOST: mailpit
     volumes:
       - ../backend-django:/app
     depends_on:
@@ -80,6 +88,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      mailpit:
+        condition: service_started
 
   celery-beat:
     build:
@@ -93,6 +103,8 @@ services:
       DB_HOST: db
       DB_PORT: 5432
       REDIS_URL: redis://redis:6379/0
+      # Emails de dev capturés par Mailpit (config/settings/dev.py).
+      EMAIL_HOST: mailpit
     volumes:
       - ../backend-django:/app
     networks:
@@ -103,6 +115,22 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      mailpit:
+        condition: service_started
+
+  # Capture des emails de DEV uniquement (jamais en production) : SMTP sur
+  # 1025, interface web et API sur 8025. Les collections Postman lisent les
+  # codes OTP via son API (GET /api/v1/search).
+  mailpit:
+    image: axllent/mailpit:v1.20.0
+    restart: unless-stopped
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    environment:
+      MP_MAX_MESSAGES: 5000
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
 
   backend-fastapi:
     build:
