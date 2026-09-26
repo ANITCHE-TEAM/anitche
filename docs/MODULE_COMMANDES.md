@@ -93,9 +93,10 @@ Une seule fonction de transition (`apps/commandes/services.py`), appelée partou
 | `confirmee` | `annulee` | client · administration | stock restitué, paiement encaissé → remboursement à traiter, reversement annulé |
 | `preparation` | `expediee` | la livraison passe « expédiée » | |
 | `preparation` | `annulee` | administration | stock restitué, paiement encaissé → remboursement à traiter, reversement annulé |
-| `expediee` | `livree` | la livraison passe « livrée » | |
+| `expediee` | `livree` | la livraison passe « livrée » (code de livraison saisi par le livreur) | délai de rétractation du reversement ouvert |
+| `expediee` | `annulee` | administration, **uniquement** en abandonnant une livraison échouée (motif `livraison_echouee`, [`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md)) | stock restitué, paiement encaissé → remboursement à traiter, reversement annulé |
 
-Tout le reste est refusé (**409**) : retour arrière, saut d'étape, sortie d'un état final (`livree`, `annulee`). Côté livraison, le livreur ou l'admin qui passe une livraison « expédiée » alors que la commande n'est pas en préparation (ou annulée) reçoit 409 et rien ne change ; « en cours » et « échouée » ne changent pas la commande.
+Tout le reste est refusé (**409**) : retour arrière, saut d'étape, sortie d'un état final (`livree`, `annulee`). Côté livraison, le livreur qui passe une livraison « expédiée » alors que la commande n'est pas en préparation (ou annulée) reçoit 409 et rien ne change ; « en cours » et « échouée » ne changent pas la commande. Toute annulation passe la fiche de livraison « annulée » dans la même transaction, et elle est refusée (409) si la livraison est déjà partie (expédiée, en cours).
 
 ## 6. Commandes non payées, annulation et remboursement
 
@@ -130,10 +131,10 @@ Tout le reste est refusé (**409**) : retour arrière, saut d'étape, sortie d'u
 ## 10. Dette connue
 
 - **Niveau 2 — `Idempotency-Key`** : aujourd'hui, un nouvel essai après une coupure réseau renvoie « panier vide » au lieu de la réponse 201 d'origine (aucune double commande possible grâce au verrou). Une clé d'idempotence permettrait de rejouer la même réponse.
-- **Assignation du livreur** : uniquement via le Django admin ; à traiter avec le module livraison.
+- ~~Assignation du livreur~~ : traitée (API d'administration, [`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md)).
 - **Anonymisation à la suppression de compte** : `Commande.client` en PROTECT empêche de supprimer un compte qui a commandé ; il faudra un flux d'anonymisation.
 - **Retours** : le module retours accepte une demande sur une commande `confirmee` (pas encore expédiée) ; à revoir avec ce module maintenant que les statuts `expediee` et `livree` sont réellement posés.
-- **Livraison d'une commande annulée** : la fiche de livraison existante reste « en attente » (le livreur ne peut plus l'expédier : 409) ; un statut d'annulation côté livraison est à prévoir.
+- ~~Livraison d'une commande annulée~~ : traitée (statut `annulee` côté livraison, [`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md)).
 - Commandes créées avant l'adresse obligatoire (`GroupeCommande` sans adresse) : non payables (400 « Adresse de livraison manquante ») ; elles expirent et libèrent leur stock.
 
 ## 11. Tests

@@ -169,6 +169,7 @@ class Remboursement(models.Model):
         COMMANDE_ANNULEE = "commande_annulee", "Commande annulée après paiement"
         PAIEMENT_EN_DOUBLE = "paiement_en_double", "Commande déjà payée par un autre paiement"
         RETOUR = "retour", "Retour remboursé"
+        LIVRAISON_NON_RECUE = "livraison_non_recue", "Livraison contestée (colis non reçu)"
 
     class Statut(models.TextChoices):
         A_TRAITER = "a_traiter", "À traiter"

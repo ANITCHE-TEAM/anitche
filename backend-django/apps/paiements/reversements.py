@@ -4,7 +4,7 @@ livraison confirmée et délai de rétractation, frais déduits.
     en_attente_livraison → en_retractation   commande livrée (date_disponibilite = +N jours)
     en_retractation      → disponible        délai écoulé (tâche périodique)
     en_retractation / disponible → suspendu  retour ouvert
-    suspendu             → en_retractation / disponible   retour clos
+    suspendu             → en_retractation / disponible   retour clos (et aucune contestation de livraison ouverte)
     disponible           → en_cours → verse  transfert par le fournisseur
     disponible           → verse             versement manuel (référence saisie)
     en_cours             → disponible        transfert échoué
@@ -126,7 +126,10 @@ def suspendre_reversement(commande):
 
 
 def _reprendre(reversement):
-    if reversement.statut != Statut.SUSPENDU or retour_ouvert(reversement.commande):
+    from apps.livraison.services import contestation_ouverte
+
+    commande = reversement.commande
+    if reversement.statut != Statut.SUSPENDU or retour_ouvert(commande) or contestation_ouverte(commande):
         return
     echu = reversement.date_disponibilite and reversement.date_disponibilite <= timezone.now()
     reversement.statut = Statut.DISPONIBLE if echu else Statut.EN_RETRACTATION

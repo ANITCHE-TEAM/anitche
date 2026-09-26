@@ -25,6 +25,9 @@ class Commande(models.Model):
         EXPIRATION = "expiration", "Non payée dans le délai"
         ADMINISTRATION = "administration", "Annulée par l'administration"
         BOUTIQUE_INDISPONIBLE = "boutique_indisponible", "Boutique indisponible"
+        # Échec définitif de la livraison, décidé par l'administration
+        # (apps.livraison.services.abandonner_livraison).
+        LIVRAISON_ECHOUEE = "livraison_echouee", "Livraison échouée"
 
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

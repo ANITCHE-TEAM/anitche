@@ -9,6 +9,8 @@ Table des transitions (docs/MODULE_COMMANDES.md) :
     preparation → expediee    synchronisé depuis la livraison (expédiée)
     preparation → annulee     administration
     expediee    → livree      synchronisé depuis la livraison (livrée)
+    expediee    → annulee     administration, livraison définitivement échouée
+                              (apps.livraison.services.abandonner_livraison)
 
 Tout le reste est refusé (TransitionImpossible) : retour arrière, saut
 d'étape, sortie d'un état final. Chaque transition est un UPDATE
@@ -36,7 +38,7 @@ TRANSITIONS = {
     Statut.CREEE: {Statut.CONFIRMEE, Statut.ANNULEE},
     Statut.CONFIRMEE: {Statut.PREPARATION, Statut.ANNULEE},
     Statut.PREPARATION: {Statut.EXPEDIEE, Statut.ANNULEE},
-    Statut.EXPEDIEE: {Statut.LIVREE},
+    Statut.EXPEDIEE: {Statut.LIVREE, Statut.ANNULEE},
     Statut.LIVREE: set(),
     Statut.ANNULEE: set(),
 }
@@ -47,6 +49,7 @@ ANNULATION_POSSIBLE_DEPUIS = {
     Motif.EXPIRATION: {Statut.CREEE},
     Motif.BOUTIQUE_INDISPONIBLE: {Statut.CREEE},
     Motif.ADMINISTRATION: {Statut.CREEE, Statut.CONFIRMEE, Statut.PREPARATION},
+    Motif.LIVRAISON_ECHOUEE: {Statut.EXPEDIEE},
 }
 
 #: Statut de livraison → statut de commande à atteindre.
@@ -113,12 +116,19 @@ def synchroniser_depuis_livraison(commande, statut_livraison):
         ouvrir_retractation(commande)
 
 
-def annuler_commande(commande, motif):
+def annuler_commande(commande, motif, acteur=None, commentaire="Commande annulée."):
     """Annule la commande, restitue son stock une seule fois, crée le
-    remboursement des paiements déjà encaissés et annule le reversement."""
+    remboursement des paiements déjà encaissés, annule le reversement et
+    passe la fiche de livraison « annulée » (historique : `acteur`,
+    `commentaire`)."""
+    from apps.livraison.services import annuler_livraison_de
     from apps.paiements.services import traiter_paiements_apres_annulation
 
     with transaction.atomic():
+        # Livraison d'abord (verrou de la fiche avant la commande, même ordre
+        # que les transitions de livraison) : une livraison déjà partie
+        # refuse l'annulation, et tout est annulé avec elle.
+        annuler_livraison_de(commande, acteur=acteur, commentaire=commentaire)
         _transitionner(commande, Statut.ANNULEE, ANNULATION_POSSIBLE_DEPUIS[motif], motif_annulation=motif)
 
         # Seule la requête qui a effectivement annulé arrive ici : le stock

@@ -283,7 +283,7 @@ class AnnulerCommandeView(APIView):
     def post(self, request, pk):
         commande = get_object_or_404(Commande, pk=pk, client=request.user)
         try:
-            annuler_commande(commande, Commande.MotifAnnulation.CLIENT)
+            annuler_commande(commande, Commande.MotifAnnulation.CLIENT, acteur=request.user)
         except TransitionImpossible as erreur:
             return reponse_transition_impossible(erreur)
         commande = Commande.objects.select_related("groupe").prefetch_related("article").get(pk=commande.pk)
@@ -349,7 +349,7 @@ class AnnulerCommandeAdministrationView(APIView):
     def post(self, request, pk):
         commande = get_object_or_404(Commande, pk=pk)
         try:
-            annuler_commande(commande, Commande.MotifAnnulation.ADMINISTRATION)
+            annuler_commande(commande, Commande.MotifAnnulation.ADMINISTRATION, acteur=request.user)
         except TransitionImpossible as erreur:
             return reponse_transition_impossible(erreur)
         logger_securite.info(

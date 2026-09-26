@@ -56,12 +56,17 @@ try:
     def notifier_changement_statut_livraison(sender, livraison, ancien_status, nouveau_status, **kwargs):
         """Notifie le client à chaque étape d'avancement de sa livraison."""
         client = getattr(getattr(livraison, "commande", None), "client", None)
-        if not client:
+        # Annulation : c'est l'annulation de la commande qui informe le client.
+        if not client or nouveau_status == "annulee":
             return
 
         statuts_messages = {
             "expediee": "Votre colis a quitté l'entrepôt du vendeur et a été expédié.",
-            "en_cours": "Votre colis est actuellement en cours de livraison vers votre adresse.",
+            "en_cours": (
+                "Votre colis est actuellement en cours de livraison vers votre adresse. "
+                "Donnez au livreur, à la remise du colis, le code de livraison reçu par email "
+                "(visible aussi dans le suivi de votre livraison)."
+            ),
             "livree": "Votre colis a été livré ! Merci d'avoir choisi ANITCHE.",
             "echouee": "La livraison de votre colis a rencontré un problème. Notre service client prend le relais.",
         }

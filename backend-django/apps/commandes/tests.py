@@ -609,15 +609,21 @@ class MachineAEtatsTests(DonneesCycleDeVie, APITestCase):
         self.creer_donnees()
         self.commander((self.variante1, 1))
         self.commande = Commande.objects.get()
-        self.livraison = Livraison.objects.create(commande=self.commande, adresse_livraison="x", livreur=self.admin)
+        # L'administration ne fait plus les étapes du livreur (module livraison).
+        self.livreur = Utilisateur.objects.create_user(email="livreur@cmd.ci", password="x", nom="L", prenom="Ivreur",
+                                                       role=Role.LIVREUR)
+        self.livraison = Livraison.objects.create(commande=self.commande, adresse_livraison="x", livreur=self.livreur)
 
     def preparer(self):
         self.en_tant_que(self.vendeur1)
         return self.client.post(f"/api/commandes/vendeur/{self.commande.pk}/preparation/")
 
     def changer_livraison(self, statut):
-        self.en_tant_que(self.admin)
-        return self.client.patch(f"/api/livraison/{self.livraison.pk}/statut/", {"status": statut})
+        self.en_tant_que(self.livreur)
+        self.livraison.refresh_from_db()
+        # « livrée » exige le code de livraison donné par le client.
+        return self.client.patch(f"/api/livraison/{self.livraison.pk}/statut/",
+                                 {"status": statut, "code": self.livraison.code_chiffre})
 
     def statut(self):
         self.commande.refresh_from_db()

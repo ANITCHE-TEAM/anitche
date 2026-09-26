@@ -8,7 +8,7 @@
 | Module | Lien |
 |---|---|
 | `commandes` | Le paiement couvre une commande ou un checkout (`GroupeCommande`) ; la validation confirme par `commandes.services.confirmer_commande` ; l'annulation d'une commande appelle `paiements.services.traiter_paiements_apres_annulation` ; la livraison confirmée appelle `paiements.reversements.ouvrir_retractation` ; le checkout fige les frais vendeur (`paiements.frais`) |
-| `livraison` | Fiche créée à la confirmation (adresse reprise du checkout) |
+| `livraison` | Fiche créée à la confirmation (adresse reprise du checkout) ; contestation « non reçu » → reversement suspendu, puis repris ou annulé avec remboursement |
 | `retours` | Retour ouvert → reversement suspendu ; retour remboursé → `Remboursement` à traiter + part du vendeur réduite ; retour clos → reversement repris |
 | `fidelite`, `notifications` | Écoutent le signal `paiement_valide` (commandes confirmées seulement) |
 | `utilisateurs` | `DocumentKYC.numero_mobile_money` : numéro de reversement du vendeur |
@@ -96,6 +96,7 @@ Un **`Remboursement`** par commande à rembourser : `reference` (`RMB-…`), `pa
 | `commande_annulee` | Commande annulée alors que son paiement est encaissé (client, administration, ou paiement arrivé après l'expiration) | `montant_total` de la commande |
 | `paiement_en_double` | Un paiement réussit pour une commande déjà payée par un autre (paiement abandonné puis succès tardif) | `montant_total` de la commande |
 | `retour` | Retour marqué remboursé (module retours) | `montant_remboursement` du retour |
+| `livraison_non_recue` | Contestation « colis non reçu » jugée fondée par l'administration ([`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md)) ; le reversement est annulé | `montant_total` de la commande |
 
 - Unicité : une seule fois par (paiement, commande) hors retours, une seule fois par retour. Une annulation signalée deux fois ne crée rien de plus.
 - **Traitement au lancement : manuel.** L'administration est alertée (journal `securite` + notification), rembourse depuis le **tableau de bord CinetPay**, puis saisit la référence (`admin/remboursements/<id>/traiter/`). Le client voit l'état dans `remboursements` de son paiement et reçoit une notification.
@@ -110,7 +111,7 @@ Un **`Reversement`** par commande confirmée : `reference` (`REV-…`), `boutiqu
 |---|---|
 | `en_attente_livraison` | Paiement validé, commande confirmée |
 | `en_retractation` | Livraison confirmée : `date_disponibilite` = livraison + **7 jours** (`REVERSEMENT_DELAI_RETRACTATION_JOURS`) |
-| `suspendu` | Retour ouvert pendant le délai (ou reversement disponible pas encore versé) ; reprend à la clôture du retour |
+| `suspendu` | Retour ouvert ou livraison contestée « non reçu » pendant le délai (ou reversement disponible pas encore versé) ; reprend quand plus aucun retour ni contestation n'est ouvert |
 | `disponible` | Délai écoulé (tâche Celery horaire `rendre_reversements_disponibles`) |
 | `en_cours` | Transfert demandé au fournisseur, en attente de sa confirmation |
 | `verse` | Versé (manuellement avec référence, ou transfert confirmé) ; le vendeur est notifié |

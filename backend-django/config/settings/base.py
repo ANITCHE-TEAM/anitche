@@ -196,6 +196,11 @@ REST_FRAMEWORK = {
         # (50/heure) refusait des paiements réels au-delà de 50 par heure.
         # Chaque notification reste authentifiée puis revérifiée.
         'webhook_paiement': '3000/hour',
+        # Livraison, par utilisateur : changements de statut (un livreur en
+        # fait 4 par colis ; la saisie du code est en plus bornée à 5 essais
+        # par code) et contestations « non reçu » du client.
+        'livraison_statut': '120/hour',
+        'livraison_contestation': '10/hour',
     },
     # Sans cette ligne, config/exceptions.py::custom_exception_handler
     # n'est jamais appelé : les 500 utilisent le handler DRF par défaut.
@@ -319,6 +324,9 @@ CINETPAY_TIMEOUT = config('CINETPAY_TIMEOUT', default=10, cast=int)
 BACKEND_BASE_URL = config('BACKEND_BASE_URL', default='http://localhost:8000')
 # Reversement au vendeur : N jours après la livraison confirmée.
 REVERSEMENT_DELAI_RETRACTATION_JOURS = config('REVERSEMENT_DELAI_RETRACTATION_JOURS', default=7, cast=int)
+# Livraison : passages « en cours » possibles (première tentative comprise)
+# avant l'abandon par l'administration (commande annulée, remboursement).
+LIVRAISON_TENTATIVES_MAX = config('LIVRAISON_TENTATIVES_MAX', default=3, cast=int)
 
 # Adresse publique du frontend, utilisée pour construire les liens qui y
 # mènent (ex : URL de vérification encodée dans le QR d'un passeport,

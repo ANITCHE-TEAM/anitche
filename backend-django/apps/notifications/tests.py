@@ -188,14 +188,21 @@ class NotificationSignauxTestCase(BaseNotificationTestCase):
         self.assertIn(self.commande1.numero_commande, notif_vendeur.message)
 
     def test_signal_livraison_changement_statut_cree_notification_client(self):
+        from apps.livraison.services import changer_statut
+
+        livreur = Utilisateur.objects.create_user(
+            email="livreur@notif.ci", password="x", nom="L", prenom="Ivreur", role=Role.LIVREUR,
+        )
+        Commande.objects.filter(pk=self.commande1.pk).update(status=Commande.Status.PREPARATION)
         livraison = Livraison.objects.create(
             commande=self.commande1,
             adresse_livraison="Yopougon, Abidjan",
             status=Livraison.Status.EN_ATTENTE,
+            livreur=livreur,
         )
 
-        # Passage à EXPEDIEE
-        livraison.changer_status(Livraison.Status.EXPEDIEE)
+        # Passage à EXPEDIEE (par le livreur assigné)
+        changer_statut(livraison, Livraison.Status.EXPEDIEE, livreur)
 
         notif = Notification.objects.filter(
             destinataire=self.client1,
