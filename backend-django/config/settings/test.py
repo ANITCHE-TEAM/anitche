@@ -43,6 +43,7 @@ REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {
     'rafraichissement': '100000/day',
     'login': '100000/day',
     'paiements': '100000/day',
+    'webhook_paiement': '100000/day',
     'support': '100000/day',
     'kyc': '100000/day',
     'boutique_creation': '100000/day',
@@ -61,11 +62,10 @@ CACHES = {
 }
 
 
-# Secrets de test fixes pour la vérification de signature des webhooks
-# de paiement — jamais utilisés en dehors de l'environnement de test.
-WEBHOOK_SECRETS = {
-    'wave': 'secret-test-wave',
-    'orange_money': 'secret-test-orange',
-    'mtn_money': 'secret-test-mtn',
-    'moov_money': 'secret-test-moov',
-}
+# Paiements : fournisseur simulé avec un secret de test fixe (jamais utilisé
+# hors tests). Les tests CinetPay remplacent les appels HTTP.
+PAIEMENT_FOURNISSEUR = 'simule'
+PAIEMENT_SIMULE_SECRET = 'secret-test-simulation'
+CINETPAY_API_KEY = ''
+CINETPAY_API_PASSWORD = ''
+BACKEND_BASE_URL = 'https://api.anitche.test'

@@ -155,3 +155,12 @@ class CommandeItem(models.Model):
     nom_produit = models.CharField(max_length=100)
     prix_unitaire = models.DecimalField(max_digits=12, decimal_places=2)
     quantite = models.PositiveIntegerField()
+
+    # Frais vendeur figés à la validation du panier (apps.paiements.frais) :
+    # changer le barème ne modifie jamais une vente passée. FCFA entiers.
+    # Jamais exposés au client (CommandeItemSerializer).
+    taux_commission = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    frais_fixe_unitaire = models.PositiveIntegerField(default=0)
+    montant_commission = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    montant_frais_fixes = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    montant_net_vendeur = models.DecimalField(max_digits=12, decimal_places=2, default=0)

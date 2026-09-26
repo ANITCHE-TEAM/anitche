@@ -8,7 +8,7 @@ from rest_framework import generics
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import APIException, ValidationError
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework import status
 
@@ -26,10 +26,16 @@ from apps.catalogue.models import Stock
 from apps.panier.models import Panier
 from apps.panier.services import get_or_create_panier
 from apps.fidelite.models import CouponReduction
+from apps.paiements.frais import BaremeIntrouvable, bareme_en_vigueur, calculer_frais_ligne
 from apps.utilisateurs.permissions import EmailVerifie
 from apps.vendeurs.permissions import BoutiqueNonSuspendue, EstAdministrateur, EstVendeurValide
 
 logger_securite = logging.getLogger('securite')
+
+
+class ServiceIndisponible(APIException):
+    status_code = 503
+    default_detail = "La validation des commandes est momentanément indisponible."
 
 
 class ValiderPanierView(APIView):
@@ -179,6 +185,14 @@ class ValiderPanierView(APIView):
             for boutique, boutique_items in items_par_boutique.items():
                 montant_boutique = montants_par_boutique[boutique]
                 remise_boutique = remises_par_boutique[boutique]
+                # Frais vendeur en vigueur (offre de la boutique, sinon
+                # plateforme), figés dans chaque article. Calculés sur le prix
+                # avant remise : le coupon est supporté par ANITCHE.
+                try:
+                    bareme = bareme_en_vigueur(boutique)
+                except BaremeIntrouvable:
+                    logger_securite.error("Validation de panier impossible : aucun barème de frais en vigueur.")
+                    raise ServiceIndisponible()
 
                 commande = Commande.objects.create(
                     groupe=groupe,
@@ -196,6 +210,7 @@ class ValiderPanierView(APIView):
                         nom_produit=item.variante.produit.nom,
                         prix_unitaire=item.prix_unitaire,
                         quantite=item.quantite,
+                        **calculer_frais_ligne(item.prix_unitaire, item.quantite, bareme),
                     )
                     try:
                         stocks_verrouilles[item.variante_id].decrementer(item.quantite)

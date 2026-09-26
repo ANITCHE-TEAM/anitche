@@ -56,7 +56,7 @@ if not FIELD_ENCRYPTION_KEYS or CLE_DE_DEVELOPPEMENT in FIELD_ENCRYPTION_KEYS:
     raise ImproperlyConfigured(
         "FIELD_ENCRYPTION_KEYS doit être défini explicitement en production, "
         "sans la clé de développement par défaut. Ces clés chiffrent des données "
-        "sensibles (compte bancaire, numéro mobile money du KYC) : la clé de dev "
+        "sensibles (numéro mobile money du KYC, numéro de versement) : la clé de dev "
         "étant publique (présente dans le dépôt), l'utiliser en production "
         "reviendrait à ne pas chiffrer du tout. Générez-en une avec : "
         "python -c \"from cryptography.fernet import Fernet; "
@@ -71,6 +71,28 @@ except ValueError as erreur:
     raise ImproperlyConfigured(
         "FIELD_ENCRYPTION_KEYS contient une clé invalide (clé Fernet attendue : "
         f"32 octets encodés en base64 URL) : {erreur}"
+    )
+
+# Paiements : jamais le fournisseur simulé (il accepte des notifications
+# signées avec un secret de développement public), jamais une clé CinetPay
+# de sandbox, jamais sans clés. Transmis par docker-compose.prod.yml.
+if PAIEMENT_FOURNISSEUR == 'simule':
+    raise ImproperlyConfigured(
+        "PAIEMENT_FOURNISSEUR='simule' est interdit en production : définissez "
+        "PAIEMENT_FOURNISSEUR=cinetpay et ses clés (docs/MODULE_PAIEMENTS.md)."
+    )
+if PAIEMENT_FOURNISSEUR == 'cinetpay':
+    if not CINETPAY_API_KEY or not CINETPAY_API_PASSWORD:
+        raise ImproperlyConfigured(
+            "CINETPAY_API_KEY et CINETPAY_API_PASSWORD doivent être définis en production."
+        )
+    if CINETPAY_API_KEY.startswith('sk_test_'):
+        raise ImproperlyConfigured(
+            "Clé CinetPay de sandbox (sk_test_) interdite en production : aucun paiement ne serait réel."
+        )
+if not BACKEND_BASE_URL.startswith('https://'):
+    raise ImproperlyConfigured(
+        "BACKEND_BASE_URL doit être l'adresse HTTPS publique de l'API (URL de notification des paiements)."
     )
 
 ALLOWED_HOSTS = _parse_liste_env(config('ALLOWED_HOSTS', default=''))

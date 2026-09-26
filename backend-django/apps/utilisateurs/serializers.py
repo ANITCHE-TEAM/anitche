@@ -232,7 +232,6 @@ class DocumentKYCSerializer(serializers.ModelSerializer):
 
     # Champs chiffrés en base (TextField) : la longueur métier est validée ici.
     numero_mobile_money = serializers.CharField(max_length=20)
-    compte_bancaire = serializers.CharField(max_length=50, required=False, allow_null=True, allow_blank=True)
 
     class Meta:
         model = DocumentKYC
@@ -243,7 +242,6 @@ class DocumentKYCSerializer(serializers.ModelSerializer):
             'selfie',
             'numero_mobile_money',
             'adresse',
-            'compte_bancaire',
         ]
         # write_only : ce serializer sert à RECEVOIR les fichiers à l'upload,
         # jamais à les renvoyer. Sans ça, la réponse de création contient
@@ -254,20 +252,6 @@ class DocumentKYCSerializer(serializers.ModelSerializer):
             'piece_identite_verso': {'write_only': True},
             'selfie': {'write_only': True},
         }
-
-    def validate_compte_bancaire(self, value):
-            """
-            Normalizes an empty bank account to NULL.
-    
-            Multipart forms send an empty field as "" rather than omitting it,
-            which would store an empty string in a nullable column. NULL is the
-            single representation of "no bank account".
-            """
-            if value is None:
-                return None
-            value = value.strip()
-            return value or None
-    
 
     def validate(self, attrs):
         """

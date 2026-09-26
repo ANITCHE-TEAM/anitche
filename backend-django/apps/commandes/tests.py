@@ -392,7 +392,8 @@ from rest_framework.test import APIClient
 from apps.catalogue.models import Stock
 from apps.livraison.models import Livraison
 from apps.notifications.models import Notification
-from apps.paiements.models import Paiement
+from apps.paiements.models import BaremeFrais, Paiement
+from apps.paiements.services import valider_paiement
 from .services import expirer_commandes_impayees
 
 URL_VALIDER = "/api/commandes/valider-panier/"
@@ -435,10 +436,12 @@ class DonneesCycleDeVie:
         return api.post(URL_VALIDER, {"adresse_livraison": ADRESSE_LIVRAISON, **corps}, format="json")
 
     def payer(self, commande, statut=Paiement.Statut.VALIDE):
-        return Paiement.objects.create(
+        paiement = Paiement.objects.create(
             client=commande.client, commande=commande, montant=commande.montant_total, statut=statut,
-            metadata={"commandes_couvertes": [str(commande.pk)]},
+            fournisseur="simule",
         )
+        paiement.commandes.add(commande)
+        return paiement
 
     def en_tant_que(self, utilisateur):
         self.client.force_authenticate(utilisateur)
@@ -469,9 +472,10 @@ class AdresseLivraisonTests(DonneesCycleDeVie, APITestCase):
         self.assertEqual(commande.groupe.livraison_telephone, "0700000001")
         self.en_tant_que(self.client_user)
         # Avant : adresse vide au paiement → livraison « Abidjan, Côte d'Ivoire ».
-        r = self.client.post("/api/paiements/initier/", {"commande_id": str(commande.pk), "methode": "espece_livraison"},
+        r = self.client.post("/api/paiements/initier/", {"commande_id": str(commande.pk), "methode": "wave"},
                              format="json")
         self.assertEqual(r.status_code, 201)
+        valider_paiement(Paiement.objects.get(pk=r.data["id"]))  # paiement en ligne confirmé
         livraison = Livraison.objects.get(commande=commande)
         self.assertEqual(livraison.adresse_livraison, "Cocody, Angré 8e Tranche — Derrière la pharmacie")
         detail = self.client.get(f"/api/livraison/{livraison.pk}/").data
@@ -536,15 +540,16 @@ class AnnulationClientTests(DonneesCycleDeVie, APITestCase):
         self.assertEqual(self.client.post(self.url).status_code, 409)
         self.assertEqual(self.stock(self.variante1), 10)
 
-    def test_commande_payee_annulable_avant_preparation_et_paiement_a_rembourser(self):
+    def test_commande_payee_annulable_avant_preparation_et_remboursement_du(self):
         paiement = self.payer(self.commande)
         Commande.objects.filter(pk=self.commande.pk).update(status="confirmee")
         self.en_tant_que(self.client_user)
         self.assertEqual(self.client.post(self.url).status_code, 200)
         paiement.refresh_from_db()
-        self.assertEqual(paiement.statut, Paiement.Statut.A_REMBOURSER)
-        self.assertEqual(paiement.metadata["remboursements_dus"][0]["montant"], "3015.00")
-        self.assertTrue(Notification.objects.filter(destinataire=self.admin, titre="Paiement à rembourser").exists())
+        self.assertEqual(paiement.statut, Paiement.Statut.VALIDE)  # encaissé ; le remboursement est à part
+        remboursement = paiement.remboursements.get()
+        self.assertEqual((remboursement.montant, remboursement.statut), (Decimal("3015"), "a_traiter"))
+        self.assertTrue(Notification.objects.filter(destinataire=self.admin, titre="Remboursement à traiter").exists())
 
     def test_plus_annulable_par_le_client_une_fois_en_preparation(self):
         Commande.objects.filter(pk=self.commande.pk).update(status="preparation")
@@ -589,15 +594,14 @@ class ExpirationTests(DonneesCycleDeVie, APITestCase):
         paiement.refresh_from_db()
         self.assertEqual(paiement.statut, Paiement.Statut.ANNULE)  # en attente, commande annulée
 
-        tardif = self.payer(self.commande, statut=Paiement.Statut.EN_ATTENTE)
-        tardif.valider(donnees_supplementaires={"commandes_couvertes": ["falsifie"]})
-        tardif.refresh_from_db()
+        valider_paiement(paiement)  # succès tardif
+        paiement.refresh_from_db()
         self.commande.refresh_from_db()
-        self.assertEqual(tardif.statut, Paiement.Statut.A_REMBOURSER)
-        self.assertEqual(tardif.metadata["commandes_couvertes"], [str(self.commande.pk)])  # clé interne protégée
+        self.assertEqual(paiement.statut, Paiement.Statut.VALIDE)
+        self.assertEqual(paiement.remboursements.get().motif, "commande_annulee")
         self.assertEqual(self.commande.status, "annulee")  # jamais réactivée
         self.assertFalse(Livraison.objects.filter(commande=self.commande).exists())
-        self.assertTrue(Notification.objects.filter(destinataire=self.admin, titre="Paiement à rembourser").exists())
+        self.assertTrue(Notification.objects.filter(destinataire=self.admin, titre="Remboursement à traiter").exists())
 
 
 class MachineAEtatsTests(DonneesCycleDeVie, APITestCase):
@@ -683,7 +687,7 @@ class EspaceVendeurTests(DonneesCycleDeVie, APITestCase):
         Boutique.objects.filter(pk=self.boutique1.pk).update(est_suspendue=True)
         self.en_tant_que(self.vendeur1)
         url = f"/api/commandes/vendeur/{self.commande_b1.pk}/preparation/"
-        self.assertEqual(self.client.post(url).status_code, 403)  # confirmée mais non encaissée (espèces)
+        self.assertEqual(self.client.post(url).status_code, 403)  # confirmée mais non encaissée
         self.payer(self.commande_b1)
         self.assertEqual(self.client.post(url).status_code, 200)
 
@@ -785,6 +789,9 @@ class DetailEtHistoriqueTests(DonneesCycleDeVie, APITestCase):
 @skipUnless(connection.vendor == "postgresql", "Concurrence réelle : PostgreSQL uniquement")
 class ConcurrenceCommandesTests(DonneesCycleDeVie, TransactionTestCase):
     def setUp(self):
+        # Un TransactionTestCase précédent vide la base, y compris le barème
+        # de frais par défaut créé par migration.
+        BaremeFrais.objects.get_or_create(boutique=None, defaults={"taux_commission": 12, "frais_fixe_article": 200})
         self.creer_donnees()
 
     def en_parallele(self, action, fois=2):

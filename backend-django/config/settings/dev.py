@@ -33,5 +33,13 @@ REST_FRAMEWORK = {
         'otp_envoi': '1000/hour',
         'otp_verification': '1000/hour',
         'inscription': '1000/hour',
+        # Une exécution de postman_paiements.json initie ou annule une dizaine
+        # de paiements par client (20/heure en production).
+        'paiements': '1000/hour',
     },
 }
+
+# Paiements en dev : fournisseur simulé, secret PUBLIC (repris par la
+# collection postman_paiements.json pour signer ses notifications). Aucun
+# argent ne circule ; prod.py refuse ce fournisseur.
+PAIEMENT_SIMULE_SECRET = config('PAIEMENT_SIMULE_SECRET', default='dev-simulation-anitche')

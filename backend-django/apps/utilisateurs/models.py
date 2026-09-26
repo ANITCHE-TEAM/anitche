@@ -190,15 +190,12 @@ class DocumentKYC(models.Model):
         validators=[validateur_image_standard],
     )
 
-    # Chiffrés au repos (Fernet, voir apps.core.fields) : identifiants
-    # financiers jamais recherchés en base. Longueurs métier (20 et 50)
-    # validées par DocumentKYCSerializer.
+    # Chiffré au repos (Fernet, voir apps.core.fields) : jamais recherché en
+    # base. Longueur métier (20) validée par DocumentKYCSerializer. C'est le
+    # numéro sur lequel ANITCHE reverse au vendeur (mobile money uniquement :
+    # aucun compte bancaire n'est collecté, docs/MODULE_PAIEMENTS.md).
     numero_mobile_money = EncryptedCharField()
     adresse = models.TextField()
-
-    # Facultatif selon le mode de paiement. Minimisation à trancher avec le
-    # module paiements selon le canal de reversement aux vendeurs.
-    compte_bancaire = EncryptedCharField(null=True, blank=True)
 
     date_soumission = models.DateTimeField(auto_now_add=True)
     date_traitement = models.DateTimeField(null=True, blank=True)

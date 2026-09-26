@@ -12,7 +12,7 @@ try:
     from apps.paiements.signals import paiement_valide
 
     @receiver(paiement_valide)
-    def notifier_apres_paiement(sender, paiement, client, **kwargs):
+    def notifier_apres_paiement(sender, paiement, client, commandes=(), **kwargs):
         """Notifie le client de la bonne réception du paiement et les vendeurs pour la préparation."""
         # A. Notification au client
         ServiceNotification.notifier_utilisateur(
@@ -23,17 +23,12 @@ try:
                 f"a été validé avec succès. Vos articles sont en cours de préparation."
             ),
             type_notification=Notification.TypeNotification.PAIEMENT,
-            lien_redirection=f"/commandes/{paiement.commande_id or ''}",
+            lien_redirection=f"/commandes/{commandes[0].id if len(commandes) == 1 else ''}",
             metadata={"paiement_id": str(paiement.id), "reference": paiement.reference},
         )
 
-        # B. Notifications aux boutiques / vendeurs concernés
-        commandes = []
-        if paiement.commande:
-            commandes.append(paiement.commande)
-        elif paiement.groupe_commande:
-            commandes.extend(paiement.groupe_commande.commandes.select_related("boutique__proprietaire").all())
-
+        # B. Notifications aux vendeurs des seules commandes confirmées par ce
+        # paiement (jamais celles annulées ou remboursées).
         for c in commandes:
             vendeur = getattr(getattr(c, "boutique", None), "proprietaire", None)
             if vendeur:

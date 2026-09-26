@@ -2,7 +2,7 @@
 
 Table des transitions (docs/MODULE_COMMANDES.md) :
 
-    creee       → confirmee   système (paiement validé, ou paiement à la livraison)
+    creee       → confirmee   système (paiement en ligne validé)
     creee       → annulee     client, expiration, boutique indisponible, administration
     confirmee   → preparation vendeur de la boutique
     confirmee   → annulee     client (pas encore en préparation), administration
@@ -21,7 +21,6 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q
 from django.utils import timezone
 
 from apps.catalogue.models import Stock
@@ -77,7 +76,7 @@ def _transitionner(commande, nouveau_statut, depuis, **champs):
 
 
 def confirmer_commande(commande):
-    """creee → confirmee (paiement validé ou paiement à la livraison).
+    """creee → confirmee (paiement en ligne validé).
 
     Renvoie False, sans rien changer, si la commande n'est plus « créée »
     (déjà confirmée, ou annulée entre-temps) : l'appelant décide alors.
@@ -102,15 +101,21 @@ def synchroniser_depuis_livraison(commande, statut_livraison):
     commande. Lève TransitionImpossible si la commande n'est pas prête
     (ex : expédier une commande pas encore en préparation, ou annulée).
     """
+    from apps.paiements.reversements import ouvrir_retractation
+
     cible = SYNCHRONISATION_LIVRAISON.get(statut_livraison)
     if cible is None:
         return
     _transitionner(commande, cible, {statut for statut, suivants in TRANSITIONS.items() if cible in suivants})
+    if cible == Statut.LIVREE:
+        # Livraison confirmée : le délai de rétractation avant reversement
+        # au vendeur commence (apps.paiements.reversements).
+        ouvrir_retractation(commande)
 
 
 def annuler_commande(commande, motif):
-    """Annule la commande, restitue son stock une seule fois et signale
-    les paiements déjà encaissés comme « à rembourser »."""
+    """Annule la commande, restitue son stock une seule fois, crée le
+    remboursement des paiements déjà encaissés et annule le reversement."""
     from apps.paiements.services import traiter_paiements_apres_annulation
 
     with transaction.atomic():
@@ -139,15 +144,12 @@ def est_payee(commande):
     """Un paiement couvrant cette commande a-t-il été encaissé ?"""
     from apps.paiements.models import Paiement
 
-    filtre = Q(commande=commande)
-    if commande.groupe_id:
-        filtre |= Q(groupe_commande_id=commande.groupe_id)
-    return Paiement.objects.filter(filtre, statut=Paiement.Statut.VALIDE).exists()
+    return commande.paiements_couvrants.filter(statut=Paiement.Statut.VALIDE).exists()
 
 
 def expirer_commandes_impayees(maintenant=None):
-    """Annule les commandes restées « créées » (donc non payées : le
-    paiement à la livraison les confirme dès son choix) au-delà du délai
+    """Annule les commandes restées « créées » (donc non payées : toute
+    commande se paie en ligne, sans exception) au-delà du délai
     COMMANDE_DELAI_PAIEMENT_MINUTES, et restitue leur stock."""
     limite = (maintenant or timezone.now()) - timedelta(minutes=settings.COMMANDE_DELAI_PAIEMENT_MINUTES)
     annulees = 0

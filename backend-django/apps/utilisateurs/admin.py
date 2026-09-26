@@ -151,7 +151,6 @@ class DocumentKYCAdmin(admin.ModelAdmin):
         'type_piece',
         'numero_mobile_money',
         'adresse',
-        'compte_bancaire',
         'date_soumission',
         'date_traitement',
         'lien_piece_identite_recto',

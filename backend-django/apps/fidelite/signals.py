@@ -10,12 +10,15 @@ try:
     from .models import CompteFidelite
 
     @receiver(paiement_valide)
-    def crediter_points_apres_achat(sender, paiement, client, **kwargs):
-        """Crédite automatiquement 1 point de fidélité par tranche de 1000 FCFA dépensée."""
-        if not client or paiement.montant <= Decimal("0.00"):
+    def crediter_points_apres_achat(sender, paiement, client, commandes=(), **kwargs):
+        """Crédite automatiquement 1 point de fidélité par tranche de 1000 FCFA
+        dépensée, sur les seules commandes confirmées par ce paiement (une
+        commande annulée ou déjà payée est remboursée : pas de points)."""
+        montant = sum((commande.montant_total for commande in commandes), Decimal("0.00"))
+        if not client or montant <= Decimal("0.00"):
             return
 
-        points_gagnes = int(paiement.montant // Decimal("1000.00"))
+        points_gagnes = int(montant // Decimal("1000.00"))
         if points_gagnes <= 0:
             return
 

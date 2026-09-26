@@ -10,6 +10,7 @@ from apps.utilisateurs.models import Utilisateur, Role, StatutKYC
 from apps.vendeurs.models import Boutique
 from apps.commandes.models import Commande
 from apps.paiements.models import Paiement
+from apps.paiements.services import valider_paiement
 from apps.retours.models import DemandeRetour
 from apps.retours.signals import retour_status_change
 from .models import CompteFidelite, TransactionFidelite, CouponReduction
@@ -70,9 +71,10 @@ class FideliteAPITestCase(BaseFideliteTestCase):
             methode=Paiement.Methode.WAVE,
             adresse_livraison="Cocody, Abidjan",
         )
+        paiement.commandes.add(self.commande)
 
         # Validation du paiement -> émet le signal paiement_valide
-        paiement.valider(transaction_id_externe="wave_trx_888")
+        valider_paiement(paiement)
 
         compte = CompteFidelite.objects.get(utilisateur=self.client1)
         # 25 000 FCFA // 1000 = 25 points
@@ -313,7 +315,8 @@ class FideliteRemboursementTestCase(BaseFideliteTestCase):
             methode=Paiement.Methode.WAVE,
             adresse_livraison="Cocody, Abidjan",
         )
-        paiement.valider(transaction_id_externe="wave_trx_remb_1")
+        paiement.commandes.add(self.commande)
+        valider_paiement(paiement)
 
         compte = CompteFidelite.objects.get(utilisateur=self.client1)
         self.assertEqual(compte.solde_points, 25)
@@ -380,7 +383,8 @@ class FideliteRemboursementTestCase(BaseFideliteTestCase):
             methode=Paiement.Methode.WAVE,
             adresse_livraison="Cocody, Abidjan",
         )
-        paiement.valider(transaction_id_externe="wave_trx_remb_2")
+        paiement.commandes.add(self.commande)
+        valider_paiement(paiement)
         compte = CompteFidelite.objects.get(utilisateur=self.client1)
         self.assertEqual(compte.solde_points, 25)
 

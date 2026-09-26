@@ -81,7 +81,7 @@ class EncryptedCharField(models.TextField):
     validée par les serializers.
 
     Ne PAS utiliser pour des champs qu'on a besoin de filtrer/rechercher en
-    base (WHERE compte_bancaire=...) : le chiffrement Fernet n'est pas
+    base (WHERE numero_mobile_money=...) : le chiffrement Fernet n'est pas
     déterministe (le même texte clair donne un jeton différent à chaque
     appel), donc aucune requête d'égalité ne peut fonctionner sur la colonne
     chiffrée.

@@ -46,6 +46,12 @@ services:
       # Clés de chiffrement des données KYC (apps.core.fields), clé active en
       # premier. Sans elles, prod.py refuse de démarrer (Django et Celery).
       FIELD_ENCRYPTION_KEYS: ${FIELD_ENCRYPTION_KEYS}
+      # Paiements (apps.paiements) : fournisseur et clés CinetPay. Sans
+      # elles, prod.py refuse de démarrer (Django et Celery).
+      PAIEMENT_FOURNISSEUR: ${PAIEMENT_FOURNISSEUR}
+      CINETPAY_API_KEY: ${CINETPAY_API_KEY}
+      CINETPAY_API_PASSWORD: ${CINETPAY_API_PASSWORD}
+      BACKEND_BASE_URL: ${BACKEND_BASE_URL}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
       # URL de vérification des passeports QR (apps.passeport_qr).
@@ -80,6 +86,12 @@ services:
       # Clés de chiffrement des données KYC (apps.core.fields), clé active en
       # premier. Sans elles, prod.py refuse de démarrer (Django et Celery).
       FIELD_ENCRYPTION_KEYS: ${FIELD_ENCRYPTION_KEYS}
+      # Paiements (apps.paiements) : fournisseur et clés CinetPay. Sans
+      # elles, prod.py refuse de démarrer (Django et Celery).
+      PAIEMENT_FOURNISSEUR: ${PAIEMENT_FOURNISSEUR}
+      CINETPAY_API_KEY: ${CINETPAY_API_KEY}
+      CINETPAY_API_PASSWORD: ${CINETPAY_API_PASSWORD}
+      BACKEND_BASE_URL: ${BACKEND_BASE_URL}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS}
       DB_NAME: ${DB_NAME}
       DB_USER: ${DB_USER}
@@ -104,6 +116,12 @@ services:
       # Clés de chiffrement des données KYC (apps.core.fields), clé active en
       # premier. Sans elles, prod.py refuse de démarrer (Django et Celery).
       FIELD_ENCRYPTION_KEYS: ${FIELD_ENCRYPTION_KEYS}
+      # Paiements (apps.paiements) : fournisseur et clés CinetPay. Sans
+      # elles, prod.py refuse de démarrer (Django et Celery).
+      PAIEMENT_FOURNISSEUR: ${PAIEMENT_FOURNISSEUR}
+      CINETPAY_API_KEY: ${CINETPAY_API_KEY}
+      CINETPAY_API_PASSWORD: ${CINETPAY_API_PASSWORD}
+      BACKEND_BASE_URL: ${BACKEND_BASE_URL}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS}
       DB_NAME: ${DB_NAME}
       DB_USER: ${DB_USER}

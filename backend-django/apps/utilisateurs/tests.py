@@ -1310,23 +1310,23 @@ class UploadKYCTests(TestCase):
         self.utilisateur.refresh_from_db()
         self.assertEqual(self.utilisateur.statut_kyc, StatutKYC.EN_ATTENTE)
 
-    def test_compte_bancaire_vide_stocke_en_none(self):
+    def test_compte_bancaire_plus_collecte(self):
         """
-        Un formulaire multipart envoie un champ laissé vide comme ''
-        plutôt que de l'omettre — DocumentKYCSerializer.validate_compte_bancaire
-        doit normaliser cette chaîne vide en None, seule représentation
-        voulue de « pas de compte bancaire » en base.
+        Reversements aux vendeurs en mobile money uniquement (module
+        paiements) : le compte bancaire n'est plus collecté. Un ancien
+        client qui l'envoie encore n'est pas bloqué, la valeur est ignorée.
         """
         from apps.utilisateurs.models import DocumentKYC
 
         payload = self._payload('passeport', avec_verso=False)
-        payload['compte_bancaire'] = ''
+        payload['compte_bancaire'] = 'CI93 CI0080 1112'
 
         response = self.client.post(self.url, payload, format='multipart')
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertNotIn('compte_bancaire', response.data)
         dossier = DocumentKYC.objects.get(utilisateur=self.utilisateur)
-        self.assertIsNone(dossier.compte_bancaire)
+        self.assertFalse(hasattr(dossier, 'compte_bancaire'))
 
 
 # =====================================================
@@ -1724,12 +1724,9 @@ def avec_proxys(nombre):
     return override_settings(REST_FRAMEWORK={**settings.REST_FRAMEWORK, 'NUM_PROXIES': nombre})
 
 
-def colonnes_brutes(dossier):
+def colonnes_brutes(dossier, colonnes="numero_mobile_money"):
     with connection.cursor() as curseur:
-        curseur.execute(
-            "SELECT numero_mobile_money, compte_bancaire FROM utilisateurs_documentkyc WHERE id = %s",
-            [dossier.pk],
-        )
+        curseur.execute(f"SELECT {colonnes} FROM utilisateurs_documentkyc WHERE id = %s", [dossier.pk])
         return curseur.fetchone()
 
 
@@ -1742,14 +1739,15 @@ def ecrire_jeton_brut(dossier, colonne, jeton):
 def creer_dossier(utilisateur, **champs):
     valeurs = {
         'type_piece': 'passeport', 'piece_identite_recto': 'kyc/recto.pdf', 'selfie': 'kyc/selfie.png',
-        'numero_mobile_money': '0707070707', 'adresse': 'Cocody', 'compte_bancaire': 'CI93 CI0080 1112',
+        'numero_mobile_money': '0707070707', 'adresse': 'Cocody',
         **champs,
     }
     return DocumentKYC.objects.create(utilisateur=utilisateur, **valeurs)
 
 
 class ChiffrementDonneesKYCTests(TestCase):
-    """1.1 : numero_mobile_money et compte_bancaire chiffrés au repos (Fernet)."""
+    """1.1 : numero_mobile_money chiffré au repos (Fernet). Le compte
+    bancaire n'est plus collecté (migration 0009)."""
 
     def setUp(self):
         self.utilisateur = Utilisateur.objects.create_user(
@@ -1763,16 +1761,15 @@ class ChiffrementDonneesKYCTests(TestCase):
         response = client.post('/api/utilisateurs/upload-kyc/', {
             'type_piece': 'passeport', 'piece_identite_recto': _fichier_pdf_valide('r.pdf'),
             'selfie': _fichier_selfie_valide(), 'numero_mobile_money': '0707070707',
-            'adresse': 'Cocody', 'compte_bancaire': 'CI93 CI0080 1112',
+            'adresse': 'Cocody',
         }, format='multipart')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
         dossier = DocumentKYC.objects.get(utilisateur=self.utilisateur)
-        mobile_brut, bancaire_brut = colonnes_brutes(dossier)
+        (mobile_brut,) = colonnes_brutes(dossier)
         self.assertNotIn('0707070707', mobile_brut)
-        self.assertNotIn('CI93', bancaire_brut)
         self.assertEqual(chiffreur().decrypt(mobile_brut.encode()).decode(), '0707070707')
-        self.assertEqual((dossier.numero_mobile_money, dossier.compte_bancaire), ('0707070707', 'CI93 CI0080 1112'))
+        self.assertEqual(dossier.numero_mobile_money, '0707070707')
 
     def test_longueurs_metier_toujours_validees(self):
         client = APIClient()
@@ -1780,46 +1777,47 @@ class ChiffrementDonneesKYCTests(TestCase):
         response = client.post('/api/utilisateurs/upload-kyc/', {
             'type_piece': 'passeport', 'piece_identite_recto': _fichier_pdf_valide('r.pdf'),
             'selfie': _fichier_selfie_valide(), 'numero_mobile_money': '0' * 21,
-            'adresse': 'Cocody', 'compte_bancaire': 'X' * 51,
+            'adresse': 'Cocody',
         }, format='multipart')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('numero_mobile_money', response.data['errors'])
-        self.assertIn('compte_bancaire', response.data['errors'])
 
     def test_valeur_illisible_jamais_ecrasee(self):
         # Avant : une clé erronée faisait lire « [valeur illisible…] », et
-        # la sauvegarde suivante chiffrait ce message à la place de l'IBAN.
+        # la sauvegarde suivante chiffrait ce message à la place de la donnée.
         dossier = creer_dossier(self.utilisateur)
-        jeton_etranger = Fernet(Fernet.generate_key()).encrypt(b'CI93 AUTRE CLE').decode()
-        ecrire_jeton_brut(dossier, 'compte_bancaire', jeton_etranger)
+        jeton_etranger = Fernet(Fernet.generate_key()).encrypt(b'0101010101').decode()
+        ecrire_jeton_brut(dossier, 'numero_mobile_money', jeton_etranger)
 
         dossier = DocumentKYC.objects.get(pk=dossier.pk)
-        self.assertIsInstance(dossier.compte_bancaire, ValeurIllisible)
-        self.assertEqual(dossier.compte_bancaire, MESSAGE_VALEUR_ILLISIBLE)
+        self.assertIsInstance(dossier.numero_mobile_money, ValeurIllisible)
+        self.assertEqual(dossier.numero_mobile_money, MESSAGE_VALEUR_ILLISIBLE)
         dossier.adresse = 'Plateau'
         dossier.save()
 
-        self.assertEqual(colonnes_brutes(dossier)[1], jeton_etranger)
-        self.assertEqual(DocumentKYC.objects.get(pk=dossier.pk).numero_mobile_money, '0707070707')
+        self.assertEqual(colonnes_brutes(dossier)[0], jeton_etranger)
+        self.assertEqual(DocumentKYC.objects.get(pk=dossier.pk).adresse, 'Plateau')
 
     def test_rotation_de_cle(self):
         with override_settings(FIELD_ENCRYPTION_KEYS=[CLE_A]):
             dossier = creer_dossier(self.utilisateur)
         # Nouvelle clé en tête, ancienne derrière : tout reste lisible.
         with override_settings(FIELD_ENCRYPTION_KEYS=[CLE_B, CLE_A]):
-            self.assertEqual(DocumentKYC.objects.get(pk=dossier.pk).compte_bancaire, 'CI93 CI0080 1112')
+            self.assertEqual(DocumentKYC.objects.get(pk=dossier.pk).numero_mobile_money, '0707070707')
             sortie = _io.StringIO()
             call_command('rechiffrer_donnees_sensibles', stdout=sortie)
-            self.assertIn('Total : 2 re-chiffrée(s), 0 illisible(s)', sortie.getvalue())
+            self.assertIn('Total : 1 re-chiffrée(s), 0 illisible(s)', sortie.getvalue())
         # Ancienne clé retirée : toujours lisible, car tout a été re-chiffré.
         with override_settings(FIELD_ENCRYPTION_KEYS=[CLE_B]):
             dossier = DocumentKYC.objects.get(pk=dossier.pk)
-            self.assertEqual((dossier.numero_mobile_money, dossier.compte_bancaire), ('0707070707', 'CI93 CI0080 1112'))
+            self.assertEqual(dossier.numero_mobile_money, '0707070707')
 
     def test_simulation_et_valeurs_illisibles_signalees(self):
+        autre = Utilisateur.objects.create_user(email='kyc-autre@anitche.ci', password='x', nom='A', prenom='U')
+        creer_dossier(autre)  # lisible : re-chiffré
         dossier = creer_dossier(self.utilisateur)
         jeton_etranger = Fernet(Fernet.generate_key()).encrypt(b'X').decode()
-        ecrire_jeton_brut(dossier, 'compte_bancaire', jeton_etranger)
+        ecrire_jeton_brut(dossier, 'numero_mobile_money', jeton_etranger)
         avant = colonnes_brutes(dossier)
 
         sortie, erreurs = _io.StringIO(), _io.StringIO()
@@ -1854,13 +1852,13 @@ class MigrationChiffrementKYCTests(TransactionTestCase):
 
         executeur = MigrationExecutor(connection)
         executeur.migrate(self.APRES)
-        mobile_brut, bancaire_brut = colonnes_brutes(dossier)
+        mobile_brut, bancaire_brut = colonnes_brutes(dossier, "numero_mobile_money, compte_bancaire")
         self.assertEqual(chiffreur().decrypt(mobile_brut.encode()).decode(), '0707070707')
         self.assertEqual(chiffreur().decrypt(bancaire_brut.encode()).decode(), 'CI93 CI0080 1112')
 
         executeur = MigrationExecutor(connection)
         executeur.migrate(self.AVANT)
-        self.assertEqual(colonnes_brutes(dossier), ('0707070707', 'CI93 CI0080 1112'))
+        self.assertEqual(colonnes_brutes(dossier, "numero_mobile_money, compte_bancaire"), ('0707070707', 'CI93 CI0080 1112'))
 
 
 class NotificationConnexionIPTests(TestCase):

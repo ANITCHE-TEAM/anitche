@@ -17,6 +17,8 @@ from .serializers import (
 from .signals import retour_status_change
 from apps.utilisateurs.models import Role
 from apps.commandes.models import Commande
+from apps.paiements.reversements import reprendre_reversement, suspendre_reversement
+from apps.paiements.services import rembourser_retour
 
 
 
@@ -105,6 +107,9 @@ class DemandeRetourListCreateView(APIView):
                     commande_item=commande_item,
                     quantite=qte,
                 )
+
+            # Retour ouvert : le reversement au vendeur attend son issue.
+            suspendre_reversement(commande)
 
         return Response(DemandeRetourSerializer(demande).data, status=status.HTTP_201_CREATED)
 
@@ -198,12 +203,21 @@ class TraiterDemandeRetourView(APIView):
         elif action == "receptionner":
             demande.receptionner(restock=restock)
         elif action == "rembourser":
-            demande.statut = DemandeRetour.Statut.REMBOURSE
-            demande.save(update_fields=["statut", "date_mise_a_jour"])
+            # L'argent n'est rendu que par l'administration : ce statut crée
+            # un Remboursement à traiter et réduit la part du vendeur
+            # (apps.paiements, docs/MODULE_PAIEMENTS.md).
+            with transaction.atomic():
+                demande.statut = DemandeRetour.Statut.REMBOURSE
+                demande.save(update_fields=["statut", "date_mise_a_jour"])
+                rembourser_retour(demande)
         elif action == "cloturer":
             demande.statut = DemandeRetour.Statut.CLOTURE
             demande.date_cloture = timezone.now()
             demande.save(update_fields=["statut", "date_cloture", "date_mise_a_jour"])
+
+        if action in ("rejeter", "cloturer"):
+            # Retour clos sans (nouveau) remboursement : le reversement reprend.
+            reprendre_reversement(demande.commande)
 
         retour_status_change.send(
             sender=DemandeRetour,

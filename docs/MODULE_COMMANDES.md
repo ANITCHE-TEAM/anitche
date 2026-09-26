@@ -16,7 +16,7 @@
 
 | Module | Dépendance |
 |---|---|
-| `paiements` | Initie le paiement d'une commande ou d'un groupe (reprend l'adresse du checkout) ; la validation confirme la commande par `commandes.services.confirmer_commande` ; statut « à rembourser » (§ 6) |
+| `paiements` | Paiement en ligne d'une commande ou d'un groupe (reprend l'adresse du checkout) ; la validation confirme la commande par `commandes.services.confirmer_commande` ; remboursements et reversements aux vendeurs (§ 6, [`MODULE_PAIEMENTS.md`](./MODULE_PAIEMENTS.md)) ; barème des frais vendeur figés au checkout (§ 4) |
 | `livraison` | Fiche créée à la confirmation ; son expédition et sa livraison se répercutent sur la commande (§ 5) |
 | `retours` | Restitue le stock à l'acceptation d'un retour |
 | `support` | Un ticket peut viser une commande |
@@ -28,7 +28,7 @@ Aucun appel frontend à ce jour.
 - **`GroupeCommande`** : un checkout (une commande par boutique du panier) et **l'adresse de livraison** : `livraison_commune`, `livraison_quartier`, `livraison_point_de_repere`, `livraison_telephone` (téléphone choisi par le client pour cette livraison, visible par le vendeur et le livreur ; jamais celui du profil).
 - **`Commande`** : une boutique, un client, `numero_commande` (`CMD-<année>-<8 hex>`, nouvel essai en cas de collision, format inchangé), `status`, `motif_annulation` (`client`, `expiration`, `administration`, `boutique_indisponible`), `montant_total`, `coupon_code`, `montant_remise`.
   - `client` et `boutique` en **PROTECT** : un historique de vente ne disparaît jamais avec un compte ou une boutique.
-- **`CommandeItem`** : `nom_produit`, `prix_unitaire`, `quantite` figés au checkout ; `variante` en PROTECT.
+- **`CommandeItem`** : `nom_produit`, `prix_unitaire`, `quantite` figés au checkout ; `variante` en PROTECT. **Frais vendeur figés** au checkout (migration 0006) : `taux_commission`, `frais_fixe_unitaire`, `montant_commission`, `montant_frais_fixes`, `montant_net_vendeur` — jamais exposés au client.
 
 ## 3. Endpoints — `/api/commandes/`
 
@@ -41,7 +41,7 @@ Aucun appel frontend à ce jour.
 | GET | `` | Liste paginée des commandes du client |
 | GET | `<uuid>/` | Détail **avec `articles` et `adresse_livraison`** |
 | GET | `<uuid>/items/` | Articles (paginés) |
-| POST | `<uuid>/annuler/` | **Nouveau.** Annulation tant que la commande n'est pas en préparation (`creee`, `confirmee`) ; stock restitué ; paiement encaissé → « à rembourser ». **200** (détail) ; **409** sinon |
+| POST | `<uuid>/annuler/` | **Nouveau.** Annulation tant que la commande n'est pas en préparation (`creee`, `confirmee`) ; stock restitué ; paiement encaissé → `Remboursement` à traiter. **200** (détail) ; **409** sinon |
 
 ### 3 bis. Adresse de livraison (checkout)
 
@@ -70,7 +70,7 @@ Représentation vendeur : `id`, `numero_commande`, `created_at`, `status`, `moti
 
 | Méthode | URL | Description |
 |---|---|---|
-| POST | `administration/<uuid>/annuler/` | Annulation jusqu'à la préparation incluse ; stock restitué ; paiement encaissé → « à rembourser ». **409** après expédition. Journalisée (`securite`) |
+| POST | `administration/<uuid>/annuler/` | Annulation jusqu'à la préparation incluse ; stock restitué ; paiement encaissé → `Remboursement` à traiter. **409** après expédition. Journalisée (`securite`) |
 
 `is_staff` ne donne aucun accès.
 
@@ -79,6 +79,7 @@ Représentation vendeur : `id`, `numero_commande`, `created_at`, `status`, `moti
 - Tout est **calculé côté serveur** : les montants envoyés par le client sont ignorés.
 - Le **prix est figé** dans `CommandeItem` au checkout (prix effectif, promo comprise) : une commande passée ne change jamais de prix.
 - **FCFA entiers** : la remise d'un coupon est arrondie **au franc inférieur** (le client ne paie jamais plus qu'annoncé, écart < 1 FCFA), puis répartie entre les boutiques **en francs entiers** au prorata de leur montant (la dernière absorbe le reste : la somme des parts égale exactement la remise).
+- **Frais vendeur** : à la validation du panier, le barème en vigueur de chaque boutique (offre de lancement, sinon barème de la plateforme : 12 % + 200 FCFA par article par défaut) est appliqué **ligne par ligne et figé** dans le `CommandeItem`. La commission porte sur le prix **avant remise** : un coupon est supporté par ANITCHE, jamais par le vendeur. Changer le barème ne modifie jamais une vente passée. Sans barème en vigueur, la validation répond **503** (erreur de configuration journalisée). Détail : [`MODULE_PAIEMENTS.md`](./MODULE_PAIEMENTS.md) § 5.
 
 ## 5. Cycle de vie
 
@@ -86,23 +87,23 @@ Une seule fonction de transition (`apps/commandes/services.py`), appelée partou
 
 | De | Vers | Qui | Effet |
 |---|---|---|---|
-| `creee` | `confirmee` | système : paiement validé, ou choix du paiement à la livraison | fiche de livraison créée |
+| `creee` | `confirmee` | système : paiement en ligne validé (**plus de paiement à la livraison**) | fiche de livraison et reversement vendeur créés |
 | `creee` | `annulee` | client · expiration (30 min) · boutique indisponible au paiement · administration | stock restitué |
 | `confirmee` | `preparation` | vendeur de la boutique | |
-| `confirmee` | `annulee` | client · administration | stock restitué, paiement encaissé → « à rembourser » |
+| `confirmee` | `annulee` | client · administration | stock restitué, paiement encaissé → remboursement à traiter, reversement annulé |
 | `preparation` | `expediee` | la livraison passe « expédiée » | |
-| `preparation` | `annulee` | administration | stock restitué, paiement encaissé → « à rembourser » |
+| `preparation` | `annulee` | administration | stock restitué, paiement encaissé → remboursement à traiter, reversement annulé |
 | `expediee` | `livree` | la livraison passe « livrée » | |
 
 Tout le reste est refusé (**409**) : retour arrière, saut d'étape, sortie d'un état final (`livree`, `annulee`). Côté livraison, le livreur ou l'admin qui passe une livraison « expédiée » alors que la commande n'est pas en préparation (ou annulée) reçoit 409 et rien ne change ; « en cours » et « échouée » ne changent pas la commande.
 
 ## 6. Commandes non payées, annulation et remboursement
 
-- **Expiration** : tâche Celery `expirer_commandes_non_payees`, toutes les 5 minutes. Une commande encore `creee` 30 minutes après sa création (`COMMANDE_DELAI_PAIEMENT_MINUTES`) est annulée (`expiration`) et son stock restitué. Le paiement à la livraison confirme la commande immédiatement : il n'est pas concerné.
+- **Expiration** : tâche Celery `expirer_commandes_non_payees`, toutes les 5 minutes. Une commande encore `creee` 30 minutes après sa création (`COMMANDE_DELAI_PAIEMENT_MINUTES`) est annulée (`expiration`) et son stock restitué. **Aucune exception** : le client paie en ligne avant la livraison, le paiement à la livraison n'existe plus (`espece_livraison` → 400).
 - **Restitution du stock** : sous le même verrou que le checkout, **une seule fois** (seule la requête qui a effectivement annulé restitue).
-- **Paiement confirmé après l'annulation** (paiement tardif après expiration, ou course) : la commande **n'est pas réactivée** ; le paiement passe **« à rembourser »** (`Paiement.Statut.A_REMBOURSER`, détail dans `metadata.remboursements_dus`), l'administration est alertée (journal `securite` + notification in-app et email de chaque administrateur actif) et le signal `paiement_valide` n'est pas émis (ni confirmation, ni fiche de livraison, ni points de fidélité).
-- **Annulation d'une commande payée** (client avant préparation, administration jusqu'à la préparation) : le paiement passe « à rembourser » de la même façon. Un paiement encore en attente dont toutes les commandes sont annulées est annulé.
-- Le remboursement lui-même sera traité avec le module paiements.
+- **Paiement confirmé après l'annulation** (paiement tardif après expiration, ou course) : la commande **n'est pas réactivée** ; le paiement est validé (l'argent est encaissé) et un **`Remboursement` à traiter** est créé pour la commande ; l'administration est alertée (journal `securite` + notification in-app et email de chaque administrateur actif) ; ni confirmation, ni fiche de livraison, ni points de fidélité.
+- **Annulation d'une commande payée** (client avant préparation, administration jusqu'à la préparation) : un `Remboursement` à traiter est créé pour cette commande seule (les autres commandes du même paiement restent payées) et son reversement vendeur est annulé. Un paiement encore en attente dont toutes les commandes sont annulées est annulé.
+- Le traitement du remboursement (manuel par l'administration au lancement) : [`MODULE_PAIEMENTS.md`](./MODULE_PAIEMENTS.md) § 6. Le statut « à rembourser » du paiement n'existe plus.
 
 ## 7. Vendeur suspendu (boutique non publiable)
 
@@ -119,7 +120,7 @@ Tout le reste est refusé (**409**) : retour arrière, saut d'étape, sortie d'u
 ## 9. Impact frontend
 
 1. **Adresse obligatoire au checkout.** `POST /api/commandes/valider-panier/` exige `adresse_livraison` : `commune`, `quartier`, `point_de_repere`, `telephone` (format au § 3 bis). Sans elle : **400** (`errors.adresse_livraison`). Prévoir le formulaire avant la validation du panier ; le téléphone saisi est celui que le vendeur et le livreur utiliseront.
-2. **Paiement sans adresse.** `POST /api/paiements/initier/` n'a plus besoin de `adresse_livraison` (champ **déprécié et ignoré** : l'adresse vient du checkout). Nouveau refus **400** « Cette commande n'est plus disponible… » quand la boutique n'est plus disponible (la commande est alors annulée : rafraîchir le panier / les commandes).
+2. **Paiement en ligne uniquement, sans adresse.** `methode: "espece_livraison"` → **400** : le client paie en ligne (Wave, Orange Money, MTN MoMo, Moov Money, carte) avant la livraison ; voir [`MODULE_PAIEMENTS.md`](./MODULE_PAIEMENTS.md) § 10. `POST /api/paiements/initier/` n'a plus besoin de `adresse_livraison` (champ **déprécié et ignoré** : l'adresse vient du checkout). Nouveau refus **400** « Cette commande n'est plus disponible… » quand la boutique n'est plus disponible (la commande est alors annulée : rafraîchir le panier / les commandes).
 3. **Annulation.** `POST /api/commandes/<id>/annuler/` (sans corps) : **200** avec le détail de la commande (`status: "annulee"`, `motif_annulation: "client"`) ; **409** si la commande est en préparation ou au-delà (proposer de contacter le support).
 4. **Détail enrichi.** `GET /api/commandes/<id>/` renvoie aussi `articles` et `adresse_livraison` ; la liste et le détail portent `motif_annulation`. `GET /api/commandes/groupes/` renvoie `adresse_livraison`.
 5. **Espace vendeur.** `GET /api/commandes/vendeur/`, `GET /api/commandes/vendeur/<id>/`, `POST /api/commandes/vendeur/<id>/preparation/` (réponses au § 3).
@@ -129,7 +130,6 @@ Tout le reste est refusé (**409**) : retour arrière, saut d'étape, sortie d'u
 ## 10. Dette connue
 
 - **Niveau 2 — `Idempotency-Key`** : aujourd'hui, un nouvel essai après une coupure réseau renvoie « panier vide » au lieu de la réponse 201 d'origine (aucune double commande possible grâce au verrou). Une clé d'idempotence permettrait de rejouer la même réponse.
-- **Remboursements** : le statut « à rembourser » et son détail existent, mais aucun flux de remboursement (à traiter avec le module paiements).
 - **Assignation du livreur** : uniquement via le Django admin ; à traiter avec le module livraison.
 - **Anonymisation à la suppression de compte** : `Commande.client` en PROTECT empêche de supprimer un compte qui a commandé ; il faudra un flux d'anonymisation.
 - **Retours** : le module retours accepte une demande sur une commande `confirmee` (pas encore expédiée) ; à revoir avec ce module maintenant que les statuts `expediee` et `livree` sont réellement posés.
@@ -146,13 +146,15 @@ DJANGO_SETTINGS_MODULE=config.settings.ci DB_NAME=anitche_test DB_USER=postgres 
   python manage.py test apps.commandes apps.paiements apps.livraison -v 2
 ```
 
-`apps/commandes/tests.py` — 53 tests. Refonte : adresse (obligatoire, complète, téléphone valide, reprise par le paiement, livraison et téléphone de contact, paiement refusé sans adresse), montants (serveur, prix figé avec promo, remise et répartition en francs entiers), annulation client (stock restitué une fois, paiement à rembourser + alerte admin, 409 après préparation, 404 pour un autre client), expiration (30 min, une seule restitution, commandes confirmées épargnées, paiement tardif : commande non réactivée, clé interne de metadata protégée, alerte), machine à états (parcours complet, synchronisation depuis la livraison, pas de saut ni de retour arrière), espace vendeur (isolation, données minimales, accès, boutique suspendue et commandes payées, N+1), boutique indisponible au paiement (commande seule et groupe), annulation par l'administration, détail avec articles, collision de numéro, PROTECT, concurrence (double validation, double annulation).
+`apps/commandes/tests.py` — 53 tests (adaptés au module paiements : paiement en ligne au lieu du paiement à la livraison, `Remboursement` au lieu du statut « à rembourser » ; frais figés testés dans `apps/paiements/tests.py`, `FraisTests`). Refonte : adresse (obligatoire, complète, téléphone valide, reprise par le paiement, livraison et téléphone de contact, paiement refusé sans adresse), montants (serveur, prix figé avec promo, remise et répartition en francs entiers), annulation client (stock restitué une fois, remboursement à traiter + alerte admin, 409 après préparation, 404 pour un autre client), expiration (30 min, une seule restitution, commandes confirmées épargnées, paiement tardif : commande non réactivée, remboursement, alerte), machine à états (parcours complet, synchronisation depuis la livraison, pas de saut ni de retour arrière), espace vendeur (isolation, données minimales, accès, boutique suspendue et commandes payées, N+1), boutique indisponible au paiement (commande seule et groupe), annulation par l'administration, détail avec articles, collision de numéro, PROTECT, concurrence (double validation, double annulation).
 
-Postman : `postman_commandes.json` (hors dépôt) — connexions, remise en état (admin), préparation, parcours client (checkout avec adresse, paiement à la livraison), parcours vendeur (préparation), annulation, scénarios de sécurité, nettoyage. Rejouable ; `admin_password` à renseigner. `postman_panier.json` et `postman_paiements.json` envoient désormais l'adresse au checkout.
+Postman : `postman_commandes.json` (hors dépôt) — connexions, remise en état (admin), préparation, parcours client (checkout avec adresse, **paiement en ligne simulé** : initiation puis notification signée du fournisseur simulé), parcours vendeur (préparation), annulation, scénarios de sécurité, nettoyage. Rejouable ; `admin_password` à renseigner. `postman_panier.json` et `postman_paiements.json` envoient désormais l'adresse au checkout.
 
 ## 12. Migrations
 
 - **commandes 0005** : adresse de livraison sur `GroupeCommande` (vide pour l'existant), `motif_annulation`, PROTECT sur `client` et `boutique`.
 - **paiements 0002** : statut `a_rembourser` ; `adresse_livraison` sans valeur par défaut fictive.
+- **commandes 0006** : frais vendeur figés sur `CommandeItem` (ventes passées : aucun frais, net = prix de la ligne).
+- **paiements 0003 / 0004** : refonte du module paiements (voir [`MODULE_PAIEMENTS.md`](./MODULE_PAIEMENTS.md) § 13) ; les paiements « à la livraison » encore actifs passent annulés.
 
 Base de dev avant application : 2 commandes `creee` anciennes (sans adresse), 0 paiement. Elles seront annulées par la tâche d'expiration — le service `celery-beat` de dev doit être redémarré pour charger la nouvelle planification.

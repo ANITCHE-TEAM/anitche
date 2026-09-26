@@ -188,6 +188,14 @@ REST_FRAMEWORK = {
         # visiteur : même raison CGNAT, et une navigation normale enchaîne
         # beaucoup plus de requêtes qu'un scan (20/min en moyenne).
         'catalogue_public': '1200/hour',
+        # Paiements, par utilisateur : initiation et annulation d'un
+        # paiement en attente (un checkout normal en consomme 1 à 3).
+        'paiements': '20/hour',
+        # Notifications des fournisseurs de paiement, par IP : elles
+        # arrivent toutes des mêmes serveurs. Avant, la limite anonyme
+        # (50/heure) refusait des paiements réels au-delà de 50 par heure.
+        # Chaque notification reste authentifiée puis revérifiée.
+        'webhook_paiement': '3000/hour',
     },
     # Sans cette ligne, config/exceptions.py::custom_exception_handler
     # n'est jamais appelé : les 500 utilisent le handler DRF par défaut.
@@ -250,6 +258,11 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'apps.commandes.tasks.expirer_commandes_non_payees',
         'schedule': crontab(minute='*/5'),
     },
+    # Délai de rétractation écoulé : reversements aux vendeurs disponibles.
+    'paiements-rendre-reversements-disponibles': {
+        'task': 'apps.paiements.tasks.rendre_reversements_disponibles',
+        'schedule': crontab(minute=10),
+    },
     'utilisateurs-purger-tokens-expires': {
         'task': 'apps.utilisateurs.tasks.purger_tokens_expires',
         'schedule': crontab(hour=3, minute=15),
@@ -269,8 +282,8 @@ CACHES = {
 # Auth Google
 GOOGLE_OAUTH_CLIENT_ID = config('GOOGLE_OAUTH_CLIENT_ID', default='')
 
-# Chiffrement au repos de champs sensibles (DocumentKYC.compte_bancaire et
-# numero_mobile_money)
+# Chiffrement au repos de champs sensibles (DocumentKYC.numero_mobile_money,
+# Reversement.numero_destinataire)
 # via apps.core.fields.EncryptedCharField. Valeur de dev par défaut non
 # secrète et volontairement présente uniquement ici — jamais utilisée en
 # prod (voir le raise dans prod.py) : elle sert juste à ce que
@@ -288,15 +301,24 @@ FIELD_ENCRYPTION_KEY = config(
 # docs/MODULE_UTILISATEURS.md, « Gestion de la clé ».
 FIELD_ENCRYPTION_KEYS = config('FIELD_ENCRYPTION_KEYS', default='', cast=Csv())
 
-# Secrets de signature des webhooks de paiement, un par fournisseur.
-# Jamais de valeur par défaut : un webhook dont le fournisseur n'a pas de
-# secret configuré est systématiquement rejeté (voir WebhookPaiementView).
-WEBHOOK_SECRETS = {
-    'wave': config('WEBHOOK_SECRET_WAVE', default=''),
-    'orange_money': config('WEBHOOK_SECRET_ORANGE_MONEY', default=''),
-    'mtn_money': config('WEBHOOK_SECRET_MTN_MONEY', default=''),
-    'moov_money': config('WEBHOOK_SECRET_MOOV_MONEY', default=''),
-}
+# Paiements (apps.paiements, docs/MODULE_PAIEMENTS.md).
+# Fournisseur actif : 'simule' (dev, tests ; refusé en production) ou
+# 'cinetpay'. Aucun secret n'a de valeur par défaut ici : ils viennent de
+# l'environnement (docker-compose.prod.yml), comme FIELD_ENCRYPTION_KEYS.
+PAIEMENT_FOURNISSEUR = config('PAIEMENT_FOURNISSEUR', default='simule')
+# Secret HMAC des notifications du fournisseur simulé (dev.py en fournit un).
+PAIEMENT_SIMULE_SECRET = config('PAIEMENT_SIMULE_SECRET', default='')
+# CinetPay (API v1) : identifiants du compte marchand Côte d'Ivoire. L'URL
+# de l'API se déduit du préfixe de la clé (sk_test_ → sandbox).
+CINETPAY_API_KEY = config('CINETPAY_API_KEY', default='')
+CINETPAY_API_PASSWORD = config('CINETPAY_API_PASSWORD', default='')
+CINETPAY_API_URL = config('CINETPAY_API_URL', default='')
+CINETPAY_TIMEOUT = config('CINETPAY_TIMEOUT', default=10, cast=int)
+# Adresse publique de l'API, pour les URL de notification envoyées au
+# fournisseur (120 caractères au plus chez CinetPay).
+BACKEND_BASE_URL = config('BACKEND_BASE_URL', default='http://localhost:8000')
+# Reversement au vendeur : N jours après la livraison confirmée.
+REVERSEMENT_DELAI_RETRACTATION_JOURS = config('REVERSEMENT_DELAI_RETRACTATION_JOURS', default=7, cast=int)
 
 # Adresse publique du frontend, utilisée pour construire les liens qui y
 # mènent (ex : URL de vérification encodée dans le QR d'un passeport,
@@ -304,8 +326,8 @@ WEBHOOK_SECRETS = {
 # docker-compose.prod.yml la fournit. Domaine définitif en attente de
 # confirmation par l'équipe (docs/MODULE_PASSEPORT_QR.md).
 # Délai de paiement d'une commande (mobile money, carte) avant annulation
-# automatique et restitution du stock (apps.commandes.tasks). Le paiement à
-# la livraison confirme la commande immédiatement : il n'est pas concerné.
+# automatique et restitution du stock (apps.commandes.tasks). Toute commande
+# se paie en ligne : aucune exception (plus de paiement à la livraison).
 COMMANDE_DELAI_PAIEMENT_MINUTES = config('COMMANDE_DELAI_PAIEMENT_MINUTES', default=30, cast=int)
 
 FRONTEND_BASE_URL = config('FRONTEND_BASE_URL', default='http://localhost:5173')

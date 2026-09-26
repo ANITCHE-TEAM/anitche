@@ -25,9 +25,10 @@ Le module dépend de `apps/core` (validateurs de fichiers, `CheminUploadUUID`, `
 
 - **`Utilisateur`** (`AbstractBaseUser` + `PermissionsMixin`) : identifiant de connexion = `email` (unique). `telephone` unique (facultatif, ajouté après l'inscription), `nom`, `prenom`, `role` (défaut `client`), `statut_kyc` (défaut `non_soumis`), `email_verifie`, `telephone_verifie` (voir § 10), `google_id` (unique), `is_active`, `is_staff`.
   - `soumettre_demande_vendeur()` : passe `statut_kyc` à `en_attente` ; lève `StatutsKYCImpossibles` si une demande est déjà en attente ou validée.
-- **`DocumentKYC`** (un par utilisateur) : `type_piece`, `piece_identite_recto`, `piece_identite_verso`, `selfie`, **`numero_mobile_money` (chiffré)**, `adresse`, **`compte_bancaire` (chiffré, facultatif)**, `date_soumission`, `date_traitement`, `commentaire_admin`.
+- **`DocumentKYC`** (un par utilisateur) : `type_piece`, `piece_identite_recto`, `piece_identite_verso`, `selfie`, **`numero_mobile_money` (chiffré)** — numéro sur lequel ANITCHE reverse au vendeur —, `adresse`, `date_soumission`, `date_traitement`, `commentaire_admin`.
   - Fichiers stockés sous un nom UUID. Pièce d'identité : JPEG, PNG, PDF, **10 Mo**, signature binaire vérifiée. Selfie : JPEG, PNG, WebP, **5 Mo**.
-  - Les deux champs financiers sont des `EncryptedCharField` (§ 4) : jamais en clair en base ni dans ses sauvegardes, relus en clair par l'application. Longueurs métier validées par l'API : 20 caractères (mobile money), 50 (compte bancaire).
+  - `numero_mobile_money` est un `EncryptedCharField` (§ 4) : jamais en clair en base ni dans ses sauvegardes, relu en clair par l'application. Longueur métier validée par l'API : 20 caractères.
+  - **Plus de `compte_bancaire`** (migration 0009, septembre 2026) : les reversements aux vendeurs se font en mobile money uniquement ([`MODULE_PAIEMENTS.md`](./MODULE_PAIEMENTS.md) § 7). Le champ n'est plus collecté ni stocké ; un client qui l'envoie encore n'est pas bloqué (valeur ignorée).
 - **`CodeOTP`** : `code_hash` (jamais en clair), `type_usage` (`inscription`, `mdp_oublie`, `changement_email`, `changement_telephone`), `nouvelle_valeur`, `date_expiration`, `nombre_tentatives`, `utilise`.
 
 ## 3. Endpoints — `/api/utilisateurs/`
@@ -89,9 +90,11 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 Ne jamais passer à l'étape 5 tant que l'étape 4 signale des valeurs illisibles.
 
-**Perte de la clé.** Les valeurs chiffrées avec elle sont **définitivement irrécupérables** (c'est le principe même du chiffrement) : aucune procédure ne les retrouve. L'application reste fonctionnelle (champ affiché « illisible », rien n'est écrasé) ; les vendeurs concernés doivent ressaisir leur numéro mobile money et leur compte bancaire (resoumission du dossier KYC). D'où l'obligation d'une copie de secours de la clé, elle aussi hors de la base et de ses sauvegardes.
+**Perte de la clé.** Les valeurs chiffrées avec elle sont **définitivement irrécupérables** (c'est le principe même du chiffrement) : aucune procédure ne les retrouve. L'application reste fonctionnelle (champ affiché « illisible », rien n'est écrasé) ; les vendeurs concernés doivent ressaisir leur numéro mobile money (resoumission du dossier KYC). Même règle pour `Reversement.numero_destinataire` (module paiements), relu avec la même clé et couvert par `rechiffrer_donnees_sensibles`. D'où l'obligation d'une copie de secours de la clé, elle aussi hors de la base et de ses sauvegardes.
 
 **Migration `utilisateurs 0008`** : colonnes passées en texte, valeurs existantes chiffrées avec la clé active, puis passage au champ chiffré ; le retour arrière déchiffre. À exécuter avec la **même** clé que celle du serveur qui relira les données.
+
+**Migration `utilisateurs 0009`** : suppression de la colonne `compte_bancaire` (irréversible pour les données : vérifier avant la production qu'aucun dossier n'en contient, comme en dev).
 
 ## 5. OTP et notifications
 
@@ -134,7 +137,7 @@ Adresse mal saisie à l'inscription : la personne ne reçoit aucun code et ne pe
 - Le dépôt soumet la demande vendeur (`statut_kyc = en_attente`). `en_attente` ou `valide` → 400 ; **`refuse` → resoumission** (dossier remplacé, anciens fichiers supprimés après le commit).
 - Concurrence : ligne `Utilisateur` verrouillée pendant la décision.
 - Décision (validation, refus) : back-office vendeurs (`MODULE_VENDEURS.md`).
-- **`compte_bancaire`** : conservé, facultatif et chiffré. **Minimisation à trancher avec le module paiements**, selon le canal de reversement aux vendeurs : si seul le mobile money est utilisé, le champ ne devrait plus être collecté.
+- **`compte_bancaire` supprimé** (décision du module paiements, septembre 2026) : reversement en mobile money uniquement, sur `numero_mobile_money`. Aucune donnée réelle n'existait en dev (une seule valeur, vide) avant la migration 0009.
 
 ## 9. Limites de débit
 
@@ -157,7 +160,7 @@ Adresse mal saisie à l'inscription : la personne ne reçoit aucun code et ne pe
 
 - **`telephone_verifie`** (septembre 2026) : ne passe **plus** à `true` tant que le code de changement de téléphone n'est pas envoyé par SMS au numéro lui-même. Aujourd'hui le code part sur l'email du compte : il prouve que le titulaire demande le changement, pas qu'il possède le numéro. À revoir quand un fournisseur SMS sera branché. Les valeurs `true` déjà en base (obtenues par l'ancien flux email) n'ont pas été modifiées.
 - **Énumération à l'inscription** : le message « Un compte existe déjà avec cet email. » est **conservé** (choix d'expérience utilisateur), borné par la limite `inscription` (10/h par IP). Le téléphone n'est plus demandé à l'inscription, ce qui supprime l'énumération par numéro.
-- **Minimisation de `compte_bancaire`** : voir § 8.
+- **Minimisation de `compte_bancaire`** (tranchée avec le module paiements) : champ supprimé, voir § 8.
 
 ## 11. Impact frontend
 
@@ -175,7 +178,9 @@ Changements de contrat à intégrer (tous testés côté backend) :
 5. **Limites de débit** (réponses **429**) : inscription 10/h par IP ; rafraîchissement du jeton 300/h par IP ; envois de code 5/h ; vérifications de code 10/h.
 6. **Téléchargement d'une pièce KYC perdue** : **404** « Ce document n'est plus disponible. » au lieu d'une erreur 500.
 
-Aucun autre champ de réponse ne change (le profil, les jetons et le dépôt KYC gardent leur format ; `numero_mobile_money` et `compte_bancaire` sont renvoyés en clair au titulaire comme avant).
+7. **`compte_bancaire` retiré du dépôt KYC** (`POST /api/utilisateurs/upload-kyc/`) et de la fiche KYC vue par l'administration (`/api/vendeurs/…`). Retirer le champ du formulaire ; s'il est encore envoyé, il est ignoré (pas d'erreur).
+
+Aucun autre champ de réponse ne change (le profil, les jetons et le dépôt KYC gardent leur format ; `numero_mobile_money` est renvoyé en clair au titulaire comme avant).
 
 ## 12. Dette connue
 

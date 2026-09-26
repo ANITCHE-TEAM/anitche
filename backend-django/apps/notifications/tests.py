@@ -8,6 +8,7 @@ from apps.vendeurs.models import Boutique
 from apps.commandes.models import Commande
 from apps.livraison.models import Livraison
 from apps.paiements.models import Paiement
+from apps.paiements.services import valider_paiement
 from .models import Notification, PreferenceNotification
 from .services import ServiceNotification
 
@@ -165,8 +166,10 @@ class NotificationSignauxTestCase(BaseNotificationTestCase):
             adresse_livraison="Cocody, Abidjan",
         )
 
+        paiement.commandes.add(self.commande1)
+
         # Validation du paiement -> émet le signal paiement_valide
-        paiement.valider(transaction_id_externe="wave_trx_123")
+        valider_paiement(paiement)
 
         # 1. Notification pour le client
         notif_client = Notification.objects.filter(

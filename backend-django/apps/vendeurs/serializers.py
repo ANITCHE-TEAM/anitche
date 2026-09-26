@@ -209,7 +209,7 @@ class DossierKYCLectureSerializer(serializers.ModelSerializer):
         fields = [
             'type_piece', 'piece_identite_recto_url', 'piece_identite_verso_url',
             'selfie_url', 'numero_mobile_money', 'adresse',
-            'compte_bancaire', 'date_soumission', 'date_traitement',
+            'date_soumission', 'date_traitement',
             'commentaire_admin',
         ]
         read_only_fields = fields

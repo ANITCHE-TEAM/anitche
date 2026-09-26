@@ -1,18 +1,26 @@
 import uuid
-from decimal import Decimal
-from django.db import models, transaction
+
 from django.conf import settings
+from django.core.validators import MaxValueValidator, MinValueValidator
+from django.db import models
+from django.db.models import Q
 from django.utils import timezone
 
-from .signals import paiement_valide
+from apps.core.fields import EncryptedCharField
 
 
-#: Clés de Paiement.metadata écrites par le backend uniquement.
-CLES_METADATA_INTERNES = ("commandes_couvertes", "remboursements_dus")
+def generer_reference(prefixe):
+    """Référence lisible, unique, de moins de 30 caractères (limite CinetPay)."""
+    return f"{prefixe}-{timezone.now().year}-{uuid.uuid4().hex[:10].upper()}"
 
 
 class Paiement(models.Model):
-    """Transaction de paiement liée à une commande unique ou un groupe de commandes multi-boutiques."""
+    """Transaction d'encaissement d'une ou plusieurs commandes d'un même checkout.
+
+    Le statut ne change que par apps.paiements.services (transitions
+    contrôlées, sous verrou). Les commandes payées sont la relation
+    `commandes` ; les remboursements dus sont des objets Remboursement.
+    """
 
     class Methode(models.TextChoices):
         WAVE = "wave", "Wave"
@@ -20,29 +28,36 @@ class Paiement(models.Model):
         MTN_MONEY = "mtn_money", "MTN Mobile Money"
         MOOV_MONEY = "moov_money", "Moov Money"
         CARTE_BANCAIRE = "carte_bancaire", "Carte Bancaire (Visa / Mastercard)"
-        ESPECE_LIVRAISON = "espece_livraison", "Paiement à la livraison (Cash on Delivery)"
+        # Le paiement à la livraison n'existe plus : les anciens paiements
+        # « espece_livraison » gardent leur valeur (historique) mais ne
+        # peuvent plus être créés (migration 0003 : passés annulés).
 
     class Statut(models.TextChoices):
         EN_ATTENTE = "en_attente", "En attente"
         VALIDE = "valide", "Validé"
         ECHOUE = "echoue", "Échoué"
         ANNULE = "annule", "Annulé"
-        REMBOURSE = "rembourse", "Remboursé"
-        # Encaissé, mais la commande est annulée (paiement reçu après
-        # expiration, ou annulation d'une commande payée) : remboursement à
-        # traiter par l'administration (détail dans metadata.remboursements_dus).
-        A_REMBOURSER = "a_rembourser", "À rembourser"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    reference = models.CharField(max_length=30, unique=True, editable=False, db_index=True)
+    reference = models.CharField(max_length=30, unique=True, editable=False)
 
+    # PROTECT : un paiement est un historique financier, jamais effacé en
+    # cascade avec un compte.
     client = models.ForeignKey(
         settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name="paiements",
         verbose_name="Client",
     )
 
+    # Commandes réellement payées par cette transaction.
+    commandes = models.ManyToManyField(
+        "commandes.Commande",
+        related_name="paiements_couvrants",
+        blank=True,
+    )
+    # Cible demandée par le client (contrat API conservé) : une commande
+    # seule, ou le groupe (checkout) entier.
     commande = models.ForeignKey(
         "commandes.Commande",
         on_delete=models.SET_NULL,
@@ -51,7 +66,6 @@ class Paiement(models.Model):
         related_name="paiements",
         verbose_name="Commande associée",
     )
-
     groupe_commande = models.ForeignKey(
         "commandes.GroupeCommande",
         on_delete=models.SET_NULL,
@@ -61,11 +75,9 @@ class Paiement(models.Model):
         verbose_name="Groupe de commandes associé",
     )
 
-    methode = models.CharField(
-        max_length=25,
-        choices=Methode.choices,
-        default=Methode.WAVE,
-    )
+    # Moyen choisi par le client, distinct du fournisseur qui encaisse.
+    methode = models.CharField(max_length=25, choices=Methode.choices, default=Methode.WAVE)
+    fournisseur = models.CharField(max_length=30)
 
     statut = models.CharField(
         max_length=20,
@@ -74,37 +86,23 @@ class Paiement(models.Model):
         db_index=True,
     )
 
+    # FCFA entiers (décimales toujours nulles).
     montant = models.DecimalField(max_digits=12, decimal_places=2)
     devise = models.CharField(max_length=3, default="XOF")
 
-    transaction_id_externe = models.CharField(
-        max_length=150,
-        null=True,
-        blank=True,
-        db_index=True,
-        help_text="Identifiant de transaction retourné par la passerelle de paiement",
-    )
+    transaction_id_externe = models.CharField(max_length=150, null=True, blank=True, db_index=True)
+    # Empreinte SHA-256 du jeton de notification remis par le fournisseur à
+    # l'initiation (jamais le jeton lui-même).
+    hash_jeton_notification = models.CharField(max_length=64, blank=True)
 
-    url_paiement = models.URLField(
-        max_length=500,
-        null=True,
-        blank=True,
-        help_text="URL de paiement externe ou de redirection vers le checkout de la passerelle",
-    )
+    url_paiement = models.URLField(max_length=500, null=True, blank=True)
 
-    # Reprise de l'adresse saisie à la validation du panier
-    # (GroupeCommande) : plus aucune valeur par défaut fictive.
-    adresse_livraison = models.CharField(
-        max_length=255,
-        blank=True,
-        help_text="Adresse de livraison à transmettre au module de livraison",
-    )
+    # Reprise de l'adresse saisie à la validation du panier (GroupeCommande).
+    adresse_livraison = models.CharField(max_length=255, blank=True)
 
-    metadata = models.JSONField(
-        default=dict,
-        blank=True,
-        help_text="Données brutes retournées par la passerelle ou informations contextuelles",
-    )
+    # Informations internes (motifs d'échec ou d'annulation), jamais
+    # exposées au client ni alimentées par les notifications.
+    metadata = models.JSONField(default=dict, blank=True)
 
     date_creation = models.DateTimeField(auto_now_add=True)
     date_validation = models.DateTimeField(null=True, blank=True)
@@ -117,104 +115,20 @@ class Paiement(models.Model):
 
     def save(self, *args, **kwargs):
         if not self.reference:
-            annee = timezone.now().year
-            self.reference = f"PAY-{annee}-{uuid.uuid4().hex[:8].upper()}"
+            self.reference = generer_reference("PAY")
         super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.reference} — {self.montant} {self.devise} ({self.get_statut_display()})"
 
-    @property
-    def est_regle(self):
-        return self.statut == self.Statut.VALIDE
-
-    def valider(self, transaction_id_externe=None, donnees_supplementaires=None):
-        """Valide le paiement de manière atomique et déclenche le signal métier.
-
-        Si une commande couverte a été annulée entre-temps (paiement reçu
-        après l'expiration du délai, par exemple), la commande n'est PAS
-        réactivée : le paiement passe « à rembourser », l'administration
-        est alertée, et le signal métier n'est pas émis (ni confirmation,
-        ni points de fidélité).
-        """
-        from apps.commandes.models import Commande
-        from .services import commandes_couvertes, marquer_a_rembourser
-
-        if self.statut in (self.Statut.VALIDE, self.Statut.A_REMBOURSER):
-            # Déjà traité (protection contre réceptions multiples de webhooks)
-            return
-
-        with transaction.atomic():
-            self.statut = self.Statut.VALIDE
-            self.date_validation = timezone.now()
-
-            if transaction_id_externe:
-                self.transaction_id_externe = transaction_id_externe
-
-            if donnees_supplementaires:
-                # Les clés internes (commandes couvertes, remboursements dus)
-                # ne viennent jamais de la passerelle.
-                donnees = {
-                    cle: valeur for cle, valeur in donnees_supplementaires.items()
-                    if cle not in CLES_METADATA_INTERNES
-                }
-                self.metadata = {**self.metadata, **donnees}
-
-            self.save(update_fields=[
-                "statut",
-                "date_validation",
-                "transaction_id_externe",
-                "metadata",
-                "date_mise_a_jour",
-            ])
-
-            commandes_annulees = [
-                commande for commande in commandes_couvertes(self)
-                if commande.status == Commande.Status.ANNULEE
-            ]
-            if commandes_annulees:
-                for commande in commandes_annulees:
-                    marquer_a_rembourser(self, commande, "paiement reçu pour une commande annulée")
-                return
-
-            # Émission du signal pour notifier les modules commandes et livraison
-            paiement_valide.send(
-                sender=self.__class__,
-                paiement=self,
-                client=self.client,
-                adresse_livraison=self.adresse_livraison,
-            )
-
-    def marquer_echoue(self, motif="", donnees_supplementaires=None):
-        """Marque le paiement comme ayant échoué."""
-        if self.statut in (self.Statut.VALIDE, self.Statut.A_REMBOURSER):
-            return
-
-        self.statut = self.Statut.ECHOUE
-        meta = {**self.metadata}
-        if motif:
-            meta["motif_echec"] = motif
-        if donnees_supplementaires:
-            meta.update(donnees_supplementaires)
-        self.metadata = meta
-        self.save(update_fields=["statut", "metadata", "date_mise_a_jour"])
-
-    def marquer_annule(self, motif=""):
-        """Annule le paiement si non validé."""
-        if self.statut in (self.Statut.VALIDE, self.Statut.A_REMBOURSER):
-            return
-        self.statut = self.Statut.ANNULE
-        if motif:
-            self.metadata = {**self.metadata, "motif_annulation": motif}
-        self.save(update_fields=["statut", "metadata", "date_mise_a_jour"])
-
 
 class JournalWebhook(models.Model):
-    """Journal d'audit et d'idempotence des événements webhooks reçus des passerelles."""
+    """Journal d'audit et d'idempotence des notifications des fournisseurs."""
 
     class StatutTraitement(models.TextChoices):
+        RECU = "recu", "Reçu"
         TRAITE = "traite", "Traité"
-        IGNORE = "ignore", "Ignoré (Doublon)"
+        IGNORE = "ignore", "Ignoré (transaction non finalisée)"
         ERREUR = "erreur", "Erreur de traitement"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -224,7 +138,7 @@ class JournalWebhook(models.Model):
     statut_traitement = models.CharField(
         max_length=20,
         choices=StatutTraitement.choices,
-        default=StatutTraitement.TRAITE,
+        default=StatutTraitement.RECU,
     )
     erreur = models.TextField(blank=True)
     date_reception = models.DateTimeField(auto_now_add=True)
@@ -242,3 +156,214 @@ class JournalWebhook(models.Model):
 
     def __str__(self):
         return f"Webhook {self.fournisseur}:{self.evenement_id} ({self.statut_traitement})"
+
+
+class Remboursement(models.Model):
+    """Somme encaissée à rendre au client, pour une commande.
+
+    Traitement manuel par l'administration au lancement : elle rembourse
+    depuis le tableau de bord du fournisseur puis saisit la référence.
+    """
+
+    class Motif(models.TextChoices):
+        COMMANDE_ANNULEE = "commande_annulee", "Commande annulée après paiement"
+        PAIEMENT_EN_DOUBLE = "paiement_en_double", "Commande déjà payée par un autre paiement"
+        RETOUR = "retour", "Retour remboursé"
+
+    class Statut(models.TextChoices):
+        A_TRAITER = "a_traiter", "À traiter"
+        EFFECTUE = "effectue", "Effectué"
+        REFUSE = "refuse", "Refusé"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    reference = models.CharField(max_length=30, unique=True, editable=False)
+    paiement = models.ForeignKey(Paiement, on_delete=models.PROTECT, related_name="remboursements")
+    commande = models.ForeignKey("commandes.Commande", on_delete=models.PROTECT, related_name="remboursements")
+    retour = models.OneToOneField(
+        "retours.DemandeRetour",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="remboursement",
+    )
+    montant = models.DecimalField(max_digits=12, decimal_places=2)
+    motif = models.CharField(max_length=30, choices=Motif.choices)
+    statut = models.CharField(max_length=20, choices=Statut.choices, default=Statut.A_TRAITER, db_index=True)
+    reference_externe = models.CharField(max_length=150, blank=True)
+    commentaire = models.TextField(blank=True)
+    traite_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="+",
+    )
+    date_creation = models.DateTimeField(auto_now_add=True)
+    date_traitement = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-date_creation"]
+        constraints = [
+            # Un seul remboursement par (paiement, commande) hors retours : une
+            # annulation ou un doublon signalés deux fois ne créent rien de plus.
+            models.UniqueConstraint(
+                fields=["paiement", "commande"],
+                condition=Q(retour__isnull=True),
+                name="unique_remboursement_paiement_commande",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self.reference:
+            self.reference = generer_reference("RMB")
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.reference} — {self.montant} FCFA ({self.get_statut_display()})"
+
+
+class BaremeFrais(models.Model):
+    """Frais vendeur (modèle Jumia) : commission en % + frais fixe par article.
+
+    Barème de la plateforme (boutique vide) ou propre à une boutique (offre
+    de lancement), valable entre date_debut et date_fin. Appliqué et figé
+    dans chaque CommandeItem à la validation du panier : le modifier ne
+    change jamais une vente passée.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    boutique = models.ForeignKey(
+        "vendeurs.Boutique", on_delete=models.PROTECT, null=True, blank=True, related_name="baremes_frais",
+    )
+    libelle = models.CharField(max_length=100, blank=True)
+    taux_commission = models.DecimalField(
+        max_digits=5, decimal_places=2,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text="Commission en % du prix de vente (avant remise).",
+    )
+    frais_fixe_article = models.PositiveIntegerField(help_text="FCFA par article vendu.")
+    date_debut = models.DateTimeField(default=timezone.now)
+    date_fin = models.DateTimeField(null=True, blank=True)
+    cree_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
+    date_creation = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Barème de frais"
+        verbose_name_plural = "Barèmes de frais"
+        ordering = ["-date_debut"]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(date_fin__isnull=True) | Q(date_fin__gt=models.F("date_debut")),
+                name="bareme_frais_dates_coherentes",
+            ),
+            models.CheckConstraint(
+                condition=Q(taux_commission__gte=0) & Q(taux_commission__lte=100),
+                name="bareme_frais_taux_entre_0_et_100",
+            ),
+        ]
+
+    def __str__(self):
+        cible = self.boutique.nom if self.boutique_id else "plateforme"
+        return f"{self.taux_commission} % + {self.frais_fixe_article} FCFA/article ({cible})"
+
+
+class Reversement(models.Model):
+    """Somme due au vendeur pour une commande, versée après livraison
+    confirmée et délai de rétractation (REVERSEMENT_DELAI_RETRACTATION_JOURS).
+
+    montant_net = brut − commission − frais fixes − retours ; le montant
+    réellement versé ajoute les ajustements négatifs imputés (retours
+    survenus après un versement précédent).
+    """
+
+    class Statut(models.TextChoices):
+        EN_ATTENTE_LIVRAISON = "en_attente_livraison", "En attente de livraison"
+        EN_RETRACTATION = "en_retractation", "Délai de rétractation en cours"
+        SUSPENDU = "suspendu", "Suspendu (retour en cours)"
+        DISPONIBLE = "disponible", "Disponible"
+        EN_COURS = "en_cours", "Versement en cours"
+        VERSE = "verse", "Versé"
+        ANNULE = "annule", "Annulé"
+
+    class Canal(models.TextChoices):
+        MOBILE_MONEY = "mobile_money", "Mobile money"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    reference = models.CharField(max_length=30, unique=True, editable=False)
+    commande = models.OneToOneField("commandes.Commande", on_delete=models.PROTECT, related_name="reversement")
+    boutique = models.ForeignKey("vendeurs.Boutique", on_delete=models.PROTECT, related_name="reversements")
+
+    montant_brut = models.DecimalField(max_digits=12, decimal_places=2)
+    montant_commission = models.DecimalField(max_digits=12, decimal_places=2)
+    montant_frais_fixes = models.DecimalField(max_digits=12, decimal_places=2)
+    # Part retirée par les retours remboursés avant le versement
+    # (prix des articles retournés moins leur commission, rendue au vendeur ;
+    # le frais fixe reste acquis à ANITCHE).
+    montant_retours = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    montant_net = models.DecimalField(max_digits=12, decimal_places=2)
+    # Ajustements négatifs imputés (≤ 0) et montant effectivement versé.
+    montant_ajustements = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    montant_a_verser = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    statut = models.CharField(
+        max_length=25, choices=Statut.choices, default=Statut.EN_ATTENTE_LIVRAISON, db_index=True,
+    )
+    date_livraison = models.DateTimeField(null=True, blank=True)
+    date_disponibilite = models.DateTimeField(null=True, blank=True, db_index=True)
+    date_versement = models.DateTimeField(null=True, blank=True)
+
+    canal = models.CharField(max_length=20, choices=Canal.choices, default=Canal.MOBILE_MONEY)
+    # Numéro du KYC figé au moment du versement (chiffré au repos).
+    numero_destinataire = EncryptedCharField(blank=True, default="")
+    operateur = models.CharField(max_length=20, blank=True)
+    # Fournisseur du transfert (vide pour un versement manuel).
+    fournisseur = models.CharField(max_length=30, blank=True)
+    reference_externe = models.CharField(max_length=150, blank=True)
+    hash_jeton_notification = models.CharField(max_length=64, blank=True)
+    verse_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="+",
+    )
+
+    date_creation = models.DateTimeField(auto_now_add=True)
+    date_mise_a_jour = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-date_creation"]
+        indexes = [models.Index(fields=["boutique", "statut"])]
+
+    def save(self, *args, **kwargs):
+        if not self.reference:
+            self.reference = generer_reference("REV")
+        super().save(*args, **kwargs)
+
+    def recalculer_net(self):
+        self.montant_net = max(
+            self.montant_brut - self.montant_commission - self.montant_frais_fixes - self.montant_retours, 0,
+        )
+
+    def __str__(self):
+        return f"{self.reference} — {self.montant_net} FCFA ({self.get_statut_display()})"
+
+
+class AjustementVendeur(models.Model):
+    """Montant négatif dû par une boutique (retour remboursé après le
+    versement de la commande), déduit du prochain reversement."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    boutique = models.ForeignKey("vendeurs.Boutique", on_delete=models.PROTECT, related_name="ajustements")
+    montant = models.DecimalField(max_digits=12, decimal_places=2, help_text="Négatif, en FCFA.")
+    motif = models.CharField(max_length=255)
+    retour = models.OneToOneField(
+        "retours.DemandeRetour", on_delete=models.PROTECT, null=True, blank=True, related_name="ajustement_vendeur",
+    )
+    reversement_impute = models.ForeignKey(
+        Reversement, on_delete=models.SET_NULL, null=True, blank=True, related_name="ajustements_imputes",
+    )
+    date_creation = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["date_creation"]
+        constraints = [
+            models.CheckConstraint(condition=Q(montant__lt=0), name="ajustement_vendeur_negatif"),
+        ]
+
+    def __str__(self):
+        return f"{self.montant} FCFA — {self.motif}"
