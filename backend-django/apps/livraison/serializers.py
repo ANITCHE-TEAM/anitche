@@ -13,10 +13,16 @@ class LivraisonHistoriqueSerializer(serializers.ModelSerializer):
 
 
 class LivraisonSerializer(serializers.ModelSerializer):
+    # Téléphone choisi par le client pour cette livraison, au checkout
+    # (GroupeCommande) — jamais le téléphone de son profil.
+    telephone_contact = serializers.CharField(
+        source="commande.groupe.livraison_telephone", read_only=True, default="",
+    )
+
     class Meta:
         model = Livraison
         fields = [
-            "id", "commande", "livreur", "status", "adresse_livraison",
+            "id", "commande", "livreur", "status", "adresse_livraison", "telephone_contact",
             "date_expedition", "date_livraison", "created_at", "updated_at"
         ]
         # `livreur` et `status` ne doivent jamais être modifiés par écriture

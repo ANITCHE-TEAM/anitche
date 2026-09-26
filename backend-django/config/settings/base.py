@@ -245,6 +245,11 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'apps.utilisateurs.tasks.nettoyer_otp_expires',
         'schedule': crontab(hour=3, minute=0),
     },
+    # Commandes non payées dans le délai : annulées, stock restitué.
+    'commandes-expirer-commandes-non-payees': {
+        'task': 'apps.commandes.tasks.expirer_commandes_non_payees',
+        'schedule': crontab(minute='*/5'),
+    },
     'utilisateurs-purger-tokens-expires': {
         'task': 'apps.utilisateurs.tasks.purger_tokens_expires',
         'schedule': crontab(hour=3, minute=15),
@@ -298,6 +303,11 @@ WEBHOOK_SECRETS = {
 # apps.passeport_qr). Défaut = serveur Vite de dev ; en production,
 # docker-compose.prod.yml la fournit. Domaine définitif en attente de
 # confirmation par l'équipe (docs/MODULE_PASSEPORT_QR.md).
+# Délai de paiement d'une commande (mobile money, carte) avant annulation
+# automatique et restitution du stock (apps.commandes.tasks). Le paiement à
+# la livraison confirme la commande immédiatement : il n'est pas concerné.
+COMMANDE_DELAI_PAIEMENT_MINUTES = config('COMMANDE_DELAI_PAIEMENT_MINUTES', default=30, cast=int)
+
 FRONTEND_BASE_URL = config('FRONTEND_BASE_URL', default='http://localhost:5173')
 
 

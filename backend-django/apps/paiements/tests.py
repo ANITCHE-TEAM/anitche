@@ -18,6 +18,15 @@ from .models import Paiement, JournalWebhook
 from .services import ServicePaiement
 
 
+
+# Adresse saisie à la validation du panier (GroupeCommande).
+ADRESSE_LIVRAISON = {
+    "livraison_commune": "Plateau",
+    "livraison_quartier": "Dokui",
+    "livraison_point_de_repere": "Face au lycée",
+    "livraison_telephone": "0700000002",
+}
+
 class BasePaiementTestCase(APITestCase):
     def setUp(self):
         # Client 1
@@ -80,8 +89,11 @@ class BasePaiementTestCase(APITestCase):
             est_active=True,
         )
 
-        # Commande individuelle pour client 1
+        # Commande individuelle pour client 1 (son propre groupe, avec
+        # l'adresse saisie à la validation du panier).
+        self.groupe_commande1 = GroupeCommande.objects.create(client=self.client1, **ADRESSE_LIVRAISON)
         self.commande1 = Commande.objects.create(
+            groupe=self.groupe_commande1,
             boutique=self.boutique1,
             client=self.client1,
             montant_total=Decimal("15000.00"),
@@ -89,7 +101,7 @@ class BasePaiementTestCase(APITestCase):
         )
 
         # Groupe de commandes multi-boutiques pour client 1
-        self.groupe = GroupeCommande.objects.create(client=self.client1)
+        self.groupe = GroupeCommande.objects.create(client=self.client1, **ADRESSE_LIVRAISON)
         self.commande_groupe1 = Commande.objects.create(
             groupe=self.groupe,
             boutique=self.boutique1,
@@ -180,7 +192,8 @@ class PaiementAPITestCase(BasePaiementTestCase):
 
         livraison = Livraison.objects.get(commande=self.commande1)
         self.assertEqual(livraison.status, Livraison.Status.EN_ATTENTE)
-        self.assertEqual(livraison.adresse_livraison, "Plateau Dokui, Abidjan")
+        # L'adresse vient du checkout (celle envoyée au paiement est ignorée).
+        self.assertEqual(livraison.adresse_livraison, "Plateau, Dokui — Face au lycée")
 
     def test_rejet_paiement_commande_autre_client(self):
         self.client.force_authenticate(user=self.client2)  # Client 2 tente de payer la commande du Client 1

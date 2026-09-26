@@ -1,9 +1,11 @@
+from django.db import transaction
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
+from apps.commandes.services import TransitionImpossible, synchroniser_depuis_livraison
 from apps.utilisateurs.models import Role
 from .models import Livraison, LivraisonHistorique
 from .serializers import (
@@ -116,11 +118,19 @@ class LivraisonChangerStatusView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        livraison.changer_status(
-            nouveau_status=nouveau_status,
-            effectue_par=user,
-            commentaire=serializer.validated_data.get("commentaire", ""),
-        )
+        # Expédiée / livrée se répercutent sur la commande (fonction unique
+        # de transition des commandes). Refus si la commande n'est pas prête
+        # (pas encore en préparation, ou annulée) : rien n'est changé.
+        try:
+            with transaction.atomic():
+                synchroniser_depuis_livraison(livraison.commande, nouveau_status)
+                livraison.changer_status(
+                    nouveau_status=nouveau_status,
+                    effectue_par=user,
+                    commentaire=serializer.validated_data.get("commentaire", ""),
+                )
+        except TransitionImpossible as erreur:
+            return Response({"detail": str(erreur)}, status=status.HTTP_409_CONFLICT)
 
         return Response(LivraisonSerializer(livraison).data, status=status.HTTP_200_OK)
 

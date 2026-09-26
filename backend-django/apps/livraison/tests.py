@@ -21,10 +21,13 @@ class LivraisonTestCase(APITestCase):
         self.vendeur = self._create_user("vendeur@test.com", Role.VENDEUR, statut_kyc=StatutKYC.VALIDE)
         self.boutique = Boutique.objects.create(proprietaire=self.vendeur, nom="Boutique Test", est_active=True)
 
+        # En préparation : la livraison peut être expédiée (l'expédition et
+        # la livraison se répercutent sur la commande, apps.commandes.services).
         self.commande = Commande.objects.create(
             boutique=self.boutique,
             client=self.client_user,
             montant_total=Decimal("5000"),
+            status=Commande.Status.PREPARATION,
         )
 
         self.livraison = Livraison.objects.create(
@@ -109,6 +112,9 @@ class LivraisonTestCase(APITestCase):
 
     def test_admin_peut_changer_le_statut(self):
         self.client.force_authenticate(user=self.admin)
+        # Correction manuelle de l'admin (saut d'étape côté livraison) : la
+        # commande doit déjà être expédiée pour pouvoir passer « livrée ».
+        Commande.objects.filter(pk=self.commande.pk).update(status=Commande.Status.EXPEDIEE)
         url = reverse("livraison:livraison-changer-status", args=[self.livraison.id])
         response = self.client.patch(url, {"status": Livraison.Status.LIVREE})
 

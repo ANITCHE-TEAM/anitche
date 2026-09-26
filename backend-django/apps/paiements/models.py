@@ -7,6 +7,10 @@ from django.utils import timezone
 from .signals import paiement_valide
 
 
+#: Clés de Paiement.metadata écrites par le backend uniquement.
+CLES_METADATA_INTERNES = ("commandes_couvertes", "remboursements_dus")
+
+
 class Paiement(models.Model):
     """Transaction de paiement liée à une commande unique ou un groupe de commandes multi-boutiques."""
 
@@ -24,6 +28,10 @@ class Paiement(models.Model):
         ECHOUE = "echoue", "Échoué"
         ANNULE = "annule", "Annulé"
         REMBOURSE = "rembourse", "Remboursé"
+        # Encaissé, mais la commande est annulée (paiement reçu après
+        # expiration, ou annulation d'une commande payée) : remboursement à
+        # traiter par l'administration (détail dans metadata.remboursements_dus).
+        A_REMBOURSER = "a_rembourser", "À rembourser"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     reference = models.CharField(max_length=30, unique=True, editable=False, db_index=True)
@@ -84,10 +92,11 @@ class Paiement(models.Model):
         help_text="URL de paiement externe ou de redirection vers le checkout de la passerelle",
     )
 
+    # Reprise de l'adresse saisie à la validation du panier
+    # (GroupeCommande) : plus aucune valeur par défaut fictive.
     adresse_livraison = models.CharField(
         max_length=255,
         blank=True,
-        default="Abidjan, Côte d'Ivoire",
         help_text="Adresse de livraison à transmettre au module de livraison",
     )
 
@@ -120,9 +129,19 @@ class Paiement(models.Model):
         return self.statut == self.Statut.VALIDE
 
     def valider(self, transaction_id_externe=None, donnees_supplementaires=None):
-        """Valide le paiement de manière atomique et déclenche le signal métier."""
-        if self.statut == self.Statut.VALIDE:
-            # Déjà validé (protection contre réceptions multiples de webhooks)
+        """Valide le paiement de manière atomique et déclenche le signal métier.
+
+        Si une commande couverte a été annulée entre-temps (paiement reçu
+        après l'expiration du délai, par exemple), la commande n'est PAS
+        réactivée : le paiement passe « à rembourser », l'administration
+        est alertée, et le signal métier n'est pas émis (ni confirmation,
+        ni points de fidélité).
+        """
+        from apps.commandes.models import Commande
+        from .services import commandes_couvertes, marquer_a_rembourser
+
+        if self.statut in (self.Statut.VALIDE, self.Statut.A_REMBOURSER):
+            # Déjà traité (protection contre réceptions multiples de webhooks)
             return
 
         with transaction.atomic():
@@ -133,7 +152,13 @@ class Paiement(models.Model):
                 self.transaction_id_externe = transaction_id_externe
 
             if donnees_supplementaires:
-                self.metadata = {**self.metadata, **donnees_supplementaires}
+                # Les clés internes (commandes couvertes, remboursements dus)
+                # ne viennent jamais de la passerelle.
+                donnees = {
+                    cle: valeur for cle, valeur in donnees_supplementaires.items()
+                    if cle not in CLES_METADATA_INTERNES
+                }
+                self.metadata = {**self.metadata, **donnees}
 
             self.save(update_fields=[
                 "statut",
@@ -142,6 +167,15 @@ class Paiement(models.Model):
                 "metadata",
                 "date_mise_a_jour",
             ])
+
+            commandes_annulees = [
+                commande for commande in commandes_couvertes(self)
+                if commande.status == Commande.Status.ANNULEE
+            ]
+            if commandes_annulees:
+                for commande in commandes_annulees:
+                    marquer_a_rembourser(self, commande, "paiement reçu pour une commande annulée")
+                return
 
             # Émission du signal pour notifier les modules commandes et livraison
             paiement_valide.send(
@@ -153,7 +187,7 @@ class Paiement(models.Model):
 
     def marquer_echoue(self, motif="", donnees_supplementaires=None):
         """Marque le paiement comme ayant échoué."""
-        if self.statut == self.Statut.VALIDE:
+        if self.statut in (self.Statut.VALIDE, self.Statut.A_REMBOURSER):
             return
 
         self.statut = self.Statut.ECHOUE
@@ -167,7 +201,7 @@ class Paiement(models.Model):
 
     def marquer_annule(self, motif=""):
         """Annule le paiement si non validé."""
-        if self.statut == self.Statut.VALIDE:
+        if self.statut in (self.Statut.VALIDE, self.Statut.A_REMBOURSER):
             return
         self.statut = self.Statut.ANNULE
         if motif:

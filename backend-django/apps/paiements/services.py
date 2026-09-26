@@ -3,6 +3,7 @@ import uuid
 from decimal import Decimal
 from django.db import IntegrityError
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from .models import Paiement, JournalWebhook
@@ -21,7 +22,7 @@ class ServicePaiement:
         montant = validated_data.get("_montant")
         methode = validated_data.get("methode")
         telephone = validated_data.get("telephone", "")
-        adresse_livraison = validated_data.get("adresse_livraison", "")
+        adresse_livraison = validated_data["_adresse_livraison"]
 
         commande = cible_objet if type_cible == "commande" else None
         groupe_commande = cible_objet if type_cible == "groupe" else None
@@ -29,6 +30,9 @@ class ServicePaiement:
         metadata = {
             "canal": "api_web",
             "telephone_client": telephone,
+            # Commandes réellement payées par cette transaction (celles d'un
+            # groupe déjà annulées en sont exclues).
+            "commandes_couvertes": [str(c.pk) for c in validated_data["_commandes"]],
         }
 
         # Génération d'une URL de redirection simulée / passerelle
@@ -57,21 +61,18 @@ class ServicePaiement:
                 statut=Paiement.Statut.EN_ATTENTE,
                 transaction_id_externe=identifiant_passerelle,
                 url_paiement=url_paiement,
-                adresse_livraison=adresse_livraison or "Abidjan, Côte d'Ivoire",
+                adresse_livraison=adresse_livraison,
                 metadata=metadata,
             )
 
             # Dans le cas spécifique du paiement à la livraison (Cash on Delivery),
             # la commande passe directement en confirmation/préparation sans attendre de transaction électronique.
             if methode == Paiement.Methode.ESPECE_LIVRAISON:
-                from apps.commandes.models import Commande
+                from apps.commandes.services import confirmer_commande
                 from apps.livraison.models import Livraison
 
-                commandes_a_confirmer = [commande] if commande else list(groupe_commande.commandes.all())
-                for c in commandes_a_confirmer:
-                    if c.status == Commande.Status.CREEE:
-                        c.status = Commande.Status.CONFIRMEE
-                        c.save(update_fields=["status", "update_at"])
+                for c in validated_data["_commandes"]:
+                    confirmer_commande(c)
                     Livraison.objects.get_or_create(
                         commande=c,
                         defaults={
@@ -164,3 +165,89 @@ class ServicePaiement:
             journal.erreur = str(e)
             journal.save(update_fields=["statut_traitement", "erreur"])
             return False, str(e)
+
+# =====================================================================
+# REMBOURSEMENTS DUS (commandes annulées après encaissement)
+# =====================================================================
+
+logger_securite = logging.getLogger("securite")
+
+
+def commandes_couvertes(paiement):
+    """Commandes réellement payées par ce paiement."""
+    from apps.commandes.models import Commande
+
+    identifiants = (paiement.metadata or {}).get("commandes_couvertes")
+    if identifiants:
+        return list(Commande.objects.filter(pk__in=identifiants))
+    if paiement.commande_id:
+        return [paiement.commande]
+    if paiement.groupe_commande_id:
+        return list(paiement.groupe_commande.commandes.all())
+    return []
+
+
+def marquer_a_rembourser(paiement, commande, motif):
+    """Passe le paiement « à rembourser » pour cette commande (une seule
+    fois par commande) et alerte l'administration. Le détail des montants
+    dus est gardé dans metadata.remboursements_dus ; le remboursement
+    lui-même sera traité avec le module paiements."""
+    with transaction.atomic():
+        verrouille = Paiement.objects.select_for_update().get(pk=paiement.pk)
+        dus = list(verrouille.metadata.get("remboursements_dus", []))
+        if any(du["commande"] == str(commande.pk) for du in dus):
+            return
+        dus.append({
+            "commande": str(commande.pk),
+            "numero_commande": commande.numero_commande,
+            "montant": str(commande.montant_total),
+            "motif": motif,
+        })
+        verrouille.metadata = {**verrouille.metadata, "remboursements_dus": dus}
+        verrouille.statut = Paiement.Statut.A_REMBOURSER
+        verrouille.save(update_fields=["statut", "metadata", "date_mise_a_jour"])
+    paiement.refresh_from_db(fields=["statut", "metadata", "date_mise_a_jour"])
+    alerter_administration(verrouille, commande, motif)
+
+
+def alerter_administration(paiement, commande, motif):
+    """Journal de sécurité + notification (in-app et email) de chaque administrateur actif."""
+    from apps.notifications.models import Notification
+    from apps.notifications.services import ServiceNotification
+    from apps.utilisateurs.models import Utilisateur
+    from apps.vendeurs.permissions import ROLES_ADMINISTRATION
+
+    message = (
+        f"Paiement {paiement.reference} à rembourser : commande {commande.numero_commande} "
+        f"({commande.montant_total} FCFA) — {motif}."
+    )
+    logger_securite.error("ALERTE ADMINISTRATION — %s", message)
+    for administrateur in Utilisateur.objects.filter(role__in=ROLES_ADMINISTRATION, is_active=True):
+        ServiceNotification.notifier_utilisateur(
+            administrateur,
+            titre="Paiement à rembourser",
+            message=message,
+            type_notification=Notification.TypeNotification.PAIEMENT,
+            metadata={"paiement": str(paiement.pk), "commande": str(commande.pk)},
+        )
+
+
+def traiter_paiements_apres_annulation(commande):
+    """Appelée à l'annulation d'une commande (dans sa transaction) :
+    paiement encaissé → « à rembourser » ; paiement encore en attente dont
+    toutes les commandes sont annulées → annulé."""
+    from apps.commandes.models import Commande
+
+    filtre = Q(commande=commande)
+    if commande.groupe_id:
+        filtre |= Q(groupe_commande_id=commande.groupe_id)
+    en_cours = (Paiement.Statut.VALIDE, Paiement.Statut.A_REMBOURSER, Paiement.Statut.EN_ATTENTE)
+    for paiement in Paiement.objects.filter(filtre, statut__in=en_cours):
+        couvertes = commandes_couvertes(paiement)
+        if commande.pk not in {c.pk for c in couvertes}:
+            continue
+        if paiement.statut == Paiement.Statut.EN_ATTENTE:
+            if all(c.status == Commande.Status.ANNULEE for c in couvertes):
+                paiement.marquer_annule(motif="commande annulée")
+        else:
+            marquer_a_rembourser(paiement, commande, f"commande annulée ({commande.get_motif_annulation_display()})")

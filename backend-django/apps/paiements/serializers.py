@@ -19,12 +19,42 @@ class InitierPaiementSerializer(serializers.Serializer):
         max_length=25,
         help_text="Numéro de téléphone pour Mobile Money (Wave, Orange, MTN, Moov)",
     )
+    # Déprécié : ignoré. L'adresse est saisie à la validation du panier
+    # (GroupeCommande) et reprise ici ; conservé pour ne pas casser un client
+    # qui l'enverrait encore.
     adresse_livraison = serializers.CharField(
         required=False,
         allow_blank=True,
         max_length=255,
-        help_text="Adresse de livraison des colis",
+        help_text="Déprécié et ignoré : l'adresse vient de la validation du panier.",
     )
+
+    MESSAGE_INDISPONIBLE = (
+        "Cette commande n'est plus disponible : elle a été annulée et son stock libéré."
+    )
+    MESSAGE_ADRESSE_MANQUANTE = (
+        "Adresse de livraison manquante : elle se renseigne à la validation du panier."
+    )
+
+    def _annuler_si_boutique_indisponible(self, commandes):
+        """Commande non payée d'une boutique qui n'est plus publiable
+        (suspendue, fermée, vendeur non validé) : paiement refusé, commande
+        annulée, stock restitué. Message volontairement générique."""
+        from apps.commandes.services import TransitionImpossible, annuler_commande
+
+        indisponibles = [c for c in commandes if not c.boutique.est_publiable]
+        for commande in indisponibles:
+            try:
+                annuler_commande(commande, Commande.MotifAnnulation.BOUTIQUE_INDISPONIBLE)
+            except TransitionImpossible:
+                pass
+        if indisponibles:
+            raise ValidationError(self.MESSAGE_INDISPONIBLE)
+
+    def _adresse(self, groupe):
+        if groupe is None or not groupe.a_une_adresse:
+            raise ValidationError(self.MESSAGE_ADRESSE_MANQUANTE)
+        return groupe.adresse_livraison_texte
 
     def validate(self, attrs):
         commande_id = attrs.get("commande_id")
@@ -50,6 +80,10 @@ class InitierPaiementSerializer(serializers.Serializer):
             if commande.status == Commande.Status.ANNULEE:
                 raise ValidationError("Impossible de payer une commande annulée.")
 
+            self._annuler_si_boutique_indisponible([commande])
+            attrs["_adresse_livraison"] = self._adresse(commande.groupe)
+            attrs["_commandes"] = [commande]
+
             # A04:2025 (Unrestricted Resource Consumption) + risque de
             # double-débit : sans ce contrôle, rien n'empêche un client
             # d'initier un nombre illimité de paiements EN_ATTENTE pour la
@@ -74,9 +108,13 @@ class InitierPaiementSerializer(serializers.Serializer):
             except GroupeCommande.DoesNotExist:
                 raise ValidationError({"groupe_commande_id": "Groupe de commandes introuvable ou non autorisé."})
 
-            commandes = list(groupe.commandes.all())
+            # Les commandes déjà annulées (client, expiration, boutique
+            # indisponible) sortent du groupe à payer.
+            commandes = list(
+                groupe.commandes.exclude(status=Commande.Status.ANNULEE).select_related("boutique__proprietaire")
+            )
             if not commandes:
-                raise ValidationError("Ce groupe de commandes ne contient aucune commande.")
+                raise ValidationError("Ce groupe de commandes ne contient aucune commande à payer.")
 
             deja_payee = any(c.status != Commande.Status.CREEE for c in commandes)
             if deja_payee:
@@ -88,6 +126,10 @@ class InitierPaiementSerializer(serializers.Serializer):
                 raise ValidationError(
                     "Un paiement est déjà en attente pour ce groupe de commandes."
                 )
+
+            self._annuler_si_boutique_indisponible(commandes)
+            attrs["_adresse_livraison"] = self._adresse(groupe)
+            attrs["_commandes"] = commandes
 
             montant_total = sum((c.montant_total for c in commandes), Decimal("0.00"))
             attrs["_cible_objet"] = groupe

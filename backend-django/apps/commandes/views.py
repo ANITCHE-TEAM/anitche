@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 import logging
 
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -13,12 +13,21 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework import status
 
 from .models import Commande, GroupeCommande, CommandeItem
-from .serializers import CommandeSerializer, GroupeCommandeSerializer, CommandeItemSerializer
+from .serializers import (
+    AdresseLivraisonSerializer,
+    CommandeDetailSerializer,
+    CommandeSerializer,
+    CommandeVendeurSerializer,
+    GroupeCommandeSerializer,
+    CommandeItemSerializer,
+)
+from .services import TransitionImpossible, annuler_commande, est_payee, passer_en_preparation
 from apps.catalogue.models import Stock
 from apps.panier.models import Panier
 from apps.panier.services import get_or_create_panier
 from apps.fidelite.models import CouponReduction
 from apps.utilisateurs.permissions import EmailVerifie
+from apps.vendeurs.permissions import BoutiqueNonSuspendue, EstAdministrateur, EstVendeurValide
 
 logger_securite = logging.getLogger('securite')
 
@@ -36,6 +45,13 @@ class ValiderPanierView(APIView):
     throttle_scope = 'commande_validation'
 
     def post(self, request):
+        # Adresse de livraison obligatoire, validée avant toute écriture.
+        adresse = AdresseLivraisonSerializer(data=request.data.get("adresse_livraison"))
+        if request.data.get("adresse_livraison") is None:
+            raise ValidationError({"adresse_livraison": "L'adresse de livraison est obligatoire."})
+        adresse.is_valid(raise_exception=True)
+        adresse = adresse.validated_data
+
         panier = get_or_create_panier(request)
 
         with transaction.atomic():
@@ -119,19 +135,18 @@ class ValiderPanierView(APIView):
 
                 montant_remise_total = coupon.calculer_remise(montant_total_panier)
 
+                # Parts en francs entiers (FCFA) : arrondies au franc
+                # inférieur, le dernier lot absorbe le reste pour que la
+                # somme des parts égale exactement la remise du panier.
                 boutiques = list(items_par_boutique.keys())
-                remise_cumulee = Decimal("0.00")
+                remise_cumulee = Decimal("0")
                 for index, boutique in enumerate(boutiques):
                     if index == len(boutiques) - 1:
-                        # Le dernier lot absorbe l'écart d'arrondi, pour que
-                        # la somme des remises corresponde exactement au
-                        # montant calculé sur le panier entier.
                         part = montant_remise_total - remise_cumulee
                     else:
-                        part = round(
-                            montant_remise_total * montants_par_boutique[boutique] / montant_total_panier,
-                            2,
-                        )
+                        part = (
+                            montant_remise_total * montants_par_boutique[boutique] / montant_total_panier
+                        ).quantize(Decimal("1"), rounding=ROUND_DOWN)
                         remise_cumulee += part
                     remises_par_boutique[boutique] = part
 
@@ -152,7 +167,13 @@ class ValiderPanierView(APIView):
                         f"Stock insuffisant pour {item.variante.nom} : {disponible} disponible(s)."
                     )
 
-            groupe = GroupeCommande.objects.create(client=request.user)
+            groupe = GroupeCommande.objects.create(
+                client=request.user,
+                livraison_commune=adresse["commune"],
+                livraison_quartier=adresse["quartier"],
+                livraison_point_de_repere=adresse["point_de_repere"],
+                livraison_telephone=adresse["telephone"],
+            )
             commandes_creees = []
 
             for boutique, boutique_items in items_par_boutique.items():
@@ -226,12 +247,101 @@ class CommandeListView(generics.ListAPIView):
 
 
 class CommandeDetailView(generics.RetrieveAPIView):
-    """Détail d'une commande précise, avec ses articles."""
+    """Détail d'une commande précise, avec ses articles et l'adresse."""
     permission_classes = [IsAuthenticated]
-    serializer_class = CommandeSerializer
+    serializer_class = CommandeDetailSerializer
 
     def get_queryset(self):
-        return Commande.objects.filter(client=self.request.user)
+        return Commande.objects.filter(client=self.request.user).select_related("groupe").prefetch_related("article")
+
+
+def reponse_transition_impossible(erreur):
+    return Response({"detail": str(erreur)}, status=status.HTTP_409_CONFLICT)
+
+
+class AnnulerCommandeView(APIView):
+    """Annulation par le client, tant que la commande n'est pas en
+    préparation. Stock restitué une seule fois ; un paiement déjà encaissé
+    passe « à rembourser »."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        commande = get_object_or_404(Commande, pk=pk, client=request.user)
+        try:
+            annuler_commande(commande, Commande.MotifAnnulation.CLIENT)
+        except TransitionImpossible as erreur:
+            return reponse_transition_impossible(erreur)
+        commande = Commande.objects.select_related("groupe").prefetch_related("article").get(pk=commande.pk)
+        return Response(CommandeDetailSerializer(commande).data, status=status.HTTP_200_OK)
+
+
+# =====================================================================
+# ESPACE VENDEUR
+# =====================================================================
+
+def commandes_du_vendeur(utilisateur):
+    return Commande.objects.filter(boutique__proprietaire=utilisateur).select_related(
+        "client", "groupe", "boutique",
+    ).prefetch_related("article")
+
+
+class CommandeVendeurListView(generics.ListAPIView):
+    """Commandes de la boutique du vendeur connecté (une commande = une
+    seule boutique : jamais les articles d'un autre vendeur)."""
+    permission_classes = [IsAuthenticated, EstVendeurValide]
+    serializer_class = CommandeVendeurSerializer
+
+    def get_queryset(self):
+        return commandes_du_vendeur(self.request.user)
+
+
+class CommandeVendeurDetailView(generics.RetrieveAPIView):
+    permission_classes = [IsAuthenticated, EstVendeurValide]
+    serializer_class = CommandeVendeurSerializer
+
+    def get_queryset(self):
+        return commandes_du_vendeur(self.request.user)
+
+
+class PasserEnPreparationView(APIView):
+    """confirmee → preparation, par le vendeur de la boutique.
+
+    Boutique suspendue : seules les commandes déjà payées peuvent encore
+    être honorées (403 sinon).
+    """
+    permission_classes = [IsAuthenticated, EstVendeurValide]
+
+    def post(self, request, pk):
+        commande = get_object_or_404(commandes_du_vendeur(request.user), pk=pk)
+        if commande.boutique.est_suspendue and not est_payee(commande):
+            return Response({"detail": BoutiqueNonSuspendue.message}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            passer_en_preparation(commande)
+        except TransitionImpossible as erreur:
+            return reponse_transition_impossible(erreur)
+        commande = commandes_du_vendeur(request.user).get(pk=commande.pk)
+        return Response(CommandeVendeurSerializer(commande).data, status=status.HTTP_200_OK)
+
+
+# =====================================================================
+# ADMINISTRATION
+# =====================================================================
+
+class AnnulerCommandeAdministrationView(APIView):
+    """Annulation par l'administration (jusqu'à la préparation incluse)."""
+    permission_classes = [IsAuthenticated, EstAdministrateur]
+
+    def post(self, request, pk):
+        commande = get_object_or_404(Commande, pk=pk)
+        try:
+            annuler_commande(commande, Commande.MotifAnnulation.ADMINISTRATION)
+        except TransitionImpossible as erreur:
+            return reponse_transition_impossible(erreur)
+        logger_securite.info(
+            "Commande %s annulée par admin_id=%s", commande.numero_commande, request.user.id,
+        )
+        commande = Commande.objects.select_related("groupe").prefetch_related("article").get(pk=commande.pk)
+        return Response(CommandeDetailSerializer(commande).data, status=status.HTTP_200_OK)
 
 
 class CommandeItemListView(generics.ListAPIView):

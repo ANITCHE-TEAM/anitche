@@ -1,5 +1,5 @@
 import uuid
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from django.db import models, transaction
 from django.conf import settings
 from django.utils import timezone
@@ -215,9 +215,14 @@ class CouponReduction(models.Model):
         return True, "Coupon valide."
 
     def calculer_remise(self, montant_commande):
-        """Calcule le montant exact de la remise en FCFA."""
+        """Montant de la remise, en francs entiers (FCFA, mobile money).
+
+        Arrondie au franc INFÉRIEUR : le client ne paie jamais plus que la
+        réduction annoncée ne le laisse attendre, et aucun montant de
+        commande ne porte de centimes (l'écart est inférieur à 1 FCFA).
+        """
         if self.type_reduction == self.TypeReduction.POURCENTAGE:
             remise = (montant_commande * self.valeur) / Decimal("100.00")
         else:
             remise = min(self.valeur, montant_commande)
-        return round(remise, 2)
+        return remise.quantize(Decimal("1"), rounding=ROUND_DOWN)

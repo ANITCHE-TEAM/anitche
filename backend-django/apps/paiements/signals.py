@@ -13,24 +13,21 @@ paiement_valide = Signal()
 def gerer_confirmation_commandes_et_livraisons(sender, paiement, client, adresse_livraison, **kwargs):
     """Met à jour le statut des commandes associées et crée les fiches de livraison correspondantes."""
     from apps.commandes.models import Commande
+    from apps.commandes.services import confirmer_commande
     from apps.livraison.models import Livraison
+    from .services import commandes_couvertes, marquer_a_rembourser
 
-    commandes_a_traiter = []
-
-    if paiement.commande:
-        commandes_a_traiter.append(paiement.commande)
-    elif paiement.groupe_commande:
-        commandes_a_traiter.extend(paiement.groupe_commande.commandes.all())
-
-    adresse = adresse_livraison or paiement.adresse_livraison or "Abidjan, Côte d'Ivoire"
+    adresse = paiement.adresse_livraison
 
     with transaction.atomic():
-        for commande in commandes_a_traiter:
-            # 1. Mise à jour du statut de la commande si elle était encore à l'état CREEE
-            if commande.status == Commande.Status.CREEE:
-                commande.status = Commande.Status.CONFIRMEE
-                commande.save(update_fields=["status", "update_at"])
-                logger.info(f"Commande {commande.numero_commande} passée à l'état CONFIRMEE suite au paiement {paiement.reference}.")
+        for commande in commandes_couvertes(paiement):
+            # 1. creee → confirmee, par la fonction unique de transition.
+            if not confirmer_commande(commande):
+                if commande.status == Commande.Status.ANNULEE:
+                    # Annulée pendant le traitement du paiement (course avec
+                    # l'expiration) : jamais réactivée, remboursement dû.
+                    marquer_a_rembourser(paiement, commande, "paiement reçu pour une commande annulée")
+                    continue
 
             # 2. Création automatique de la fiche Livraison si elle n'existe pas encore
             livraison, cree = Livraison.objects.get_or_create(

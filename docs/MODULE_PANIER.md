@@ -12,7 +12,7 @@
 | `Boutique.est_publiable` | `apps/vendeurs/models.py` | Boutique ouverte, non suspendue, vendeur validé et actif |
 | `Stock.est_en_stock()` | `apps/catalogue/models.py` | Contrôle de quantité à l'ajout et à la modification |
 
-Le panier **ne réserve pas de stock** : il vérifie la disponibilité au moment de l'ajout. La vérification qui fait foi a lieu au checkout (`commandes.ValiderPanierView`), sous verrou des lignes de stock.
+Le panier **ne réserve pas de stock** : il vérifie la disponibilité au moment de l'ajout. La vérification qui fait foi a lieu au checkout (`commandes.ValiderPanierView`), sous verrou des lignes de stock. Le checkout exige une adresse de livraison et un email vérifié : voir `MODULE_COMMANDES.md`.
 
 ## 2. Modèle
 

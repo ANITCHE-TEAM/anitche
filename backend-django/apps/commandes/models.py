@@ -1,8 +1,14 @@
 import uuid
-from django.db import models
+from django.db import IntegrityError, models, transaction
 from django.conf import settings
 from django.utils import timezone
 
+TENTATIVES_GENERATION_NUMERO = 5
+
+
+def generer_numero_commande():
+    """Numéro lisible : CMD-<année>-<8 caractères hexadécimaux>."""
+    return f"CMD-{timezone.now().year}-{uuid.uuid4().hex[:8].upper()}"
 
 
 class Commande(models.Model):
@@ -14,6 +20,12 @@ class Commande(models.Model):
         LIVREE = "livree", "Livrée"
         ANNULEE = "annulee", "Annulée"
 
+    class MotifAnnulation(models.TextChoices):
+        CLIENT = "client", "Annulée par le client"
+        EXPIRATION = "expiration", "Non payée dans le délai"
+        ADMINISTRATION = "administration", "Annulée par l'administration"
+        BOUTIQUE_INDISPONIBLE = "boutique_indisponible", "Boutique indisponible"
+
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     numero_commande = models.CharField(max_length=20, unique=True, editable=False)
@@ -24,21 +36,26 @@ class Commande(models.Model):
          blank=True,
          related_name="commandes"
          )
-    
+
+    # PROTECT (client et boutique) : une commande est un historique de
+    # vente et de facturation, jamais effacé en cascade avec un compte ou
+    # une boutique. La suppression d'un compte devra anonymiser (dette).
     boutique = models.ForeignKey(
         "vendeurs.Boutique",
-        on_delete=models.CASCADE
+        on_delete=models.PROTECT
         )
-    
+
+    # Ne change que par apps.commandes.services (table des transitions).
     status = models.CharField(
-        max_length=20, 
+        max_length=20,
         choices= Status.choices,
         default=Status.CREEE
         )
-    
+    motif_annulation = models.CharField(max_length=30, choices=MotifAnnulation.choices, blank=True)
+
     client = models.ForeignKey(
-        settings.AUTH_USER_MODEL, 
-        on_delete= models.CASCADE,
+        settings.AUTH_USER_MODEL,
+        on_delete= models.PROTECT,
         related_name="commande_client"
     )
 
@@ -60,16 +77,29 @@ class Commande(models.Model):
     def __str__(self):
         return f"Commande de {self.client.email} — {self.created_at.strftime('%d/%m/%Y')}"
 
-    
-    # Autonumérote le le numéro de commande
     def save(self, *args, **kwargs):
-        if not self.numero_commande:
-            self.numero_commande = f"CMD-{timezone.now().year}-{uuid.uuid4().hex[:8].upper()}"
-        super().save(*args, **kwargs)
-    
+        if self.numero_commande:
+            return super().save(*args, **kwargs)
+        # 8 caractères hexadécimaux par année : une collision devient
+        # probable au-delà de quelques dizaines de milliers de commandes.
+        # On retente avec un nouveau numéro plutôt que de répondre 500.
+        for tentative in range(TENTATIVES_GENERATION_NUMERO):
+            self.numero_commande = generer_numero_commande()
+            try:
+                with transaction.atomic():
+                    return super().save(*args, **kwargs)
+            except IntegrityError:
+                numero_pris = Commande.objects.filter(numero_commande=self.numero_commande).exists()
+                self.numero_commande = ""
+                if not numero_pris or tentative == TENTATIVES_GENERATION_NUMERO - 1:
+                    raise
+
 
 
 class GroupeCommande(models.Model):
+    """Un checkout : les commandes (une par boutique) d'un même panier,
+    et l'adresse de livraison saisie au moment de la validation."""
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     client = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -78,7 +108,27 @@ class GroupeCommande(models.Model):
         blank=True,
         related_name="groupes_commande"
     )
+    # Adresse de livraison, obligatoire à la validation du panier (vide
+    # uniquement pour les groupes créés avant son introduction).
+    livraison_commune = models.CharField(max_length=100, blank=True)
+    livraison_quartier = models.CharField(max_length=150, blank=True)
+    livraison_point_de_repere = models.TextField(blank=True)
+    # Choisi par le client pour cette livraison : visible par le vendeur
+    # et le livreur (jamais le téléphone du profil).
+    livraison_telephone = models.CharField(max_length=20, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    @property
+    def a_une_adresse(self):
+        return bool(self.livraison_commune and self.livraison_quartier and self.livraison_telephone)
+
+    @property
+    def adresse_livraison_texte(self):
+        """Adresse sur une ligne (Paiement.adresse_livraison, Livraison)."""
+        adresse = f"{self.livraison_commune}, {self.livraison_quartier}"
+        if self.livraison_point_de_repere:
+            adresse += f" — {self.livraison_point_de_repere}"
+        return adresse[:255]
 
 
 class CommandeItem(models.Model):
@@ -105,4 +155,3 @@ class CommandeItem(models.Model):
     nom_produit = models.CharField(max_length=100)
     prix_unitaire = models.DecimalField(max_digits=12, decimal_places=2)
     quantite = models.PositiveIntegerField()
-
