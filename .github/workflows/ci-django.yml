@@ -20,7 +20,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:16
         env:
           POSTGRES_DB: anitche_test
           POSTGRES_USER: postgres
@@ -28,13 +28,13 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres"
+          --health-cmd pg_isready
           --health-interval 5s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 10
 
     env:
-      DJANGO_SETTINGS_MODULE: config.settings.dev
+      DJANGO_SETTINGS_MODULE: config.settings.ci
       DB_NAME: anitche_test
       DB_USER: postgres
       DB_PASSWORD: postgres
@@ -42,10 +42,10 @@ jobs:
       DB_PORT: 5432
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Installer Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: "pip"

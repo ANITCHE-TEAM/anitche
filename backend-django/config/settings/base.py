@@ -1,5 +1,7 @@
+import os
 from pathlib import Path
-from decouple import config
+from decouple import Csv, config
+from celery.schedules import crontab
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 # ATTENTION : un niveau plus profond que l'ancien settings.py (config/settings/base.py)
@@ -12,6 +14,8 @@ SECRET_KEY = config('SECRET_KEY', default='django-insecure-%%j)4t(2o%i8!+7!()j7^
 
 # Application definition
 
+AUTH_USER_MODEL = 'utilisateurs.Utilisateur'
+
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
@@ -23,7 +27,9 @@ INSTALLED_APPS = [
     # Tiers
     'rest_framework',
     'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
+    'django_celery_beat',
 
     # Apps métier (apps/<nom>)
     'apps.utilisateurs',
@@ -110,9 +116,21 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+# Ça reste dans base.py et non dev.py : la config en elle-même (où pointent les fichiers) ne change pas entre dev et prod, seule la façon de servir ces fichiers change (voir étape 2). En prod, c'est un serveur web (nginx, S3...) qui prendra le relais — pas Django.
+
+
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+
+# Security Headers
+SECURE_BROWSER_XSS_FILTER = True
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = 'DENY'
 
 # Django REST Framework
 
@@ -123,14 +141,91 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
     ),
+    'DEFAULT_THROTTLE_CLASSES': (
+        'rest_framework.throttling.UserRateThrottle',
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.ScopedRateThrottle',
+    ),
+    'DEFAULT_THROTTLE_RATES': {
+        'user': '300/hour',
+        'anon': '50/hour',
+        # Codes OTP : envoi (changement de contact, mot de passe oublié,
+        # renvoi du code d'inscription) et vérification comptés à part —
+        # un compteur commun bloquait la vérification après quelques
+        # demandes de code. Chaque code reste limité à 5 essais (CodeOTP).
+        'otp_envoi': '5/hour',
+        'otp_verification': '10/hour',
+        # Inscription, par IP : borne l'énumération des emails inscrits.
+        'inscription': '10/hour',
+        # Rafraîchissement du jeton, par IP (CGNAT : ~4 rafraîchissements
+        # par heure et par session active).
+        'rafraichissement': '300/hour',
+        'login': '10/hour',
+        'kyc': '5/hour',
+        'boutique_creation': '10/hour',
+        'commande_validation': '20/hour',
+        # Fidélité (A04:2025 / A07:2025) : sans limite dédiée, ces deux
+        # endpoints ne dépendaient que du taux générique 'user' (300/heure).
+        # coupon_verification borne le bourrinage de codes au hasard sur
+        # VerifierCouponView (l'espace de codes générés reste très grand,
+        # mais un taux dédié plus bas est une défense en profondeur peu
+        # coûteuse) ; fidelite_conversion limite ConvertirPointsEnCouponView,
+        # une opération financière (débit réel de points), au même ordre de
+        # grandeur que commande_validation.
+        'coupon_verification': '30/hour',
+        'fidelite_conversion': '20/hour',
+        # LogoutView est en AllowAny (posséder le refresh token suffit,
+        # voir apps/utilisateurs/views.py) : taux dédié pour éviter que ce
+        # point d'entrée public serve de vecteur de spam/DoS low-cost.
+        'logout': '30/hour',
+        # Vérification publique d'un passeport QR (par IP pour un visiteur).
+        # Plus large que 'anon' : derrière le CGNAT des opérateurs mobiles,
+        # des dizaines de clients d'un même quartier ou d'un même marché
+        # partagent une IP publique. 600/h (10 scans/min en moyenne) reste
+        # négligeable face aux 4 milliards de codes possibles par an.
+        'passeport_verification': '600/hour',
+        # Catalogue public (listes, fiches, catégories), par IP pour un
+        # visiteur : même raison CGNAT, et une navigation normale enchaîne
+        # beaucoup plus de requêtes qu'un scan (20/min en moyenne).
+        'catalogue_public': '1200/hour',
+    },
+    # Sans cette ligne, config/exceptions.py::custom_exception_handler
+    # n'est jamais appelé : les 500 utilisent le handler DRF par défaut.
+    'EXCEPTION_HANDLER': 'config.exceptions.custom_exception_handler',
+    # A04:2025 (Unrestricted Resource Consumption) : sans pagination par
+    # défaut, chaque ListAPIView du projet renvoie l'intégralité des
+    # résultats en une requête — trivialement coûteux dès que le catalogue
+    # ou l'annuaire de boutiques grossit, et facilite un scraping complet
+    # en un seul appel sur les endpoints publics (ProduitPublicListView,
+    # BoutiquePubliqueListView). CategorieListView reste volontairement
+    # non paginée (pagination_class = None) car sa liste est petite par
+    # nature et ordonnée pour l'affichage.
+    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    'PAGE_SIZE': 20,
+    # Nombre de proxys de confiance devant Django. Laissé à None (défaut
+    # DRF), l'identifiant des limites de débit anonymes est l'en-tête
+    # X-Forwarded-For entier, que le client écrit lui-même : changer cet
+    # en-tête à chaque requête contournait toutes les limites (login, otp,
+    # logout...). 0 = aucun proxy : seul REMOTE_ADDR compte (dev, tests).
+    # En production, prod.py le passe à 1 (Nginx, qui réécrit l'en-tête).
+    'NUM_PROXIES': 0,
 }
 
 from datetime import timedelta
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
     'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
+
+    # Invalide automatiquement tous les tokens déjà émis (access ET
+    # refresh, ce dernier transmettant son claim à l'access token créé
+    # à partir de lui) dès que le mot de passe de l'utilisateur change
+    # — reset actuel, ou tout futur changement de mot de passe "connecté".
+    # Sans ceci, un access token volé avant un changement de mot de passe
+    # reste valable jusqu'à son expiration naturelle malgré le changement.
+    'CHECK_REVOKE_TOKEN': True,
 }
 
 
@@ -138,3 +233,136 @@ SIMPLE_JWT = {
 
 CELERY_BROKER_URL = config('REDIS_URL', default='redis://localhost:6379/0')
 CELERY_RESULT_BACKEND = config('REDIS_URL', default='redis://localhost:6379/0')
+
+# Tâches planifiées (django-celery-beat, DatabaseScheduler — voir
+# config/celery.py). Déclarées ici plutôt que via une data migration
+# créant des PeriodicTask : la planification reste versionnée avec le
+# reste de la config, lisible au même endroit, et modifiable sans
+# nouvelle migration. Le DatabaseScheduler synchronise ces entrées en
+# base au démarrage de `celery beat`.
+CELERY_BEAT_SCHEDULE = {
+    'utilisateurs-nettoyer-otp-expires': {
+        'task': 'apps.utilisateurs.tasks.nettoyer_otp_expires',
+        'schedule': crontab(hour=3, minute=0),
+    },
+    # Commandes non payées dans le délai : annulées, stock restitué.
+    'commandes-expirer-commandes-non-payees': {
+        'task': 'apps.commandes.tasks.expirer_commandes_non_payees',
+        'schedule': crontab(minute='*/5'),
+    },
+    'utilisateurs-purger-tokens-expires': {
+        'task': 'apps.utilisateurs.tasks.purger_tokens_expires',
+        'schedule': crontab(hour=3, minute=15),
+    },
+}
+
+# Cache Redis
+REDIS_URL = os.environ.get('REDIS_URL', 'redis://redis:6379/0')
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': REDIS_URL.replace('/0', '/1'),
+        'TIMEOUT': 300,  # 5 minutes
+    }
+}
+
+# Auth Google
+GOOGLE_OAUTH_CLIENT_ID = config('GOOGLE_OAUTH_CLIENT_ID', default='')
+
+# Chiffrement au repos de champs sensibles (DocumentKYC.compte_bancaire et
+# numero_mobile_money)
+# via apps.core.fields.EncryptedCharField. Valeur de dev par défaut non
+# secrète et volontairement présente uniquement ici — jamais utilisée en
+# prod (voir le raise dans prod.py) : elle sert juste à ce que
+# `manage.py runserver` fonctionne sans configuration locale préalable.
+# Générée avec Fernet.generate_key() ; à définir en variable
+# d'environnement propre à chaque environnement (dev/staging/prod), jamais
+# committée pour un environnement réel.
+FIELD_ENCRYPTION_KEY = config(
+    'FIELD_ENCRYPTION_KEY',
+    default='mKvbTFkFfRPhMpb4ZJdZfHvz1pgUgx15Xhyn1ahJCiw='
+)
+# Rotation (MultiFernet) : liste de clés séparées par des virgules, la clé
+# ACTIVE (qui chiffre) en premier, les anciennes ensuite (elles ne servent
+# plus qu'à déchiffrer). Vide = FIELD_ENCRYPTION_KEY seule. Procédure :
+# docs/MODULE_UTILISATEURS.md, « Gestion de la clé ».
+FIELD_ENCRYPTION_KEYS = config('FIELD_ENCRYPTION_KEYS', default='', cast=Csv())
+
+# Secrets de signature des webhooks de paiement, un par fournisseur.
+# Jamais de valeur par défaut : un webhook dont le fournisseur n'a pas de
+# secret configuré est systématiquement rejeté (voir WebhookPaiementView).
+WEBHOOK_SECRETS = {
+    'wave': config('WEBHOOK_SECRET_WAVE', default=''),
+    'orange_money': config('WEBHOOK_SECRET_ORANGE_MONEY', default=''),
+    'mtn_money': config('WEBHOOK_SECRET_MTN_MONEY', default=''),
+    'moov_money': config('WEBHOOK_SECRET_MOOV_MONEY', default=''),
+}
+
+# Adresse publique du frontend, utilisée pour construire les liens qui y
+# mènent (ex : URL de vérification encodée dans le QR d'un passeport,
+# apps.passeport_qr). Défaut = serveur Vite de dev ; en production,
+# docker-compose.prod.yml la fournit. Domaine définitif en attente de
+# confirmation par l'équipe (docs/MODULE_PASSEPORT_QR.md).
+# Délai de paiement d'une commande (mobile money, carte) avant annulation
+# automatique et restitution du stock (apps.commandes.tasks). Le paiement à
+# la livraison confirme la commande immédiatement : il n'est pas concerné.
+COMMANDE_DELAI_PAIEMENT_MINUTES = config('COMMANDE_DELAI_PAIEMENT_MINUTES', default=30, cast=int)
+
+FRONTEND_BASE_URL = config('FRONTEND_BASE_URL', default='http://localhost:5173')
+
+
+
+#  Email config
+
+EMAIL_BACKEND = config('EMAIL_BACKEND', default='django.core.mail.backends.console.EmailBackend')
+EMAIL_HOST = config('EMAIL_HOST', default='smtp.gmail.com')
+EMAIL_PORT = config('EMAIL_PORT', default=587, cast=int)
+EMAIL_USE_TLS = config('EMAIL_USE_TLS', default=True, cast=bool)
+EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')
+EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
+DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='no-reply@anitche.com')
+
+
+# Journalisation
+#
+# Sort sur stdout/stderr (pratique standard en conteneur : l'orchestrateur
+# ou le service de logs agrège depuis là, pas besoin de gérer des fichiers
+# et leur rotation nous-mêmes).
+#
+# Un logger dédié 'securite' capture les événements sensibles (tentatives
+# de connexion sur compte désactivé, échecs répétés d'OTP, etc.) pour
+# permettre la détection d'anomalies / alerting, séparément du bruit
+# habituel de Django.
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '{asctime} {levelname} {name} {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'WARNING',
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'securite': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    },
+}

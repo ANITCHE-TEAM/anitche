@@ -12,6 +12,12 @@ cd "$(dirname "$0")/../.."   # se placer à la racine du repo
 echo "==> Récupération de la dernière version du code"
 git pull origin main
 
+echo "==> Vérification des variables d'environnement"
+set -a
+source infra/.env
+set +a
+bash infra/scripts/check_prod_env.sh
+
 echo "==> Build et redémarrage des conteneurs"
 docker compose -f infra/docker-compose.prod.yml --env-file infra/.env up -d --build
 

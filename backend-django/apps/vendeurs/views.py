@@ -1,3 +1,207 @@
-from django.shortcuts import render
+"""Endpoints du module vendeurs.
 
-# Create your views here.
+Trois niveaux d'accès, volontairement séparés dans les URL :
+  - public            : vitrine des boutiques (`/boutiques/`)
+  - vendeur authentifié : sa propre boutique (`/ma-boutique/`)
+  - administration     : instruction des demandes (`/administration/...`)
+"""
+
+import logging
+
+from django.shortcuts import get_object_or_404
+from rest_framework import generics, status
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
+from rest_framework.views import APIView
+
+from .models import Boutique, DemandeVendeur
+from .permissions import (
+    BoutiqueNonSuspendue,
+    EstAdministrateur,
+    EstProprietaireDeLaBoutique,
+    EstVendeurValide,
+)
+from .serializers import (
+    BoutiqueAdministrationSerializer,
+    BoutiquePubliqueSerializer,
+    BoutiqueSerializer,
+    DecisionVendeurSerializer,
+    DemandeVendeurSerializer,
+    RefusVendeurSerializer,
+)
+from .services import (
+    AutoApprobationInterdite,
+    TransitionVendeurImpossible,
+    refuser_demande_vendeur,
+    valider_demande_vendeur,
+)
+
+logger_securite = logging.getLogger('securite')
+
+
+# --------------------------------------------------------------------------
+# Public
+# --------------------------------------------------------------------------
+
+class BoutiquePubliqueListView(generics.ListAPIView):
+    """Liste des boutiques ouvertes tenues par un vendeur validé."""
+
+    serializer_class = BoutiquePubliqueSerializer
+    permission_classes = [AllowAny]
+
+    def get_queryset(self):
+        queryset = Boutique.objects.publiques().select_related('proprietaire')
+
+        recherche = self.request.query_params.get('recherche', '')[:100]
+        if recherche:
+            queryset = queryset.filter(nom__icontains=recherche)
+
+        ville = self.request.query_params.get('ville', '')[:100]
+        if ville:
+            queryset = queryset.filter(ville__iexact=ville)
+
+        return queryset
+
+
+class BoutiquePubliqueDetailView(generics.RetrieveAPIView):
+    """Fiche publique d'une boutique, adressée par son slug."""
+
+    serializer_class = BoutiquePubliqueSerializer
+    permission_classes = [AllowAny]
+    lookup_field = 'slug'
+
+    def get_queryset(self):
+        return Boutique.objects.publiques().select_related('proprietaire')
+
+
+# --------------------------------------------------------------------------
+# Vendeur authentifié
+# --------------------------------------------------------------------------
+
+class MaBoutiqueView(generics.RetrieveUpdateAPIView):
+    """GET / PATCH / PUT : la boutique du vendeur connecté. POST : la créer.
+
+    Toutes les méthodes, lecture comprise, exigent un compte vendeur validé
+    (403 sinon) ; consultation et mise à jour sont réservées au propriétaire,
+    et une boutique suspendue n'est plus modifiable (403).
+    """
+
+    serializer_class = BoutiqueSerializer
+    permission_classes = [
+        IsAuthenticated, EstVendeurValide, EstProprietaireDeLaBoutique, BoutiqueNonSuspendue,
+    ]
+
+    def get_throttles(self):
+        """
+        Le scope 'boutique_creation' (taux bas, pensé pour limiter les
+        tentatives de création) ne doit s'appliquer qu'au POST. Il était
+        auparavant posé via throttle_classes/throttle_scope de classe,
+        donc appliqué à GET/PATCH aussi — bloquant le dashboard vendeur
+        (consultation/mise à jour répétées en usage normal). Les autres
+        méthodes retombent sur les throttles par défaut (user/anon, voir
+        REST_FRAMEWORK.DEFAULT_THROTTLE_CLASSES).
+        """
+        if self.request.method == 'POST':
+            self.throttle_scope = 'boutique_creation'
+            return [ScopedRateThrottle()]
+        return super().get_throttles()
+
+    def get_object(self):
+        boutique = get_object_or_404(Boutique, proprietaire=self.request.user)
+        self.check_object_permissions(self.request, boutique)
+        return boutique
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+# --------------------------------------------------------------------------
+# Administration
+# --------------------------------------------------------------------------
+
+class DemandesVendeurListView(generics.ListAPIView):
+    """File des demandes vendeur en attente de décision."""
+
+    serializer_class = DemandeVendeurSerializer
+    permission_classes = [IsAuthenticated, EstAdministrateur]
+    queryset = DemandeVendeur.objects.select_related('dossier_kyc').order_by('date_creation')
+
+
+class DecisionVendeurView(APIView):
+    """Base commune aux deux décisions admin : validation et refus."""
+
+    permission_classes = [IsAuthenticated, EstAdministrateur]
+    serializer_class = DecisionVendeurSerializer
+    service = None
+    message_succes = ''
+
+    def post(self, request, pk):
+        serializer = self.serializer_class(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        demande = get_object_or_404(DemandeVendeur, pk=pk)
+
+        try:
+            compte = self.service(
+                demande,
+                serializer.validated_data['commentaire'],
+                decideur=request.user,
+            )
+        except AutoApprobationInterdite as erreur:
+            return Response({"message": str(erreur)}, status=status.HTTP_403_FORBIDDEN)
+        except TransitionVendeurImpossible as erreur:
+            return Response({"message": str(erreur)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                "message": self.message_succes,
+                "utilisateur": {
+                    "id": compte.id,
+                    "email": compte.email,
+                    "role": compte.role,
+                    "statut_kyc": compte.statut_kyc,
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class ValiderDemandeVendeurView(DecisionVendeurView):
+    service = staticmethod(valider_demande_vendeur)
+    message_succes = "Demande validée : le compte est désormais vendeur."
+
+
+class RefuserDemandeVendeurView(DecisionVendeurView):
+    serializer_class = RefusVendeurSerializer
+    service = staticmethod(refuser_demande_vendeur)
+    message_succes = "Demande refusée."
+
+
+class BoutiquesAdministrationListView(generics.ListAPIView):
+    """Toutes les boutiques, y compris fermées ou rattachées à un vendeur suspendu."""
+
+    serializer_class = BoutiqueAdministrationSerializer
+    permission_classes = [IsAuthenticated, EstAdministrateur]
+    queryset = Boutique.objects.select_related('proprietaire')
+
+
+class BoutiqueAdministrationDetailView(generics.RetrieveUpdateAPIView):
+    """Consultation et suspension/réactivation d'une boutique par le back-office."""
+
+    serializer_class = BoutiqueAdministrationSerializer
+    permission_classes = [IsAuthenticated, EstAdministrateur]
+    queryset = Boutique.objects.select_related('proprietaire')
+
+    def perform_update(self, serializer):
+        etait_suspendue = serializer.instance.est_suspendue
+        boutique = serializer.save()
+        if etait_suspendue != boutique.est_suspendue:
+            action = "suspendue" if boutique.est_suspendue else "réactivée"
+            logger_securite.info(
+                "Boutique %s (%s) %s par admin_id=%s",
+                boutique.id, boutique.nom, action, self.request.user.id,
+            )

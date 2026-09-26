@@ -7,6 +7,8 @@ version: "3.9"
 #   Frontend  -> http://localhost:5173
 #   Django    -> http://localhost:8000
 #   FastAPI   -> http://localhost:8001/docs (Swagger auto-généré)
+#   Mailpit   -> http://localhost:8025 (emails envoyés en dev : codes OTP,
+#                notifications ; aucun email ne sort vers l'extérieur)
 
 services:
   db:
@@ -31,29 +33,40 @@ services:
     restart: unless-stopped
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   backend-django:
+    container_name: anitche-backend
     build:
       context: ../backend-django
     command: sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
     environment:
-      DJANGO_SETTINGS_MODULE: config.settings.dev
       DB_NAME: ${DB_NAME:-anitche}
       DB_USER: ${DB_USER:-postgres}
       DB_PASSWORD: ${DB_PASSWORD:-postgres}
       DB_HOST: db
       DB_PORT: 5432
       REDIS_URL: redis://redis:6379/0
+      # Emails de dev capturés par Mailpit (config/settings/dev.py).
+      EMAIL_HOST: mailpit
     volumes:
       - ../backend-django:/app
     ports:
       - "8000:8000"
+    networks:
+      - default
+      - anitche-net
     depends_on:
       db:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      mailpit:
         condition: service_started
-
   celery-worker:
     build:
       context: ../backend-django
@@ -66,10 +79,58 @@ services:
       DB_HOST: db
       DB_PORT: 5432
       REDIS_URL: redis://redis:6379/0
+      # Emails de dev capturés par Mailpit (config/settings/dev.py).
+      EMAIL_HOST: mailpit
     volumes:
       - ../backend-django:/app
     depends_on:
-      - backend-django
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+
+  celery-beat:
+    build:
+      context: ../backend-django
+    command: celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.dev
+      DB_NAME: ${DB_NAME:-anitche}
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DB_HOST: db
+      DB_PORT: 5432
+      REDIS_URL: redis://redis:6379/0
+      # Emails de dev capturés par Mailpit (config/settings/dev.py).
+      EMAIL_HOST: mailpit
+    volumes:
+      - ../backend-django:/app
+    networks:
+      - default
+      - anitche-net
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+
+  # Capture des emails de DEV uniquement (jamais en production) : SMTP sur
+  # 1025, interface web et API sur 8025. Les collections Postman lisent les
+  # codes OTP via son API (GET /api/v1/search).
+  mailpit:
+    image: axllent/mailpit:v1.20.0
+    restart: unless-stopped
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    environment:
+      MP_MAX_MESSAGES: 5000
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
 
   backend-fastapi:
     build:
@@ -106,3 +167,7 @@ services:
 
 volumes:
   anitche_pgdata:
+
+networks:
+  anitche-net:
+    external: true

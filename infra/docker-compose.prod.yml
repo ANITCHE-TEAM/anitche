@@ -29,6 +29,11 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   backend-django:
     build:
@@ -38,8 +43,44 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.prod
       SECRET_KEY: ${SECRET_KEY}
+      # Clés de chiffrement des données KYC (apps.core.fields), clé active en
+      # premier. Sans elles, prod.py refuse de démarrer (Django et Celery).
+      FIELD_ENCRYPTION_KEYS: ${FIELD_ENCRYPTION_KEYS}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      # URL de vérification des passeports QR (apps.passeport_qr).
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-https://anitche.com}
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: db
+      DB_PORT: 5432
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      # MEDIA_ROOT (config/settings/base.py) = BASE_DIR/media = /app/media
+      # dans ce conteneur (WORKDIR /app, voir Dockerfile). Sans volume
+      # nommé, tout fichier KYC uploadé (recto/verso/selfie) est perdu au
+      # prochain rebuild/redeploy — seul backend-django sert ces fichiers
+      # (TelechargerDocumentKYCView), pas besoin de le monter ailleurs.
+      - anitche_media:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  celery-worker:
+    build:
+      context: ../backend-django
+    restart: unless-stopped
+    command: celery -A config worker -l info
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.prod
+      SECRET_KEY: ${SECRET_KEY}
+      # Clés de chiffrement des données KYC (apps.core.fields), clé active en
+      # premier. Sans elles, prod.py refuse de démarrer (Django et Celery).
+      FIELD_ENCRYPTION_KEYS: ${FIELD_ENCRYPTION_KEYS}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS}
       DB_NAME: ${DB_NAME}
       DB_USER: ${DB_USER}
       DB_PASSWORD: ${DB_PASSWORD}
@@ -50,16 +91,19 @@ services:
       db:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
 
-  celery-worker:
+  celery-beat:
     build:
       context: ../backend-django
     restart: unless-stopped
-    command: celery -A config worker -l info
+    command: celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.prod
       SECRET_KEY: ${SECRET_KEY}
+      # Clés de chiffrement des données KYC (apps.core.fields), clé active en
+      # premier. Sans elles, prod.py refuse de démarrer (Django et Celery).
+      FIELD_ENCRYPTION_KEYS: ${FIELD_ENCRYPTION_KEYS}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS}
       DB_NAME: ${DB_NAME}
       DB_USER: ${DB_USER}
@@ -68,7 +112,10 @@ services:
       DB_PORT: 5432
       REDIS_URL: redis://redis:6379/0
     depends_on:
-      - backend-django
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   backend-fastapi:
     build:
@@ -96,12 +143,38 @@ services:
     restart: unless-stopped
     ports:
       - "80:80"
+      - "443:443"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # F-18 : certificats émis/renouvelés par le service "certbot"
+      # ci-dessous, partagés en lecture avec Nginx via ce volume commun.
+      - certbot_conf:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot:ro
     depends_on:
       - frontend
       - backend-django
       - backend-fastapi
 
+  # F-18 : renouvelle automatiquement le certificat Let's Encrypt toutes les
+  # 12h (certbot n'agit que si le certificat approche de son expiration —
+  # à 30 jours de l'échéance par défaut). L'émission INITIALE du certificat
+  # ne passe pas par ce service : voir infra/scripts/init-lets-encrypt.sh,
+  # à lancer une seule fois avant le tout premier démarrage de Nginx en 443.
+  certbot:
+    image: certbot/certbot
+    restart: unless-stopped
+    volumes:
+      - certbot_conf:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    entrypoint: >
+      sh -c "trap exit TERM;
+      while :; do
+        certbot renew --webroot -w /var/www/certbot --quiet;
+        sleep 12h & wait $${!};
+      done"
+
 volumes:
   anitche_pgdata:
+  anitche_media:
+  certbot_conf:
+  certbot_www:

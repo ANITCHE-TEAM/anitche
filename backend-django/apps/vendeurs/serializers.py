@@ -1,0 +1,258 @@
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import IntegrityError, transaction
+from django.urls import reverse
+from rest_framework import serializers
+
+from apps.utilisateurs.models import DocumentKYC, Utilisateur
+
+from .models import Boutique, verifier_nom_boutique_disponible
+
+
+class BoutiquePubliqueSerializer(serializers.ModelSerializer):
+    """Fiche boutique côté client.
+
+    Aucune donnée du COMPTE propriétaire (email et téléphone du compte,
+    identité, KYC) n'est exposée. En revanche, les coordonnées de contact de
+    la boutique (`telephone_contact`, `email_contact`), saisies par le
+    vendeur, le sont — elles peuvent être personnelles s'il y reporte les
+    siennes. Décision équipe en attente sur ce point ; comportement inchangé.
+    """
+
+    class Meta:
+        model = Boutique
+        fields = [
+            'id', 'nom', 'slug', 'description', 'logo', 'banniere',
+            'ville', 'telephone_contact', 'email_contact', 'date_creation',
+        ]
+        read_only_fields = fields
+
+
+class BoutiqueSerializer(serializers.ModelSerializer):
+    """Boutique vue par son propriétaire (création et mise à jour).
+
+    `est_active` = fermeture volontaire, modifiable par le vendeur.
+    `est_suspendue` = décision de l'administration : visible mais en lecture
+    seule ici, pour qu'un vendeur suspendu ne puisse pas la lever.
+    """
+
+    proprietaire_email = serializers.EmailField(source='proprietaire.email', read_only=True)
+    est_publiable = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = Boutique
+        fields = [
+            'id', 'nom', 'slug', 'description', 'logo', 'banniere',
+            'telephone_contact', 'email_contact', 'adresse', 'ville',
+            'est_active', 'est_suspendue', 'est_publiable', 'proprietaire_email',
+            'date_creation', 'date_mise_a_jour',
+        ]
+        read_only_fields = [
+            'id', 'slug', 'est_suspendue', 'est_publiable', 'proprietaire_email',
+            'date_creation', 'date_mise_a_jour',
+        ]
+        # Le UniqueValidator généré automatiquement pour `nom` est retiré :
+        # validate_nom() couvre le cas « identique » avec son propre message,
+        # plus le cas « trop proche » qu'un UniqueValidator ne voit pas.
+        extra_kwargs = {'nom': {'validators': []}}
+
+    def validate_nom(self, value):
+        try:
+            verifier_nom_boutique_disponible(
+                value, boutique_pk=self.instance.pk if self.instance else None
+            )
+        except DjangoValidationError as erreur:
+            raise serializers.ValidationError(erreur.messages)
+        return value
+
+    def validate(self, data):
+        # Pré-vérification rapide pour un message d'erreur immédiat dans
+        # le cas non-concurrent (l'écrasante majorité des cas). Ce n'est
+        # qu'un confort : la vérification qui compte réellement est celle
+        # sous verrou dans create(), seule capable d'empêcher la course.
+        utilisateur = self.context['request'].user
+        if self.instance is None and Boutique.objects.filter(proprietaire=utilisateur).exists():
+            raise serializers.ValidationError(
+                "Ce compte possède déjà une boutique."
+            )
+        return data
+
+    def _valider_image(self, value, taille_max_mo, types_autorises=('image/jpeg', 'image/png', 'image/webp')):
+        """Garde-fou API sur une image envoyée : taille et type MIME déclaré."""
+        if not value:
+            return value
+        if value.size > taille_max_mo * 1024 * 1024:
+            raise serializers.ValidationError(
+                f"Le fichier ne doit pas dépasser {taille_max_mo} Mo."
+            )
+        content_type = getattr(value, 'content_type', None)
+        if content_type and content_type not in types_autorises:
+            raise serializers.ValidationError(
+                "Format d'image non autorisé (JPEG, PNG ou WebP uniquement)."
+            )
+        return value
+
+    def validate_logo(self, value):
+        # Limite plus stricte que celle du modèle (validateur_image_standard,
+        # 5 Mo), volontairement posée ici et pas sur le champ : elle vise les
+        # envois des vendeurs via l'API, pas le django-admin (usage interne).
+        # La bannière n'a pas de règle propre : celle du modèle suffit.
+        return self._valider_image(value, taille_max_mo=2)
+
+    def create(self, validated_data):
+        """
+        CONCURRENCE : verrouille la ligne Utilisateur (select_for_update)
+        pour la durée de la vérification+création. Sans ce verrou, deux
+        requêtes de création simultanées peuvent toutes deux constater
+        l'absence de boutique avant que l'une des deux n'insère — la
+        seconde percute alors la contrainte OneToOne sur `proprietaire`
+        (IntegrityError non gérée, 500) au lieu d'un refus propre.
+
+        Le verrou porte sur l'UTILISATEUR courant : il ne protège donc
+        que contre le doublon d'un même compte, pas contre deux vendeurs
+        DIFFÉRENTS créant simultanément une boutique de même nom (nom et
+        slug sont uniques globalement) — d'où le filet de sécurité
+        IntegrityError/ValidationError ci-dessous, qui traduit une telle
+        collision en 400 plutôt qu'en 500.
+        """
+        request_utilisateur = self.context['request'].user
+
+        with transaction.atomic():
+            utilisateur = Utilisateur.objects.select_for_update().get(
+                pk=request_utilisateur.pk
+            )
+
+            if Boutique.objects.filter(proprietaire=utilisateur).exists():
+                raise serializers.ValidationError(
+                    "Ce compte possède déjà une boutique."
+                )
+
+            try:
+                return Boutique.objects.create(
+                    proprietaire=utilisateur, **validated_data
+                )
+            except IntegrityError:
+                raise serializers.ValidationError(
+                    "Ce nom de boutique vient d'être pris par une autre "
+                    "création simultanée. Réessayez avec un nom différent."
+                )
+            except DjangoValidationError as erreur:
+                raise serializers.ValidationError(
+                    erreur.message_dict if hasattr(erreur, 'message_dict') else erreur.messages
+                )
+
+    def update(self, instance, validated_data):
+        # validate_nom() a déjà écarté les noms pris ; seule une course entre
+        # deux renommages simultanés peut encore percuter une contrainte
+        # unique (nom / nom_normalise) : 400 plutôt que 500.
+        try:
+            with transaction.atomic():
+                return super().update(instance, validated_data)
+        except IntegrityError:
+            raise serializers.ValidationError(
+                "Ce nom de boutique vient d'être pris par une autre "
+                "modification simultanée. Réessayez avec un nom différent."
+            )
+
+
+class BoutiqueAdministrationSerializer(BoutiqueSerializer):
+    """Vue back-office : mêmes champs, plus l'identité du propriétaire.
+
+    L'administration ne décide que de la suspension (`est_suspendue`). Le
+    contenu de la boutique et sa fermeture volontaire (`est_active`)
+    appartiennent au vendeur : ils sont en lecture seule ici, et tout autre
+    champ envoyé est refusé explicitement (400) plutôt qu'ignoré, pour qu'un
+    back-office qui croirait fermer ou renommer une boutique le sache.
+    """
+
+    CHAMPS_MODIFIABLES = {'est_suspendue'}
+
+    proprietaire_id = serializers.IntegerField(source='proprietaire.id', read_only=True)
+    proprietaire_statut_kyc = serializers.CharField(
+        source='proprietaire.statut_kyc', read_only=True
+    )
+
+    class Meta(BoutiqueSerializer.Meta):
+        fields = BoutiqueSerializer.Meta.fields + [
+            'proprietaire_id', 'proprietaire_statut_kyc',
+        ]
+        read_only_fields = [champ for champ in fields if champ != 'est_suspendue']
+
+    def validate(self, data):
+        champs_refuses = sorted(set(self.initial_data) - self.CHAMPS_MODIFIABLES)
+        if champs_refuses:
+            raise serializers.ValidationError(
+                "Seul le champ est_suspendue est modifiable ici "
+                f"(champs refusés : {', '.join(champs_refuses)})."
+            )
+        return super().validate(data)
+
+
+class DossierKYCLectureSerializer(serializers.ModelSerializer):
+    """Lecture seule du dossier KYC pour l'instruction d'une demande vendeur.
+
+    Défini ici plutôt que dans utilisateurs : c'est un besoin du back-office
+    vendeur, le module utilisateurs n'a pas à changer pour ça.
+
+    SÉCURITÉ : piece_identite_recto/verso et selfie ne sont JAMAIS exposés
+    comme URL directe (MEDIA_URL) — seulement comme lien vers
+    TelechargerDocumentKYCView, qui revérifie à chaque appel que le
+    demandeur est bien le propriétaire ou un admin. Exposer l'URL brute
+    ici reviendrait à contourner ce contrôle.
+    """
+
+    piece_identite_recto_url = serializers.SerializerMethodField()
+    piece_identite_verso_url = serializers.SerializerMethodField()
+    selfie_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DocumentKYC
+        fields = [
+            'type_piece', 'piece_identite_recto_url', 'piece_identite_verso_url',
+            'selfie_url', 'numero_mobile_money', 'adresse',
+            'compte_bancaire', 'date_soumission', 'date_traitement',
+            'commentaire_admin',
+        ]
+        read_only_fields = fields
+
+    def _url_document(self, obj, champ):
+        request = self.context.get('request')
+        chemin = reverse(
+            'kyc-telecharger',
+            kwargs={'utilisateur_id': obj.utilisateur_id, 'champ': champ},
+        )
+        return request.build_absolute_uri(chemin) if request else chemin
+
+    def get_piece_identite_recto_url(self, obj):
+        return self._url_document(obj, 'piece_identite_recto') if obj.piece_identite_recto else None
+
+    def get_piece_identite_verso_url(self, obj):
+        return self._url_document(obj, 'piece_identite_verso') if obj.piece_identite_verso else None
+
+    def get_selfie_url(self, obj):
+        return self._url_document(obj, 'selfie') if obj.selfie else None
+
+
+class DemandeVendeurSerializer(serializers.ModelSerializer):
+    """Une demande vendeur en attente, telle que vue par l'administration."""
+
+    dossier_kyc = DossierKYCLectureSerializer(read_only=True)
+
+    class Meta:
+        model = Utilisateur
+        fields = [
+            'id', 'email', 'telephone', 'nom', 'prenom', 'role', 'statut_kyc',
+            'email_verifie', 'telephone_verifie', 'date_creation', 'dossier_kyc',
+        ]
+        read_only_fields = fields
+
+
+class DecisionVendeurSerializer(serializers.Serializer):
+    """Corps de requête d'une décision admin (validation ou refus)."""
+
+    commentaire = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class RefusVendeurSerializer(DecisionVendeurSerializer):
+    """Un refus doit être motivé : le motif est renvoyé au vendeur."""
+
+    commentaire = serializers.CharField(required=True, allow_blank=False)

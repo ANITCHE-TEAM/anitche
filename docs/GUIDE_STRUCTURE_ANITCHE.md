@@ -86,6 +86,7 @@ docker compose -f infra/docker-compose.yml up
 - Frontend  → http://localhost:5173
 - Django    → http://localhost:8000
 - FastAPI   → http://localhost:8001/docs
+- Mailpit   → http://localhost:8025 (emails envoyés en dev)
 
 ### Sans Docker
 
@@ -96,6 +97,30 @@ docker compose -f infra/docker-compose.yml up
 | Backend FastAPI | `cd backend-fastapi` → venv → `pip install -r requirements.txt` → `uvicorn app.main:app --reload` |
 
 ⚠️ **Piège courant** : après `startapp`, vérifie que `name` dans chaque `apps.py` pointe vers `apps.nom_de_lapp` (et non juste `nom_de_lapp`) — sinon Django ne retrouve pas l'app une fois déplacée dans `apps/`.
+
+### Emails de dev (Mailpit)
+
+En dev, aucun email ne sort vers l'extérieur : Django les envoie au service **Mailpit** du `docker-compose.yml` de dev, qui les garde pour consultation. Il n'existe pas dans `docker-compose.prod.yml`.
+
+- **Voir les emails** : ouvrir http://localhost:8025. Chaque email envoyé par le backend (codes OTP d'inscription, de mot de passe oublié, de changement de contact, notifications) y apparaît, avec son destinataire et son contenu.
+- **Envoi asynchrone** : les codes OTP et les alertes de connexion partent par le worker Celery (les notifications, elles, sont envoyées directement par le backend). Si un code n'arrive pas, vérifier que `celery-worker` et `mailpit` tournent (`docker compose -f infra/docker-compose.yml ps`).
+- **Sans Docker** : `config/settings/dev.py` envoie en SMTP vers `localhost:1025`. Lancer Mailpit localement sur ce port, ou afficher les emails dans le terminal avec `EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend`.
+- **Collections Postman** : les requêtes « Lire le code … (Mailpit) » récupèrent les codes OTP via l'API de Mailpit (`GET http://localhost:8025/api/v1/search`). Aucune saisie manuelle n'est nécessaire, sauf pour la connexion Google et le mot de passe admin, à renseigner soi-même.
+
+### Limites de débit relevées en dev uniquement
+
+Pour que les Runs Postman répétés (connexions, codes OTP, inscriptions à chaque exécution) ne soient pas bloqués en 429, `config/settings/dev.py` relève quatre limites :
+
+| Scope | Dev | Production (`base.py`) |
+|---|---|---|
+| `login` | 1000/hour | 10/hour |
+| `otp_envoi` | 1000/hour | 5/hour |
+| `otp_verification` | 1000/hour | 10/hour |
+| `inscription` | 1000/hour | 10/hour |
+
+- Ces valeurs ne concernent **que le dev** : `prod.py` et `ci.py` ne chargent jamais `dev.py` et ne redéfinissent aucune limite, donc la production applique celles de `base.py`. Des tests le vérifient (`TauxDeLimiteParEnvironnementTests` dans `apps/core/tests.py`, `LimitesDeProductionTests` dans `apps/utilisateurs/tests.py`).
+- Toutes les autres limites (`kyc`, `anon`, `user`, `boutique_creation`…) restent identiques en dev et en production.
+- Ne jamais copier ces valeurs dans `base.py` ou `prod.py` : ce sont elles qui protègent la connexion et les codes OTP contre le bourrage d'identifiants et la force brute.
 
 ## 5. Déploiement en production
 
