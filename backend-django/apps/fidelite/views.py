@@ -11,12 +11,13 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import ValidationError
 from rest_framework.throttling import ScopedRateThrottle
 
-from .models import CompteFidelite, TransactionFidelite, CouponReduction
+from .models import CompteFidelite, CouponReduction, GainFidelite, TransactionFidelite
 from .serializers import (
     CompteFideliteSerializer,
     TransactionFideliteSerializer,
     CouponReductionSerializer,
     ConvertirPointsCouponSerializer,
+    GainFideliteSerializer,
     VerifierCouponSerializer,
 )
 
@@ -39,6 +40,17 @@ class HistoriqueTransactionsFideliteView(generics.ListAPIView):
 
     def get_queryset(self):
         return TransactionFidelite.objects.filter(compte__utilisateur=self.request.user)
+
+
+class GainsFideliteListView(generics.ListAPIView):
+    """Points par commande livrée : en attente (fin du délai de rétractation),
+    crédités ou annulés."""
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = GainFideliteSerializer
+
+    def get_queryset(self):
+        return GainFidelite.objects.filter(compte__utilisateur=self.request.user).select_related("commande")
 
 
 class MesCouponsListView(generics.ListAPIView):
@@ -140,6 +152,10 @@ class VerifierCouponView(APIView):
         montant = serializer.validated_data["montant_commande"]
 
         coupon = CouponReduction.objects.filter(code__iexact=code).first()
+        # Coupon nominatif d'un autre client : même réponse qu'un code
+        # inexistant, pour ne jamais révéler qu'il existe (F5).
+        if coupon and coupon.client_id and coupon.client_id != request.user.pk:
+            coupon = None
         if not coupon:
             return Response(
                 {"valide": False, "detail": f"Le code promo '{code}' n'existe pas."},

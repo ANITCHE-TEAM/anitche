@@ -1,66 +1,65 @@
-from django.db import models
-from django.shortcuts import get_object_or_404
-from rest_framework.permissions import IsAuthenticated
+import logging
+
+from django.db import transaction
+from django.http import FileResponse, Http404
+from django.utils import timezone
 from rest_framework import generics, status
-from rest_framework.views import APIView
-from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
-from .models import SupportTicket, TicketMessage, TicketAttachment
-from .serializers import SupportTicketSerializer, TicketMessageSerializer, TicketAttachmentSerializer
-from apps.utilisateurs.models import Role
+from . import services
+from .models import SupportTicket, TicketAttachment, TicketMessage
+from .serializers import SupportTicketSerializer, TicketAttachmentSerializer, TicketMessageSerializer
+from .services import STAFF_ROLES, get_visible_tickets  # noqa: F401 (réexportés : point d'entrée historique)
+
+logger_securite = logging.getLogger("securite")
 
 
-STAFF_ROLES = [Role.ADMIN, Role.SUPER_ADMIN, Role.SUPPORT]
+def error_response(error):
+    return Response({"detail": error.message}, status=error.status_code)
 
 
-def get_visible_tickets(user):
-    """Point unique de la règle de visibilité par rôle.
-    Réutilisé partout où on doit vérifier l'accès à un ticket,
-    pour éviter que la règle diverge entre les vues.
+class ScopedOnPostMixin:
+    """Dedicated rate limit on creation only; reads keep the general rate."""
 
-    SÉCURITÉ / TROU CORRIGÉ : le vendeur doit voir à la fois les litiges
-    ouverts CONTRE sa boutique (vendor__proprietaire=user, ex: un client
-    qui se plaint) ET les tickets qu'il a lui-même ouverts en tant
-    qu'utilisateur (created_by=user, ex: un souci de paiement ou de
-    compte, catégorie sans rapport avec une boutique — `vendor` reste
-    alors à null car ce champ est en lecture seule côté API, voir
-    SupportTicketSerializer). Avant ce correctif, un vendeur qui
-    ouvrait son propre ticket ne pouvait plus jamais le revoir ni y
-    répondre une fois créé : get_visible_tickets() ne renvoyait que les
-    tickets liés à `vendor`, jamais ceux dont il est `created_by` — un
-    vendeur se retrouvait enfermé hors de sa propre réclamation, y
-    compris pour TicketMessageListCreateView et TicketAttachmentListCreateView
-    qui s'appuient toutes deux sur cette même fonction pour l'accès.
-    """
-    if user.role in [Role.ADMIN, Role.SUPER_ADMIN]:
-        return SupportTicket.objects.all()
-    if user.role == Role.VENDEUR:
-        return SupportTicket.objects.filter(
-            models.Q(vendor__proprietaire=user) | models.Q(created_by=user)
-        )
-    if user.role == Role.SUPPORT:
-        return SupportTicket.objects.filter(
-            models.Q(assigned_to=user) | models.Q(assigned_to__isnull=True)
-        )
-    return SupportTicket.objects.filter(created_by=user)
+    post_throttle_scope = None
+
+    def get_throttles(self):
+        self.throttle_scope = self.post_throttle_scope if self.request.method == "POST" else None
+        return super().get_throttles()
 
 
 # ---------- SupportTicket ----------
 
-class SupportTicketListCreateView(generics.ListCreateAPIView):
+class SupportTicketListCreateView(ScopedOnPostMixin, generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = SupportTicketSerializer
+    post_throttle_scope = "support_ticket"
 
     def get_queryset(self):
         return get_visible_tickets(self.request.user)
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        order = serializer.validated_data.get("order")
+        product = serializer.validated_data.get("product")
+        category = serializer.validated_data.get("category")
+        # La boutique ne voit le ticket (et n'y répond) que pour un litige
+        # sur un produit ou avec elle, jamais pour une question de paiement
+        # ou de compte du client.
+        vendor = None
+        if category in services.VENDOR_CATEGORIES:
+            vendor = product.boutique if product is not None else (order.boutique if order is not None else None)
+        with transaction.atomic():
+            ticket = serializer.save(created_by=self.request.user, vendor=vendor)
+            transaction.on_commit(lambda: services.notify_new_ticket(ticket))
 
 
-# views.py
-class SupportRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
+class SupportRetrieveUpdateView(generics.RetrieveUpdateAPIView):
+    """Détail et reclassement (category/priority, staff seulement). Plus de
+    suppression par l'API : un ticket est un historique de litige."""
+
     permission_classes = [IsAuthenticated]
     serializer_class = SupportTicketSerializer
 
@@ -68,157 +67,155 @@ class SupportRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
         return get_visible_tickets(self.request.user)
 
     def perform_update(self, serializer):
-        """La visibilité (get_visible_tickets) autorise à VOIR ce ticket,
-        pas à le MODIFIER. Seul le staff peut ajuster category/priority
-        (les seuls champs encore modifiables côté serializer) ; tout le
-        reste est de toute façon verrouillé en read_only_fields."""
-        if self.request.user.role not in STAFF_ROLES:
-            raise PermissionDenied(
-                "Seul le staff peut modifier la catégorie ou la priorité d'un ticket."
-            )
-        serializer.save()
-
-    def perform_destroy(self, instance):
-        if self.request.user.role not in STAFF_ROLES:
-            raise PermissionDenied("Seul le staff peut supprimer un ticket.")
-        instance.delete()
+        """La visibilité autorise à VOIR ce ticket, pas à le MODIFIER."""
+        user = self.request.user
+        if user.role not in STAFF_ROLES:
+            raise PermissionDenied("Seul le staff peut modifier la catégorie ou la priorité d'un ticket.")
+        with transaction.atomic():
+            services.take_if_unassigned(serializer.instance, user)
+            serializer.save()
 
 
 class SupportTicketChangeStatusView(APIView):
-    """Changement de statut, réservé au staff (admin/super_admin/support),
+    """Transitions réservées au staff (table services.ALLOWED_TRANSITIONS),
     sauf pour le créateur qui peut fermer son propre ticket."""
+
     permission_classes = [IsAuthenticated]
 
     def patch(self, request, pk):
-        user = request.user
-        ticket = get_object_or_404(get_visible_tickets(user), pk=pk)
-        new_status = request.data.get("status")
+        try:
+            ticket = services.change_status(pk, request.user, request.data.get("status"))
+        except services.SupportError as error:
+            return error_response(error)
+        return Response(SupportTicketSerializer(ticket, context={"request": request}).data)
 
-        is_staff = user.role in STAFF_ROLES
-        is_owner_closing = (
-            ticket.created_by == user
-            and new_status == SupportTicket.Status.CLOSED
-        )
 
-        if not (is_staff or is_owner_closing):
-            return Response({"detail": "Permission refusée."}, status=status.HTTP_403_FORBIDDEN)
+class SupportTicketAssignView(APIView):
+    """Agent support : prendre un ticket de la file. Administration :
+    assigner à un agent (`assigned_to`) ou à soi."""
 
-        valid_statuses = [choice[0] for choice in SupportTicket.Status.choices]
-        if new_status not in valid_statuses:
-            return Response(
-                {"detail": f"Statut invalide. Valeurs possibles : {valid_statuses}"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+    permission_classes = [IsAuthenticated]
 
-        ticket.status = new_status
-        ticket.save(update_fields=["status", "updated_at"])
-        return Response(SupportTicketSerializer(ticket).data, status=status.HTTP_200_OK)
+    def post(self, request, pk):
+        try:
+            ticket = services.assign(pk, request.user, request.data.get("assigned_to"))
+        except services.SupportError as error:
+            return error_response(error)
+        return Response(SupportTicketSerializer(ticket, context={"request": request}).data)
 
 
 class SupportTicketRateView(APIView):
-    """Permet au créateur du ticket de laisser une note de satisfaction,
-    une seule fois. Impossible de la modifier une fois donnée."""
+    """Le créateur note le ticket une fois, quand il est résolu ou fermé."""
+
     permission_classes = [IsAuthenticated]
 
     def patch(self, request, pk):
-        ticket = get_object_or_404(get_visible_tickets(request.user), pk=pk)
-
-        if ticket.created_by != request.user:
-            return Response(
-                {"detail": "Seul le créateur du ticket peut le noter."},
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        if ticket.satisfaction_rating is not None:
-            return Response(
-                {"detail": "Ce ticket a déjà été noté."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        rating = request.data.get("satisfaction_rating")
-
-        try:
-            rating = int(rating)
-        except (TypeError, ValueError):
-            return Response(
-                {"detail": "La note doit être un nombre entier."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        if rating < 1 or rating > 5:
-            return Response(
-                {"detail": "La note doit être comprise entre 1 et 5."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        ticket.satisfaction_rating = rating
-        ticket.save(update_fields=["satisfaction_rating", "updated_at"])
-        return Response(SupportTicketSerializer(ticket).data, status=status.HTTP_200_OK)
+        with transaction.atomic():
+            ticket = get_visible_tickets(request.user).select_for_update(of=("self",)).filter(pk=pk).first()
+            if ticket is None:
+                raise Http404
+            if ticket.created_by_id != request.user.pk:
+                return Response({"detail": "Seul le créateur du ticket peut le noter."}, status=status.HTTP_403_FORBIDDEN)
+            if ticket.status not in (SupportTicket.Status.RESOLVED, SupportTicket.Status.CLOSED):
+                return Response({"detail": "Le ticket se note une fois résolu ou fermé."}, status=status.HTTP_400_BAD_REQUEST)
+            if ticket.satisfaction_rating is not None:
+                return Response({"detail": "Ce ticket a déjà été noté."}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                rating = int(request.data.get("satisfaction_rating"))
+            except (TypeError, ValueError):
+                return Response({"detail": "La note doit être un nombre entier."}, status=status.HTTP_400_BAD_REQUEST)
+            if rating < 1 or rating > 5:
+                return Response({"detail": "La note doit être comprise entre 1 et 5."}, status=status.HTTP_400_BAD_REQUEST)
+            ticket.satisfaction_rating = rating
+            ticket.save(update_fields=["satisfaction_rating", "updated_at"])
+        return Response(SupportTicketSerializer(ticket, context={"request": request}).data)
 
 
 # ---------- TicketMessage ----------
 
-class TicketMessageListCreateView(generics.ListCreateAPIView):
+class TicketMessageListCreateView(ScopedOnPostMixin, generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = TicketMessageSerializer
+    post_throttle_scope = "support_message"
 
     def _get_accessible_ticket(self):
-        """Vérifie l'accès au ticket parent, 404 propre sinon.
-        Utilisée par get_queryset ET perform_create pour garantir
-        que la même règle s'applique à la lecture ET à l'écriture."""
-        return get_object_or_404(
-            get_visible_tickets(self.request.user),
-            pk=self.kwargs["ticket_id"]
-        )
+        ticket = get_visible_tickets(self.request.user).filter(pk=self.kwargs["ticket_id"]).first()
+        if ticket is None:
+            raise Http404
+        return ticket
 
     def get_queryset(self):
         ticket = self._get_accessible_ticket()
         queryset = TicketMessage.objects.filter(ticket_link=ticket)
-
         if self.request.user.role not in STAFF_ROLES:
             queryset = queryset.filter(is_internal_note=False)
-
         return queryset
 
-    def perform_create(self, serializer):
-        user = self.request.user
-        ticket = self._get_accessible_ticket()  # revérifie l'accès avant d'écrire
+    def list(self, request, *args, **kwargs):
+        reponse = super().list(request, *args, **kwargs)
+        # Messages des autres parties affichés : marqués lus (« Lu à … »).
+        self.get_queryset().filter(read_at__isnull=True).exclude(author=request.user).update(read_at=timezone.now())
+        return reponse
 
-        author_role = TicketMessage.AuthorRole.CLIENT
-        if user.role == Role.VENDEUR:
-            author_role = TicketMessage.AuthorRole.VENDOR
-        elif user.role in STAFF_ROLES:
-            author_role = TicketMessage.AuthorRole.SUPPORT
-
-        serializer.save(ticket_link=ticket, author=user, author_role=author_role)
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            message = services.add_message(
+                self.kwargs["ticket_id"], request.user,
+                serializer.validated_data["content"], serializer.validated_data.get("is_internal_note", False),
+            )
+        except services.SupportError as error:
+            return error_response(error)
+        return Response(self.get_serializer(message).data, status=status.HTTP_201_CREATED)
 
 
 # ---------- TicketAttachment ----------
 
-class TicketAttachmentListCreateView(generics.ListCreateAPIView):
+class TicketAttachmentListCreateView(ScopedOnPostMixin, generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = TicketAttachmentSerializer
-
-    def _get_accessible_message(self):
-        """Vérifie que l'utilisateur a accès au ticket parent du message,
-        pas seulement qu'il est connecté."""
-        message = get_object_or_404(TicketMessage, pk=self.kwargs["message_id"])
-        get_object_or_404(get_visible_tickets(self.request.user), pk=message.ticket_link_id)
-        return message
+    post_throttle_scope = "support_piece_jointe"
 
     def get_queryset(self):
-        message = self._get_accessible_message()
-        # Sans tri explicite, DRF émet UnorderedObjectListWarning : la
-        # pagination sur un queryset non trié peut sauter ou répéter des
-        # lignes d'une page à l'autre.
+        try:
+            message = services.visible_message(self.request.user, self.kwargs["message_id"])
+        except services.SupportError:
+            raise Http404
         return TicketAttachment.objects.filter(message=message).order_by("created_at")
 
-    def perform_create(self, serializer):
-        message = self._get_accessible_message()
-        file_obj = self.request.FILES.get("file")
+    def create(self, request, *args, **kwargs):
+        file_obj = request.FILES.get("file")
+        with transaction.atomic():
+            try:
+                message = services.check_new_attachment(request.user, self.kwargs["message_id"])
+            except services.SupportError as error:
+                return error_response(error)
+            serializer = self.get_serializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            attachment = serializer.save(
+                message=message,
+                original_filename=file_obj.name[:255] if file_obj else "",
+                file_size=file_obj.size if file_obj else 0,
+                file_type=services.file_type_for(file_obj.name if file_obj else ""),
+            )
+        return Response(self.get_serializer(attachment).data, status=status.HTTP_201_CREATED)
 
-        serializer.save(
-            message=message,
-            original_filename=file_obj.name if file_obj else "",
-            file_size=file_obj.size if file_obj else 0,
-        )
+
+class TicketAttachmentDownloadView(APIView):
+    """Fichier servi par Django après contrôle d'accès (mêmes règles que le
+    message) : /media/ n'est pas exposé en production."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        try:
+            attachment = services.visible_attachment(request.user, pk)
+        except services.SupportError:
+            raise Http404
+        try:
+            contenu = attachment.file.open("rb")
+        except FileNotFoundError:
+            logger_securite.error("Pièce jointe référencée mais absente du stockage (id=%s).", attachment.pk)
+            raise Http404("Ce fichier n'est plus disponible.")
+        return FileResponse(contenu, filename=attachment.file.name.rsplit("/", 1)[-1])

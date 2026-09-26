@@ -195,9 +195,9 @@ Postman : `postman_livraison.json` (hors dépôt, reconstruite ; l'ancienne est 
 - **Changement de rôle par le Django admin des utilisateurs** : le champ `role` y reste libre (module `utilisateurs`). Un vendeur passé livreur par ce biais ne peut toujours pas livrer sa propre commande (contrôle à chaque transition), mais la règle « jamais un vendeur » n'est garantie que par l'API de nomination.
 - **Stock restitué à l'abandon** : l'abandon réutilise `annuler_commande`, qui remet le stock en vente. C'est juste si le colis revient au vendeur (hypothèse retenue) ; un colis perdu demanderait une correction manuelle du stock.
 - **Livreur qui commande pour lui-même** : un compte livreur ne voit dans `/api/livraison/` que les livraisons qui lui sont assignées, pas celles de ses propres achats (cas marginal, un compte ne porte qu'un rôle).
-- **Emails de notification envoyés dans la transaction** (`notifications`) : un changement annulé après coup peut avoir déjà envoyé l'email d'étape. Hors code de livraison, qui part après le commit.
+- ~~**Emails de notification envoyés dans la transaction**~~ : corrigé, les emails partent après le commit par Celery ([`MODULE_NOTIFICATIONS.md`](./MODULE_NOTIFICATIONS.md)).
 - **Preuve de livraison enrichie** (photo, géolocalisation) : non prévue ; à étudier si des contestations « non reçu » se multiplient malgré le code.
-- **Retours** : une demande de retour est encore acceptée avant expédition (commande confirmée) ; traité avec le module retours.
+- ~~**Retours** : une demande de retour est encore acceptée avant expédition (commande confirmée)~~ : corrigé, commande livrée exigée ([`MODULE_RETOURS.md`](./MODULE_RETOURS.md)).
 
 ## 16. Justification des choix
 

@@ -144,15 +144,14 @@ class NotificationAPITestCase(BaseNotificationTestCase):
         res_get = self.client.get(url)
         self.assertEqual(res_get.status_code, status.HTTP_200_OK)
         self.assertTrue(res_get.data["email_actif"])
-        self.assertTrue(res_get.data["in_app_actif"])
 
-        # PATCH préférences (désactiver SMS)
-        res_patch = self.client.patch(url, {"sms_actif": False}, format="json")
+        # PATCH préférences (désactiver les emails)
+        res_patch = self.client.patch(url, {"email_actif": False}, format="json")
         self.assertEqual(res_patch.status_code, status.HTTP_200_OK)
-        self.assertFalse(res_patch.data["sms_actif"])
+        self.assertFalse(res_patch.data["email_actif"])
 
         prefs = PreferenceNotification.objects.get(utilisateur=self.client1)
-        self.assertFalse(prefs.sms_actif)
+        self.assertFalse(prefs.email_actif)
 
 
 class NotificationSignauxTestCase(BaseNotificationTestCase):
@@ -210,3 +209,162 @@ class NotificationSignauxTestCase(BaseNotificationTestCase):
         ).first()
         self.assertIsNotNone(notif)
         self.assertIn("expédié", notif.message)
+
+
+# =====================================================================
+# Diagnostic de septembre 2026 : un test par faille confirmée
+# (docs/MODULE_NOTIFICATIONS.md, § Sécurité).
+# =====================================================================
+
+from django.core import mail
+from django.db import transaction
+from django.test import override_settings
+
+from apps.catalogue.models import Stock
+from apps.commandes.services import annuler_commande
+from apps.commandes.tests import DonneesCycleDeVie
+from .services import alerter_stock_bas
+
+
+@override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
+class EnvoiApresCommitTests(BaseNotificationTestCase):
+    """N-b : email par Celery après le commit, jamais pour une action annulée."""
+
+    def test_aucun_email_si_la_transaction_est_annulee(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            try:
+                with transaction.atomic():
+                    ServiceNotification.notifier_utilisateur(self.client1, "Paiement confirmé", "Merci.")
+                    raise RuntimeError("échec après la notification")
+            except RuntimeError:
+                pass
+        self.assertEqual(Notification.objects.count(), 0)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_email_envoye_apres_le_commit(self):
+        with self.captureOnCommitCallbacks(execute=False) as rappels:
+            ServiceNotification.notifier_utilisateur(self.client1, "Paiement confirmé", "Merci.")
+        self.assertEqual(len(mail.outbox), 0)  # rien pendant la transaction
+        for rappel in rappels:
+            rappel()
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual((mail.outbox[0].to, mail.outbox[0].subject), (["client1@anitche.ci"], "[ANITCHE] Paiement confirmé"))
+
+    def test_email_desactive_mais_in_app_toujours_cree(self):
+        PreferenceNotification.objects.create(utilisateur=self.client1, email_actif=False)
+        with self.captureOnCommitCallbacks(execute=True):
+            ServiceNotification.notifier_utilisateur(self.client1, "Remboursement", "En cours.")
+            ServiceNotification.notifier_utilisateur(self.client1, "Sécurité", "Code.", email_critique=True)
+        self.assertEqual(Notification.objects.filter(destinataire=self.client1).count(), 2)
+        self.assertEqual([m.subject for m in mail.outbox], ["[ANITCHE] Sécurité"])
+
+    def test_alertes_administration_in_app_sans_email(self):
+        admins = [Utilisateur.objects.create_user(email=f"admin{i}@anitche.ci", password="TestPassword123!", nom="A",
+                                                  prenom="D", role=Role.ADMIN) for i in range(2)]
+        Utilisateur.objects.create_user(email="ancien.admin@anitche.ci", password="TestPassword123!", nom="A",
+                                        prenom="D", role=Role.ADMIN, is_active=False)
+        with self.captureOnCommitCallbacks(execute=True):
+            ServiceNotification.notifier_administration("Remboursement à traiter", "RMB-1")
+        self.assertEqual(Notification.objects.filter(titre="Remboursement à traiter").count(), 2)
+        self.assertEqual(set(Notification.objects.values_list("destinataire", flat=True)), {a.pk for a in admins})
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_journaux_sans_donnees_personnelles(self):
+        with self.assertLogs("apps.notifications.services", level="INFO") as journaux:
+            ServiceNotification.notifier_utilisateur(self.client1, "Livraison", "Votre colis arrive au 0707070707.")
+        sortie = "\n".join(journaux.output)
+        self.assertNotIn("client1@anitche.ci", sortie)
+        self.assertNotIn("0707070707", sortie)
+
+
+class PreferencesTests(BaseNotificationTestCase):
+    """N-d : l'in-app ne se désactive plus ; seul l'email est un choix."""
+
+    def test_in_app_et_sms_ne_sont_plus_des_preferences(self):
+        self.client.force_authenticate(user=self.client1)
+        url = reverse("notifications:notification-preferences")
+        reponse = self.client.patch(url, {"in_app_actif": False, "sms_actif": False, "email_actif": False}, format="json")
+        self.assertEqual(reponse.status_code, 200)
+        self.assertEqual(set(reponse.data), {"id", "email_actif", "date_mise_a_jour"})
+        ServiceNotification.notifier_utilisateur(self.client1, "Remboursement", "En cours.")
+        self.assertEqual(Notification.objects.filter(destinataire=self.client1).count(), 1)
+
+
+class IsolationTests(BaseNotificationTestCase):
+    """N-a (correct dès le diagnostic) : chaque notification n'est visible et
+    modifiable que par son destinataire."""
+
+    def test_notification_d_autrui_introuvable(self):
+        notification = Notification.objects.create(destinataire=self.client1, titre="t", message="m")
+        self.client.force_authenticate(user=self.client2)
+        self.assertEqual(self.client.patch(reverse("notifications:notification-marquer-lue",
+                                                   kwargs={"pk": notification.pk})).status_code, 404)
+        self.assertEqual(self.client.get(reverse("notifications:notification-liste")).data["count"], 0)
+        self.assertEqual(self.client.get(reverse("notifications:notification-compteur")).data["non_lues"], 0)
+        self.client.post(reverse("notifications:notification-toutes-lues"))
+        notification.refresh_from_db()
+        self.assertFalse(notification.est_lu)
+
+
+class StockBasTests(DonneesCycleDeVie, APITestCase):
+    """N3 : seuil_alerte enfin utilisé — alerte au franchissement, une fois."""
+
+    def setUp(self):
+        self.creer_donnees()
+        Stock.objects.filter(variante=self.variante1).update(quantite_disponible=7, seuil_alerte=5)
+
+    def alertes(self):
+        return Notification.objects.filter(destinataire=self.vendeur1, type_notification=Notification.TypeNotification.STOCK)
+
+    def test_franchissement_du_seuil_au_checkout(self):
+        self.assertEqual(self.commander((self.variante1, 2)).status_code, 201)  # 7 → 5 : seuil atteint
+        self.assertEqual(self.alertes().count(), 1)
+        self.assertIn("5 unité(s) restante(s)", self.alertes().get().message)
+
+    def test_une_seule_alerte_sous_le_seuil(self):
+        self.commander((self.variante1, 3))  # 7 → 4
+        self.commander((self.variante1, 1))  # 4 → 3 : déjà sous le seuil
+        self.assertEqual(self.alertes().count(), 1)
+
+    def test_pas_d_alerte_au_dessus_du_seuil(self):
+        self.commander((self.variante1, 1))  # 7 → 6
+        self.assertFalse(self.alertes().exists())
+
+    def test_rupture(self):
+        self.commander((self.variante1, 3))  # 7 → 4 : stock bas
+        self.commander((self.variante1, 4))  # 4 → 0 : rupture
+        self.assertEqual(self.alertes().count(), 2)
+        self.assertTrue(self.alertes().filter(titre__startswith="Rupture").exists())
+
+    def test_autre_vendeur_jamais_alerte(self):
+        self.commander((self.variante1, 3))
+        self.assertFalse(Notification.objects.filter(destinataire=self.vendeur2,
+                                                     type_notification=Notification.TypeNotification.STOCK).exists())
+
+    def test_fonction_seule(self):
+        stock = Stock.objects.select_related("variante__produit__boutique").get(variante=self.variante1)
+        self.assertIsNone(alerter_stock_bas(stock, 10, 8))
+        self.assertIsNotNone(alerter_stock_bas(stock, 6, 5))
+
+
+class AnnulationTests(DonneesCycleDeVie, APITestCase):
+    """N4 : le client est prévenu de toute annulation ; le vendeur seulement
+    si la commande était payée."""
+
+    def setUp(self):
+        self.creer_donnees()
+        self.commande = Commande.objects.get(pk=self.commander((self.variante1, 1)).data[0]["id"])
+
+    def test_expiration_non_payee_client_seul(self):
+        annuler_commande(self.commande, Commande.MotifAnnulation.EXPIRATION)
+        client = Notification.objects.get(destinataire=self.client_user, titre__contains="annulée")
+        self.assertIn("Non payée dans le délai", client.message)
+        self.assertFalse(Notification.objects.filter(destinataire=self.vendeur1, titre__contains="annulée").exists())
+
+    def test_annulation_payee_client_et_vendeur(self):
+        valider_paiement(self.payer(self.commande, statut=Paiement.Statut.EN_ATTENTE))
+        self.commande.refresh_from_db()
+        annuler_commande(self.commande, Commande.MotifAnnulation.CLIENT, acteur=self.client_user)
+        client = Notification.objects.get(destinataire=self.client_user, titre__contains="annulée")
+        self.assertIn("remboursement", client.message)
+        self.assertTrue(Notification.objects.filter(destinataire=self.vendeur1, titre__contains="annulée").exists())

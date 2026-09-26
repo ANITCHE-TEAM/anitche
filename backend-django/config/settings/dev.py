@@ -36,6 +36,13 @@ REST_FRAMEWORK = {
         # Une exécution de postman_paiements.json initie ou annule une dizaine
         # de paiements par client (20/heure en production).
         'paiements': '1000/hour',
+        # postman_retours.json et postman_support.json créent plusieurs
+        # demandes, tickets et fichiers par exécution.
+        'retour_creation': '1000/hour',
+        'retour_photo': '1000/hour',
+        'support_ticket': '1000/hour',
+        'support_message': '1000/hour',
+        'support_piece_jointe': '1000/hour',
     },
 }
 

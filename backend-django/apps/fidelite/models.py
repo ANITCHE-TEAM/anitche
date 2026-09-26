@@ -130,6 +130,7 @@ class TransactionFidelite(models.Model):
         EXPIRATION = "expiration", "Points expirés"
         BONUS_PARRAINAGE = "parrainage", "Bonus de parrainage"
         AJUSTEMENT_ADMIN = "ajustement", "Ajustement administratif"
+        REPRISE = "reprise", "Reprise (achat remboursé)"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
@@ -151,6 +152,16 @@ class TransactionFidelite(models.Model):
         verbose_name = "Transaction de fidélité"
         verbose_name_plural = "Transactions de fidélité"
         ordering = ["-date_creation"]
+        constraints = [
+            # Idempotence : un gain par commande, une reprise par retour, une
+            # conversion par coupon. Un signal ou une tâche rejoués ne créent
+            # jamais un second mouvement pour la même référence.
+            models.UniqueConstraint(
+                fields=["compte", "type_transaction", "reference_externe"],
+                condition=~models.Q(reference_externe=""),
+                name="transaction_fidelite_unique_par_reference",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.compte.utilisateur.email} : {'+' if self.points > 0 else ''}{self.points} pts ({self.get_type_transaction_display()})"
@@ -181,7 +192,14 @@ class CouponReduction(models.Model):
 
     points_requis = models.PositiveIntegerField(default=0, help_text="Points consommés pour obtenir ce coupon")
     est_actif = models.BooleanField(default=True)
+    # Épuisé : nombre_utilisations a atteint utilisations_max (un coupon
+    # nominatif est épuisé dès sa première utilisation).
     est_utilise = models.BooleanField(default=False)
+    utilisations_max = models.PositiveIntegerField(
+        null=True, blank=True, default=1,
+        help_text="Nombre total d'utilisations autorisées (vide = illimité). Chaque client ne l'utilise qu'une fois.",
+    )
+    nombre_utilisations = models.PositiveIntegerField(default=0)
 
     date_expiration = models.DateTimeField(null=True, blank=True)
     date_creation = models.DateTimeField(auto_now_add=True)
@@ -190,6 +208,14 @@ class CouponReduction(models.Model):
         verbose_name = "Coupon de réduction"
         verbose_name_plural = "Coupons de réduction"
         ordering = ["-date_creation"]
+        constraints = [
+            models.CheckConstraint(condition=models.Q(valeur__gt=0), name="coupon_valeur_positive"),
+            models.CheckConstraint(
+                condition=~models.Q(type_reduction="pourcentage") | models.Q(valeur__lte=100),
+                name="coupon_pourcentage_au_plus_100",
+            ),
+            models.CheckConstraint(condition=models.Q(montant_minimum_commande__gte=0), name="coupon_minimum_positif"),
+        ]
 
     def __str__(self):
         valeur_str = f"{self.valeur}%" if self.type_reduction == self.TypeReduction.POURCENTAGE else f"{self.valeur} FCFA"
@@ -200,14 +226,17 @@ class CouponReduction(models.Model):
         if not self.est_actif:
             return False, "Ce coupon de réduction est désactivé."
 
-        if self.est_utilise:
-            return False, "Ce coupon de réduction a déjà été utilisé."
-
         if self.date_expiration and timezone.now() > self.date_expiration:
             return False, "Ce coupon de réduction a expiré."
 
-        if self.client and self.client != client:
+        if self.client_id and self.client_id != client.pk:
             return False, "Ce coupon est nominatif et ne vous appartient pas."
+
+        # Une utilisation par client, puis la limite globale éventuelle.
+        if self.utilisations.filter(client=client).exists():
+            return False, "Vous avez déjà utilisé ce coupon de réduction."
+        if self.est_utilise or (self.utilisations_max is not None and self.nombre_utilisations >= self.utilisations_max):
+            return False, "Ce coupon de réduction a déjà été utilisé."
 
         if montant_commande < self.montant_minimum_commande:
             return False, f"Montant minimum requis de {self.montant_minimum_commande} FCFA pour appliquer ce code."
@@ -224,5 +253,61 @@ class CouponReduction(models.Model):
         if self.type_reduction == self.TypeReduction.POURCENTAGE:
             remise = (montant_commande * self.valeur) / Decimal("100.00")
         else:
-            remise = min(self.valeur, montant_commande)
+            remise = self.valeur
+        # Jamais plus que le montant, jamais négative (contraintes en base en plus).
+        remise = max(Decimal("0"), min(remise, montant_commande))
         return remise.quantize(Decimal("1"), rounding=ROUND_DOWN)
+
+
+class UtilisationCoupon(models.Model):
+    """Une utilisation d'un coupon par un client, au checkout (un groupe de
+    commandes). Supprimée si toutes les commandes du groupe sont annulées :
+    le coupon est alors rendu."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    coupon = models.ForeignKey(CouponReduction, on_delete=models.CASCADE, related_name="utilisations")
+    client = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="utilisations_coupon")
+    groupe = models.ForeignKey(
+        "commandes.GroupeCommande", on_delete=models.SET_NULL, null=True, blank=True, related_name="utilisations_coupon",
+    )
+    date_creation = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Utilisation de coupon"
+        verbose_name_plural = "Utilisations de coupons"
+        constraints = [
+            models.UniqueConstraint(fields=["coupon", "client"], name="coupon_une_utilisation_par_client"),
+        ]
+
+    def __str__(self):
+        return f"{self.coupon.code} — {self.client_id}"
+
+
+class GainFidelite(models.Model):
+    """Points d'une commande livrée, « en attente » pendant le délai de
+    rétractation puis crédités (même moment que le reversement au vendeur
+    disponible). Annulés si la livraison est contestée à raison ; recalculés
+    si un retour est remboursé pendant l'attente. Un seul gain par commande."""
+
+    class Statut(models.TextChoices):
+        EN_ATTENTE = "en_attente", "En attente"
+        CREDITE = "credite", "Crédité"
+        ANNULE = "annule", "Annulé"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    compte = models.ForeignKey(CompteFidelite, on_delete=models.CASCADE, related_name="gains")
+    commande = models.OneToOneField("commandes.Commande", on_delete=models.CASCADE, related_name="gain_fidelite")
+    points = models.PositiveIntegerField()
+    statut = models.CharField(max_length=15, choices=Statut.choices, default=Statut.EN_ATTENTE, db_index=True)
+    date_disponibilite = models.DateTimeField(db_index=True)
+    motif_annulation = models.CharField(max_length=255, blank=True)
+    date_creation = models.DateTimeField(auto_now_add=True)
+    date_traitement = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Gain de fidélité"
+        verbose_name_plural = "Gains de fidélité"
+        ordering = ["-date_creation"]
+
+    def __str__(self):
+        return f"{self.points} pts ({self.get_statut_display()}) — commande {self.commande_id}"

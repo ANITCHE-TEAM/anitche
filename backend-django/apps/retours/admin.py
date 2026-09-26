@@ -30,7 +30,7 @@ class DemandeRetourAdmin(admin.ModelAdmin):
     list_filter = ("statut", "motif", "type_resolution", "date_creation")
     search_fields = ("numero_retour", "commande__numero_commande", "client__email", "boutique__nom")
     # 'statut' et 'montant_remboursement' en lecture seule (F-06) : toute
-    # transition doit passer par TraiterDemandeRetourView, sinon on
+    # transition doit passer par apps.retours.services.traiter, sinon on
     # contourne sa machine à états (ex. passer directement à "rembourse"
     # sans déclencher le remboursement réel).
     readonly_fields = (
@@ -49,7 +49,7 @@ class RetourItemAdmin(admin.ModelAdmin):
     # FOIS à la création de la demande à partir de cette valeur (voir
     # CreerDemandeRetourSerializer.validate) — la modifier après coup
     # désynchronise le montant remboursé de ce qui a réellement été
-    # déclaré retourné. Pire : DemandeRetour.receptionner() réutilise
+    # déclaré retourné. Pire : apps.retours.services (réception) réutilise
     # cette même quantite pour réintégrer le stock — une valeur trafiquée
     # fausserait aussi le stock réel (même principe que le verrouillage de
     # CommandeItem dans apps.commandes.admin).

@@ -183,15 +183,17 @@ class SupportTicketTestCase(APITestCase):
         self.client.force_authenticate(user=self.client_user)
         url = reverse("support:ticket-detail", args=[self.ticket.id])
         response = self.client.delete(url)
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
         self.assertTrue(SupportTicket.objects.filter(pk=self.ticket.id).exists())
 
-    def test_admin_can_delete_ticket(self):
+    def test_admin_cannot_delete_ticket_through_the_api(self):
+        """S4 : un ticket est un historique de litige ; plus de suppression
+        par l'API, même pour l'administration (Django admin seulement)."""
         self.client.force_authenticate(user=self.admin_user)
         url = reverse("support:ticket-detail", args=[self.ticket.id])
         response = self.client.delete(url)
-        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
-        self.assertFalse(SupportTicket.objects.filter(pk=self.ticket.id).exists())
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertTrue(SupportTicket.objects.filter(pk=self.ticket.id).exists())
 
 
     def test_vendeur_ne_peut_pas_modifier_le_contenu_du_ticket(self):
@@ -262,69 +264,69 @@ class SupportTicketTestCase(APITestCase):
         self.assertEqual(ticket.category, "delivery")
 
 
-    class TicketMessageTestCase(APITestCase):
+class TicketMessageTestCase(APITestCase):
 
-        def setUp(self):
-            self.client_user = self._create_user("client@test.com", Role.CLIENT)
-            self.support_user = self._create_user("support@test.com", Role.SUPPORT)
-            self.other_client = self._create_user("other@test.com", Role.CLIENT)
+    def setUp(self):
+        self.client_user = self._create_user("client@test.com", Role.CLIENT)
+        self.support_user = self._create_user("support@test.com", Role.SUPPORT)
+        self.other_client = self._create_user("other@test.com", Role.CLIENT)
 
-            self.ticket = SupportTicket.objects.create(
-                created_by=self.client_user,
-                subject="Test message",
-                description="...",
-                category=SupportTicket.Category.OTHER,
-            )
+        self.ticket = SupportTicket.objects.create(
+            created_by=self.client_user,
+            subject="Test message",
+            description="...",
+            category=SupportTicket.Category.OTHER,
+        )
 
-        def _create_user(self, email, role):
-            return Utilisateur.objects.create_user(
-                email=email,
-                password="testpass123",
-                nom="Test",
-                prenom="User",
-                role=role,
-            ) 
+    def _create_user(self, email, role):
+        return Utilisateur.objects.create_user(
+            email=email,
+            password="testpass123",
+            nom="Test",
+            prenom="User",
+            role=role,
+        ) 
 
-        def test_client_can_post_message_on_own_ticket(self):
-            self.client.force_authenticate(user=self.client_user)
-            url = reverse("support:ticket-messages", args=[self.ticket.id])
-            response = self.client.post(url, {"content": "Bonjour, des nouvelles ?"})
-            self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-            self.assertEqual(response.data["author_role"], TicketMessage.AuthorRole.CLIENT)
+    def test_client_can_post_message_on_own_ticket(self):
+        self.client.force_authenticate(user=self.client_user)
+        url = reverse("support:ticket-messages", args=[self.ticket.id])
+        response = self.client.post(url, {"content": "Bonjour, des nouvelles ?"})
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["author_role"], TicketMessage.AuthorRole.CLIENT)
 
-        def test_stranger_cannot_post_message_on_others_ticket(self):
-            self.client.force_authenticate(user=self.other_client)
-            url = reverse("support:ticket-messages", args=[self.ticket.id])
-            response = self.client.post(url, {"content": "Tentative intrusive"})
-            self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+    def test_stranger_cannot_post_message_on_others_ticket(self):
+        self.client.force_authenticate(user=self.other_client)
+        url = reverse("support:ticket-messages", args=[self.ticket.id])
+        response = self.client.post(url, {"content": "Tentative intrusive"})
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
-        def test_internal_note_hidden_from_client(self):
-            TicketMessage.objects.create(
-                ticket_link=self.ticket,
-                author=self.support_user,
-                author_role=TicketMessage.AuthorRole.SUPPORT,
-                content="Note interne : vérifier le tracking colis.",
-                is_internal_note=True,
-            )
-            self.client.force_authenticate(user=self.client_user)
-            url = reverse("support:ticket-messages", args=[self.ticket.id])
-            response = self.client.get(url)
-            contents = [m["content"] for m in response.data]
-            self.assertNotIn("Note interne : vérifier le tracking colis.", contents)
+    def test_internal_note_hidden_from_client(self):
+        TicketMessage.objects.create(
+            ticket_link=self.ticket,
+            author=self.support_user,
+            author_role=TicketMessage.AuthorRole.SUPPORT,
+            content="Note interne : vérifier le tracking colis.",
+            is_internal_note=True,
+        )
+        self.client.force_authenticate(user=self.client_user)
+        url = reverse("support:ticket-messages", args=[self.ticket.id])
+        response = self.client.get(url)
+        contents = [m["content"] for m in response.data["results"]]
+        self.assertNotIn("Note interne : vérifier le tracking colis.", contents)
 
-        def test_internal_note_visible_to_support(self):
-            TicketMessage.objects.create(
-                ticket_link=self.ticket,
-                author=self.support_user,
-                author_role=TicketMessage.AuthorRole.SUPPORT,
-                content="Note interne visible staff",
-                is_internal_note=True,
-            )
-            self.client.force_authenticate(user=self.support_user)
-            url = reverse("support:ticket-messages", args=[self.ticket.id])
-            response = self.client.get(url)
-            contents = [m["content"] for m in response.data]
-            self.assertIn("Note interne visible staff", contents)
+    def test_internal_note_visible_to_support(self):
+        TicketMessage.objects.create(
+            ticket_link=self.ticket,
+            author=self.support_user,
+            author_role=TicketMessage.AuthorRole.SUPPORT,
+            content="Note interne visible staff",
+            is_internal_note=True,
+        )
+        self.client.force_authenticate(user=self.support_user)
+        url = reverse("support:ticket-messages", args=[self.ticket.id])
+        response = self.client.get(url)
+        contents = [m["content"] for m in response.data["results"]]
+        self.assertIn("Note interne visible staff", contents)
 
 
 class TicketAttachmentTestCase(APITestCase):
@@ -441,3 +443,301 @@ class TicketAttachmentTestCase(APITestCase):
             "file": self._fake_file(),
         }, format="multipart")
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+# =====================================================================
+# Diagnostic de septembre 2026 : un test par faille confirmée
+# (docs/MODULE_SUPPORT.md, § Sécurité).
+# =====================================================================
+
+import io
+from decimal import Decimal
+from unittest.mock import patch
+
+from django.core.cache import cache
+from PIL import Image
+from rest_framework.throttling import SimpleRateThrottle
+
+from apps.catalogue.models import Produit, VarianteProduit
+from apps.commandes.models import Commande, CommandeItem
+from apps.notifications.models import Notification
+
+URL = "/api/support/"
+
+
+def png(nom="capture.png"):
+    tampon = io.BytesIO()
+    Image.new("RGB", (4, 4)).save(tampon, "PNG")
+    return SimpleUploadedFile(nom, tampon.getvalue(), content_type="image/png")
+
+
+class SupportDiagnosticBase(APITestCase):
+    def setUp(self):
+        creer = Utilisateur.objects.create_user
+        self.client_user = creer(email="c@support.ci", password="testpass123", nom="C", prenom="C", role=Role.CLIENT)
+        self.other_client = creer(email="o@support.ci", password="testpass123", nom="O", prenom="O", role=Role.CLIENT)
+        self.vendor_user = creer(email="v@support.ci", password="testpass123", nom="V", prenom="V",
+                                 role=Role.VENDEUR, statut_kyc=StatutKYC.VALIDE)
+        self.agent = creer(email="a1@support.ci", password="testpass123", nom="A", prenom="Un", role=Role.SUPPORT)
+        self.agent2 = creer(email="a2@support.ci", password="testpass123", nom="A", prenom="Deux", role=Role.SUPPORT)
+        self.admin_user = creer(email="adm@support.ci", password="testpass123", nom="A", prenom="D", role=Role.ADMIN)
+        self.boutique = Boutique.objects.create(proprietaire=self.vendor_user, nom="Boutique Support")
+        self.produit = Produit.objects.create(boutique=self.boutique, nom="Lampe", prix_base=Decimal("5000"))
+        variante = VarianteProduit.objects.create(produit=self.produit, nom="Std", prix=Decimal("5000"))
+        self.order = Commande.objects.create(boutique=self.boutique, client=self.client_user,
+                                             montant_total=Decimal("5000"), status=Commande.Status.LIVREE)
+        CommandeItem.objects.create(commande=self.order, variante=variante, nom_produit="Lampe",
+                                    prix_unitaire=Decimal("5000"), quantite=1)
+        self.ticket = SupportTicket.objects.create(created_by=self.client_user, subject="Question",
+                                                   description="Détail", category=SupportTicket.Category.OTHER)
+
+    def as_user(self, user):
+        self.client.force_authenticate(user=user)
+
+    def create_ticket(self, user=None, **extra):
+        self.as_user(user or self.client_user)
+        corps = {"subject": "Lampe cassée", "description": "Arrivée fendue.", "category": "product", **extra}
+        return self.client.post(f"{URL}tickets/", corps, format="json")
+
+    def post_message(self, user, content="Bonjour", ticket=None, **extra):
+        self.as_user(user)
+        return self.client.post(f"{URL}tickets/{(ticket or self.ticket).id}/messages/", {"content": content, **extra},
+                                format="json")
+
+    def set_status(self, user, value, ticket=None):
+        self.as_user(user)
+        return self.client.patch(f"{URL}tickets/{(ticket or self.ticket).id}/status/", {"status": value}, format="json")
+
+
+class TestsCollectesTests(SupportDiagnosticBase):
+    """S-a : la classe de tests des messages était imbriquée, jamais exécutée."""
+
+    def test_classe_des_messages_au_niveau_du_module(self):
+        import apps.support.tests as module
+        self.assertTrue(hasattr(module, "TicketMessageTestCase"))
+        self.assertFalse(hasattr(module.SupportTicketTestCase, "TicketMessageTestCase"))
+
+
+class TicketLieACommandeTests(SupportDiagnosticBase):
+    """S-b / S1 : un ticket vise SA commande ou SON produit acheté."""
+
+    def test_lien_commande_et_produit_achete(self):
+        r = self.create_ticket(order=str(self.order.id), product=self.produit.id)
+        self.assertEqual(r.status_code, 201, r.data)
+        ticket = SupportTicket.objects.get(pk=r.data["id"])
+        self.assertEqual((ticket.order_id, ticket.product_id, ticket.vendor_id),
+                         (self.order.id, self.produit.id, self.boutique.id))
+
+    def test_commande_d_un_autre_client_refusee(self):
+        r = self.create_ticket(user=self.other_client, order=str(self.order.id))
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("introuvable", str(r.data))
+
+    def test_produit_non_achete_refuse(self):
+        self.assertEqual(self.create_ticket(user=self.other_client, product=self.produit.id).status_code, 400)
+
+    def test_produit_hors_de_la_commande_citee_refuse(self):
+        autre = Commande.objects.create(boutique=self.boutique, client=self.client_user, montant_total=Decimal("1"))
+        self.assertEqual(self.create_ticket(order=str(autre.id), product=self.produit.id).status_code, 400)
+
+    def test_boutique_hors_du_ticket_pour_une_question_de_paiement(self):
+        r = self.create_ticket(order=str(self.order.id), category="payment")
+        self.assertIsNone(SupportTicket.objects.get(pk=r.data["id"]).vendor_id)
+        self.as_user(self.vendor_user)
+        self.assertEqual(self.client.get(f"{URL}tickets/{r.data['id']}/").status_code, 404)
+
+    def test_boutique_voit_le_litige_produit(self):
+        r = self.create_ticket(product=self.produit.id)
+        self.as_user(self.vendor_user)
+        self.assertEqual(self.client.get(f"{URL}tickets/{r.data['id']}/").status_code, 200)
+
+    def test_commande_et_produit_immuables(self):
+        r = self.create_ticket(order=str(self.order.id))
+        self.as_user(self.admin_user)
+        autre = Commande.objects.create(boutique=self.boutique, client=self.client_user, montant_total=Decimal("1"))
+        self.client.patch(f"{URL}tickets/{r.data['id']}/", {"order": str(autre.id), "priority": "high"}, format="json")
+        ticket = SupportTicket.objects.get(pk=r.data["id"])
+        self.assertEqual((ticket.order_id, ticket.priority), (self.order.id, "high"))
+
+
+class NotesInternesTests(SupportDiagnosticBase):
+    """S-c / S5 : le staff écrit des notes internes, jamais le client."""
+
+    def test_staff_cree_une_note_interne_invisible_du_client(self):
+        r = self.post_message(self.agent, "Vérifier le transporteur", is_internal_note=True)
+        self.assertEqual(r.status_code, 201)
+        self.assertTrue(TicketMessage.objects.get(pk=r.data["id"]).is_internal_note)
+        self.as_user(self.client_user)
+        ids = [m["id"] for m in self.client.get(f"{URL}tickets/{self.ticket.id}/messages/").data["results"]]
+        self.assertNotIn(r.data["id"], ids)
+
+    def test_client_ne_cree_pas_de_note_interne(self):
+        r = self.post_message(self.client_user, "Je cache ceci", is_internal_note=True)
+        self.assertFalse(TicketMessage.objects.get(pk=r.data["id"]).is_internal_note)
+
+
+class PiecesJointesTests(SupportDiagnosticBase):
+    """S-d / S6 : pièces jointes sur ses propres messages, jamais sur une
+    note interne, type calculé, nom UUID, 5 au plus, téléchargement contrôlé."""
+
+    def setUp(self):
+        super().setUp()
+        self.message = TicketMessage.objects.create(ticket_link=self.ticket, author=self.client_user,
+                                                    author_role="client", content="Voici la photo")
+        self.note = TicketMessage.objects.create(ticket_link=self.ticket, author=self.agent, author_role="support",
+                                                 content="interne", is_internal_note=True)
+
+    def upload(self, user, message=None, fichier=None, **extra):
+        self.as_user(user)
+        return self.client.post(f"{URL}messages/{(message or self.message).id}/attachments/",
+                                {"file": fichier or png(), **extra}, format="multipart")
+
+    def test_note_interne_invisible_et_fermee_au_client(self):
+        self.as_user(self.client_user)
+        self.assertEqual(self.client.get(f"{URL}messages/{self.note.id}/attachments/").status_code, 404)
+        self.assertEqual(self.upload(self.client_user, message=self.note).status_code, 404)
+
+    def test_pas_de_piece_jointe_sur_le_message_d_un_autre(self):
+        reponse = TicketMessage.objects.create(ticket_link=self.ticket, author=self.agent, author_role="support",
+                                               content="Réponse")
+        self.assertEqual(self.upload(self.client_user, message=reponse).status_code, 403)
+
+    def test_type_calcule_et_nom_uuid(self):
+        r = self.upload(self.client_user, fichier=png("Aya_Konan_facture.png"), file_type="other")
+        self.assertEqual(r.status_code, 201, r.data)
+        piece = TicketAttachment.objects.get(pk=r.data["id"])
+        self.assertEqual((piece.file_type, piece.original_filename), ("image", "Aya_Konan_facture.png"))
+        self.assertNotIn("Aya_Konan", piece.file.name)
+        self.assertTrue(piece.file.name.startswith("support/pieces_jointes/"))
+
+    def test_cinq_pieces_au_plus(self):
+        for _ in range(5):
+            self.assertEqual(self.upload(self.client_user).status_code, 201)
+        self.assertEqual(self.upload(self.client_user).status_code, 400)
+
+    def test_faux_fichier_refuse(self):
+        faux = SimpleUploadedFile("facture.pdf", b"MZ\x90\x00 executable", content_type="application/pdf")
+        self.assertEqual(self.upload(self.client_user, fichier=faux).status_code, 400)
+
+    def test_ticket_ferme(self):
+        SupportTicket.objects.filter(pk=self.ticket.pk).update(status="closed")
+        self.assertEqual(self.upload(self.client_user).status_code, 400)
+
+    def test_telechargement_controle(self):
+        r = self.upload(self.client_user)
+        url = r.data["file"]
+        self.assertIn(f"/api/support/attachments/{r.data['id']}/", url)
+        for user, attendu in ((self.client_user, 200), (self.agent, 200), (self.admin_user, 200),
+                              (self.other_client, 404), (self.vendor_user, 404)):
+            with self.subTest(user=user.email):
+                self.as_user(user)
+                self.assertEqual(self.client.get(url).status_code, attendu)
+        self.client.force_authenticate(user=None)
+        self.assertEqual(self.client.get(url).status_code, 401)
+
+    def test_piece_d_une_note_interne_jamais_telechargee_par_le_client(self):
+        piece = TicketAttachment.objects.create(message=self.note, file=png(), original_filename="n.png", file_size=10)
+        self.as_user(self.client_user)
+        self.assertEqual(self.client.get(f"{URL}attachments/{piece.id}/").status_code, 404)
+
+
+class StatutsEtAssignationTests(SupportDiagnosticBase):
+    """S-e / S2 / S3 : table de transitions, prise en charge, réassignation."""
+
+    def test_ferme_est_definitif(self):
+        self.assertEqual(self.set_status(self.agent, "closed").status_code, 200)
+        self.assertEqual(self.set_status(self.admin_user, "open").status_code, 400)
+        self.assertEqual(self.set_status(self.admin_user, "in_progress").status_code, 400)
+
+    def test_retour_a_open_impossible(self):
+        self.set_status(self.agent, "in_progress")
+        self.assertEqual(self.set_status(self.agent, "open").status_code, 400)
+
+    def test_l_agent_qui_agit_prend_le_ticket(self):
+        self.set_status(self.agent, "in_progress")
+        self.ticket.refresh_from_db()
+        self.assertEqual(self.ticket.assigned_to, self.agent)
+        # Le second agent ne le voit plus.
+        self.assertEqual(self.set_status(self.agent2, "resolved").status_code, 404)
+
+    def test_prise_en_charge_explicite(self):
+        self.as_user(self.agent)
+        self.assertEqual(self.client.post(f"{URL}tickets/{self.ticket.id}/assign/").status_code, 200)
+        self.as_user(self.agent2)
+        self.assertEqual(self.client.post(f"{URL}tickets/{self.ticket.id}/assign/").status_code, 404)
+
+    def test_agent_ne_reassigne_pas_a_un_autre(self):
+        self.as_user(self.agent)
+        r = self.client.post(f"{URL}tickets/{self.ticket.id}/assign/", {"assigned_to": self.agent2.pk}, format="json")
+        self.assertEqual(r.status_code, 403)
+
+    def test_administration_reassigne(self):
+        self.as_user(self.admin_user)
+        r = self.client.post(f"{URL}tickets/{self.ticket.id}/assign/", {"assigned_to": self.agent2.pk}, format="json")
+        self.assertEqual((r.status_code, r.data["assigned_to"]), (200, self.agent2.pk))
+        r = self.client.post(f"{URL}tickets/{self.ticket.id}/assign/", {"assigned_to": self.client_user.pk}, format="json")
+        self.assertEqual(r.status_code, 400)
+
+    def test_client_n_assigne_pas(self):
+        self.as_user(self.client_user)
+        self.assertEqual(self.client.post(f"{URL}tickets/{self.ticket.id}/assign/").status_code, 403)
+
+    def test_note_seulement_une_fois_resolu(self):
+        self.as_user(self.client_user)
+        url = f"{URL}tickets/{self.ticket.id}/rate/"
+        self.assertEqual(self.client.patch(url, {"satisfaction_rating": 5}, format="json").status_code, 400)
+        self.set_status(self.agent, "resolved")
+        self.as_user(self.client_user)
+        self.assertEqual(self.client.patch(url, {"satisfaction_rating": 5}, format="json").status_code, 200)
+
+
+class FilDeDiscussionTests(SupportDiagnosticBase):
+    """S-g / S-h : ticket fermé, statut automatique, lecture, notifications."""
+
+    def test_message_sur_ticket_ferme_refuse(self):
+        SupportTicket.objects.filter(pk=self.ticket.pk).update(status="closed")
+        self.assertEqual(self.post_message(self.client_user).status_code, 400)
+
+    def test_reponse_du_client_relance_le_ticket(self):
+        self.set_status(self.agent, "waiting_customer")
+        self.post_message(self.client_user, "Voici le numéro de suivi")
+        self.ticket.refresh_from_db()
+        self.assertEqual(self.ticket.status, "in_progress")
+
+    def test_premiere_reponse_du_support(self):
+        self.post_message(self.agent, "Nous regardons.")
+        self.ticket.refresh_from_db()
+        self.assertEqual((self.ticket.status, self.ticket.assigned_to), ("in_progress", self.agent))
+        self.assertTrue(Notification.objects.filter(destinataire=self.client_user, type_notification="support").exists())
+
+    def test_reponse_du_client_notifie_l_agent(self):
+        self.post_message(self.agent, "Nous regardons.")
+        self.post_message(self.client_user, "Merci")
+        self.assertTrue(Notification.objects.filter(destinataire=self.agent, type_notification="support").exists())
+
+    def test_nouveau_ticket_annonce_a_l_equipe(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            r = self.create_ticket(category="other")
+        for agent in (self.agent, self.agent2):
+            self.assertTrue(Notification.objects.filter(destinataire=agent, metadata__ticket_id=r.data["id"]).exists())
+
+    def test_messages_marques_lus_par_l_autre_partie(self):
+        message = self.post_message(self.agent, "Réponse").data
+        self.as_user(self.client_user)
+        self.client.get(f"{URL}tickets/{self.ticket.id}/messages/")
+        self.assertIsNotNone(TicketMessage.objects.get(pk=message["id"]).read_at)
+
+
+class LimitesDeDebitTests(SupportDiagnosticBase):
+    """S-h : limites dédiées (vraies valeurs de base.py)."""
+
+    def test_creation_de_tickets_limitee(self):
+        from apps.core.tests import taux_de_production
+
+        cache.clear()
+        taux = taux_de_production()
+        n = int(taux["support_ticket"].split("/")[0])
+        with patch.object(SimpleRateThrottle, "THROTTLE_RATES", taux):
+            codes = [self.create_ticket(category="other").status_code for _ in range(n + 1)]
+            self.assertEqual(self.client.get(f"{URL}tickets/").status_code, 200)
+        self.assertEqual(codes, [201] * n + [429])

@@ -201,6 +201,15 @@ REST_FRAMEWORK = {
         # par code) et contestations « non reçu » du client.
         'livraison_statut': '120/hour',
         'livraison_contestation': '10/hour',
+        # Retours, par utilisateur : demandes (un client en fait rarement
+        # plus d'une par commande) et photos justificatives (5 par demande).
+        'retour_creation': '10/hour',
+        'retour_photo': '30/hour',
+        # Support, par utilisateur : tickets, messages d'un fil de discussion
+        # et pièces jointes (5 par message au plus).
+        'support_ticket': '10/hour',
+        'support_message': '60/hour',
+        'support_piece_jointe': '20/hour',
     },
     # Sans cette ligne, config/exceptions.py::custom_exception_handler
     # n'est jamais appelé : les 500 utilisent le handler DRF par défaut.
@@ -268,6 +277,11 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'apps.paiements.tasks.rendre_reversements_disponibles',
         'schedule': crontab(minute=10),
     },
+    # Même délai écoulé : points de fidélité en attente crédités (apps.fidelite).
+    'fidelite-crediter-points-echus': {
+        'task': 'apps.fidelite.tasks.crediter_points_echus',
+        'schedule': crontab(minute=15),
+    },
     'utilisateurs-purger-tokens-expires': {
         'task': 'apps.utilisateurs.tasks.purger_tokens_expires',
         'schedule': crontab(hour=3, minute=15),
@@ -324,6 +338,9 @@ CINETPAY_TIMEOUT = config('CINETPAY_TIMEOUT', default=10, cast=int)
 BACKEND_BASE_URL = config('BACKEND_BASE_URL', default='http://localhost:8000')
 # Reversement au vendeur : N jours après la livraison confirmée.
 REVERSEMENT_DELAI_RETRACTATION_JOURS = config('REVERSEMENT_DELAI_RETRACTATION_JOURS', default=7, cast=int)
+# Retours : une demande est possible jusqu'à N jours après la livraison
+# (apps.retours). Même valeur que le délai de rétractation par défaut.
+RETOUR_DELAI_JOURS = config('RETOUR_DELAI_JOURS', default=7, cast=int)
 # Livraison : passages « en cours » possibles (première tentative comprise)
 # avant l'abandon par l'administration (commande annulée, remboursement).
 LIVRAISON_TENTATIVES_MAX = config('LIVRAISON_TENTATIVES_MAX', default=3, cast=int)

@@ -31,8 +31,6 @@ class PreferenceNotificationSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "email_actif",
-            "sms_actif",
-            "in_app_actif",
             "date_mise_a_jour",
         ]
         read_only_fields = ["id", "date_mise_a_jour"]

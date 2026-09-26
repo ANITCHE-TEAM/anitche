@@ -55,6 +55,11 @@ REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {
     'catalogue_public': '100000/day',
     'livraison_statut': '100000/day',
     'livraison_contestation': '100000/day',
+    'retour_creation': '100000/day',
+    'retour_photo': '100000/day',
+    'support_ticket': '100000/day',
+    'support_message': '100000/day',
+    'support_piece_jointe': '100000/day',
 }
 # Cache en mémoire rapide pour les tests
 CACHES = {

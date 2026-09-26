@@ -14,7 +14,7 @@ from cryptography.fernet import Fernet
 from django.conf import settings
 from django.core.cache import cache
 from django.db import connection
-from django.test import TransactionTestCase
+from django.test import TransactionTestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
 from rest_framework.throttling import AnonRateThrottle, SimpleRateThrottle
@@ -259,7 +259,8 @@ class NotificationTests(Donnees, APITestCase):
         self.assertEqual(self.commande.status, Commande.Status.CONFIRMEE)
         self.assertTrue(Livraison.objects.filter(commande=self.commande).exists())
         self.assertEqual(Reversement.objects.get(commande=self.commande).statut, Reversement.Statut.EN_ATTENTE_LIVRAISON)
-        self.assertEqual(CompteFidelite.objects.get(utilisateur=self.client1).solde_points, 15)
+        # Aucun point au paiement : ils naissent à la livraison (apps.fidelite, F1).
+        self.assertFalse(CompteFidelite.objects.filter(utilisateur=self.client1, solde_points__gt=0).exists())
         self.assertTrue(est_payee(self.commande))
 
     def test_signature_manquante_invalide_ou_expiree(self):
@@ -278,7 +279,8 @@ class NotificationTests(Donnees, APITestCase):
         r = self.notifier_succes(self.paiement, evenement_id="evt-1")
         self.assertEqual((r.status_code, r.data["message"]), (200, "Événement déjà traité."))
         self.assertEqual(JournalWebhook.objects.filter(evenement_id="evt-1").count(), 1)
-        self.assertEqual(CompteFidelite.objects.get(utilisateur=self.client1).solde_points, 15)
+        # Aucun point au paiement : ils naissent à la livraison (apps.fidelite, F1).
+        self.assertFalse(CompteFidelite.objects.filter(utilisateur=self.client1, solde_points__gt=0).exists())
 
     def test_D03_notification_d_un_autre_fournisseur_refusee(self):
         Paiement.objects.filter(pk=self.paiement.pk).update(fournisseur="cinetpay")
@@ -310,7 +312,8 @@ class NotificationTests(Donnees, APITestCase):
         self.notifier(self.paiement.reference, statut="echec")
         self.paiement.refresh_from_db()
         self.assertEqual(self.paiement.statut, Paiement.Statut.VALIDE)
-        self.assertEqual(CompteFidelite.objects.get(utilisateur=self.client1).solde_points, 15)
+        # Aucun point au paiement : ils naissent à la livraison (apps.fidelite, F1).
+        self.assertFalse(CompteFidelite.objects.filter(utilisateur=self.client1, solde_points__gt=0).exists())
         self.assertEqual(Notification.objects.filter(destinataire=self.client1, titre="Paiement confirmé").count(), 1)
 
     def test_echec_puis_nouveau_paiement(self):
@@ -477,7 +480,8 @@ class ConcurrenceTests(Donnees, TransactionTestCase):
         paiement = self.payer(self.commande)
         codes = self.en_parallele(lambda i: self.notifier_succes(paiement, evenement_id=f"evt-c{i}").status_code, 3)
         self.assertEqual(codes, [200, 200, 200])
-        self.assertEqual(CompteFidelite.objects.get(utilisateur=self.client1).solde_points, 15)
+        # Aucun point au paiement : ils naissent à la livraison (apps.fidelite, F1).
+        self.assertFalse(CompteFidelite.objects.filter(utilisateur=self.client1, solde_points__gt=0).exists())
         self.assertEqual(Reversement.objects.count(), 1)
         self.assertEqual(Notification.objects.filter(destinataire=self.client1, titre="Paiement confirmé").count(), 1)
 
@@ -572,6 +576,9 @@ class ReversementTests(Donnees, APITestCase):
         commande = commande or self.commande
         Commande.objects.filter(pk=commande.pk).update(status=Commande.Status.EXPEDIEE)
         synchroniser_depuis_livraison(commande, "livree")
+        # Date de remise du colis : sert au délai de retour (apps.retours).
+        Livraison.objects.filter(commande=commande).update(
+            status=Livraison.Status.LIVREE, date_livraison=timezone.now() - timedelta(days=il_y_a_jours))
         if il_y_a_jours:
             Reversement.objects.filter(commande=commande).update(
                 date_disponibilite=timezone.now() - timedelta(days=il_y_a_jours - 7))
@@ -597,7 +604,10 @@ class ReversementTests(Donnees, APITestCase):
         self.assertEqual(reversements.rendre_disponibles(attendu - timedelta(minutes=1)), 0)
         self.assertEqual(reversements.rendre_disponibles(attendu), 1)
 
+    @override_settings(RETOUR_DELAI_JOURS=30)
     def test_retour_ouvert_suspend_puis_rejet_reprend(self):
+        # Délai de retour configuré plus long que la rétractation : un retour
+        # peut s'ouvrir sur un reversement déjà disponible.
         self.livrer(il_y_a_jours=8)
         self.assertEqual(self.reversement.statut, Reversement.Statut.DISPONIBLE)
         api = self.api(self.client1)
@@ -608,7 +618,9 @@ class ReversementTests(Donnees, APITestCase):
         self.assertEqual(r.status_code, 201, r.data)
         self.reversement.refresh_from_db()
         self.assertEqual(self.reversement.statut, Reversement.Statut.SUSPENDU)
-        self.api(self.vendeur1).patch(f"/api/retours/{r.data['id']}/traiter/", {"action": "rejeter"}, format="json")
+        r = self.api(self.vendeur1).patch(f"/api/retours/{r.data['id']}/traiter/",
+                                          {"action": "rejeter", "reponse": "Article intact au déballage."}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
         self.reversement.refresh_from_db()
         self.assertEqual(self.reversement.statut, Reversement.Statut.DISPONIBLE)
 

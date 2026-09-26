@@ -23,7 +23,7 @@ try:
                 f"a été validé avec succès. Vos articles sont en cours de préparation."
             ),
             type_notification=Notification.TypeNotification.PAIEMENT,
-            lien_redirection=f"/commandes/{commandes[0].id if len(commandes) == 1 else ''}",
+            lien_redirection=f"/commandes/{commandes[0].id}" if len(commandes) == 1 else "/commandes",
             metadata={"paiement_id": str(paiement.id), "reference": paiement.reference},
         )
 
@@ -56,7 +56,8 @@ try:
     def notifier_changement_statut_livraison(sender, livraison, ancien_status, nouveau_status, **kwargs):
         """Notifie le client à chaque étape d'avancement de sa livraison."""
         client = getattr(getattr(livraison, "commande", None), "client", None)
-        # Annulation : c'est l'annulation de la commande qui informe le client.
+        # Annulation : c'est l'annulation de la commande qui informe le client
+        # (notifications.services.notifier_annulation_commande).
         if not client or nouveau_status == "annulee":
             return
 

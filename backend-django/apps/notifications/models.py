@@ -68,6 +68,11 @@ class Notification(models.Model):
         verbose_name = "Notification"
         verbose_name_plural = "Notifications"
         ordering = ["-date_creation"]
+        indexes = [
+            # Liste et compteur d'un utilisateur : la table grossit de
+            # plusieurs lignes par commande, sans purge pour l'instant.
+            models.Index(fields=["destinataire", "-date_creation"], name="notif_destinataire_date"),
+        ]
 
     def __str__(self):
         return f"[{self.get_type_notification_display()}] {self.titre} -> {self.destinataire.email}"
@@ -88,7 +93,9 @@ class Notification(models.Model):
 
 
 class PreferenceNotification(models.Model):
-    """Préférences de réception des notifications par canal pour chaque utilisateur."""
+    """Préférence de réception par email. L'in-app est toujours actif (c'est
+    l'historique du compte : remboursement, livraison, retours) ; il n'existe
+    pas encore de canal SMS."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
@@ -99,9 +106,10 @@ class PreferenceNotification(models.Model):
         verbose_name="Utilisateur",
     )
 
-    email_actif = models.BooleanField(default=True, help_text="Recevoir les notifications importantes par email")
-    sms_actif = models.BooleanField(default=True, help_text="Recevoir les notifications urgentes et OTP par SMS")
-    in_app_actif = models.BooleanField(default=True, help_text="Recevoir les alertes dans le centre de notifications in-app")
+    email_actif = models.BooleanField(
+        default=True,
+        help_text="Recevoir les notifications par email (hors emails indispensables : code de livraison, sécurité du compte)",
+    )
 
     date_mise_a_jour = models.DateTimeField(auto_now=True)
 

@@ -63,30 +63,6 @@ class BaseFideliteTestCase(APITestCase):
 
 class FideliteAPITestCase(BaseFideliteTestCase):
 
-    def test_gain_points_sur_validation_paiement(self):
-        paiement = Paiement.objects.create(
-            client=self.client1,
-            commande=self.commande,
-            montant=Decimal("25000.00"),
-            methode=Paiement.Methode.WAVE,
-            adresse_livraison="Cocody, Abidjan",
-        )
-        paiement.commandes.add(self.commande)
-
-        # Validation du paiement -> émet le signal paiement_valide
-        valider_paiement(paiement)
-
-        compte = CompteFidelite.objects.get(utilisateur=self.client1)
-        # 25 000 FCFA // 1000 = 25 points
-        self.assertEqual(compte.solde_points, 25)
-        self.assertEqual(compte.points_cumules_total, 25)
-        self.assertEqual(compte.palier, CompteFidelite.Palier.BRONZE)
-
-        # Vérification de la transaction enregistrée
-        transaction = TransactionFidelite.objects.get(compte=compte)
-        self.assertEqual(transaction.points, 25)
-        self.assertEqual(transaction.type_transaction, TransactionFidelite.TypeTransaction.GAIN)
-
     def test_paliers_fidelite_evolution(self):
         compte, _ = CompteFidelite.objects.get_or_create(utilisateur=self.client1)
 
@@ -199,8 +175,9 @@ class FideliteAPITestCase(BaseFideliteTestCase):
             "montant_commande": "20000.00",
         }
 
+        # F5 : même réponse qu'un code inexistant (404), sans révéler le coupon.
         response = self.client.post(url, data, format="json")
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertFalse(response.data["valide"])
 
 
@@ -274,134 +251,295 @@ class FideliteThrottleTestCase(BaseFideliteTestCase):
             self.assertEqual(deuxieme.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
 
 
-class FideliteRemboursementTestCase(BaseFideliteTestCase):
-    """Sécurité (A04:2025 — Insecure Design) : un remboursement de retour
-    doit reprendre les points de fidélité gagnés sur la part remboursée,
-    sinon un client peut accumuler des points sans risque financier réel
-    en achetant puis en se faisant systématiquement rembourser."""
+# =====================================================================
+# Diagnostic de septembre 2026 : un test par faille confirmée
+# (docs/MODULE_FIDELITE.md, § Sécurité).
+# =====================================================================
 
-    def _creer_retour_rembourse(self, montant_remboursement, client=None):
-        """Simule directement l'émission du signal de remboursement, sans
-        repasser par toute la machine à états de TraiterDemandeRetourView :
-        c'est le signal lui-même (et son écouteur côté fidelite) qui est
-        sous test ici, pas le flux retours dans son ensemble (déjà testé
-        dans apps.retours.tests)."""
+from datetime import timedelta
+
+from django.contrib.admin.sites import AdminSite
+from django.db import IntegrityError, transaction as transaction_db
+from django.test import RequestFactory
+from django.utils import timezone
+
+from apps.catalogue.models import Produit, VarianteProduit
+from apps.commandes.models import CommandeItem, GroupeCommande
+from apps.commandes.services import annuler_commande, synchroniser_depuis_livraison
+from apps.livraison.models import ContestationLivraison, Livraison
+from apps.paiements import reversements
+from .models import GainFidelite, UtilisationCoupon
+from . import services
+from .tasks import crediter_points_echus
+
+
+class GainsBase(BaseFideliteTestCase):
+    """Commande de 25 000 FCFA payée (25 points à terme)."""
+
+    def setUp(self):
+        super().setUp()
+        produit = Produit.objects.create(boutique=self.boutique, nom="Panier tressé", prix_base=Decimal("12500"))
+        self.variante = VarianteProduit.objects.create(produit=produit, nom="Grand", prix=Decimal("12500"))
+        self.article = CommandeItem.objects.create(
+            commande=self.commande, variante=self.variante, nom_produit="Panier tressé",
+            prix_unitaire=Decimal("12500"), quantite=2,
+        )
+        self.paiement = Paiement.objects.create(
+            client=self.client1, montant=Decimal("25000"), fournisseur="simule",
+            methode=Paiement.Methode.WAVE, adresse_livraison="Cocody",
+        )
+        self.paiement.commandes.add(self.commande)
+        valider_paiement(self.paiement)
+        self.commande.refresh_from_db()
+
+    def livrer(self):
+        Commande.objects.filter(pk=self.commande.pk).update(status=Commande.Status.EXPEDIEE)
+        synchroniser_depuis_livraison(self.commande, "livree")
+        Livraison.objects.filter(commande=self.commande).update(status=Livraison.Status.LIVREE, date_livraison=timezone.now())
+        return GainFidelite.objects.get(commande=self.commande)
+
+    def solde(self):
+        compte = CompteFidelite.objects.filter(utilisateur=self.client1).first()
+        return compte.solde_points if compte else 0
+
+    def plus_tard(self, jours=8):
+        return timezone.now() + timedelta(days=jours)
+
+    def retour_rembourse(self, montant, quantite=1):
         demande = DemandeRetour.objects.create(
-            commande=self.commande,
-            client=client or self.client1,
-            boutique=self.boutique,
-            description="Produit défectueux, remboursement demandé.",
-            montant_remboursement=montant_remboursement,
-            statut=DemandeRetour.Statut.RECEPTIONNE,
+            commande=self.commande, client=self.client1, boutique=self.boutique, description="Défaut constaté",
+            montant_remboursement=Decimal(montant), statut=DemandeRetour.Statut.REMBOURSE,
         )
-        demande.statut = DemandeRetour.Statut.REMBOURSE
-        demande.save(update_fields=["statut"])
-
-        retour_status_change.send(
-            sender=DemandeRetour,
-            demande_retour=demande,
-            ancien_statut=DemandeRetour.Statut.RECEPTIONNE,
-            nouveau_statut=DemandeRetour.Statut.REMBOURSE,
-        )
+        retour_status_change.send(sender=DemandeRetour, demande_retour=demande,
+                                  ancien_statut=DemandeRetour.Statut.RECEPTIONNE,
+                                  nouveau_statut=DemandeRetour.Statut.REMBOURSE, action="rembourser")
         return demande
 
-    def test_reprise_integrale_des_points_gagnes_sur_achat_rembourse(self):
-        """25 000 FCFA payés puis intégralement remboursés -> les 25 points
-        gagnés au paiement doivent être intégralement repris."""
-        paiement = Paiement.objects.create(
-            client=self.client1,
-            commande=self.commande,
-            montant=Decimal("25000.00"),
-            methode=Paiement.Methode.WAVE,
-            adresse_livraison="Cocody, Abidjan",
-        )
-        paiement.commandes.add(self.commande)
-        valider_paiement(paiement)
 
-        compte = CompteFidelite.objects.get(utilisateur=self.client1)
-        self.assertEqual(compte.solde_points, 25)
+class PointsEnAttenteTests(GainsBase):
+    """F-b / F1 : plus aucun point au paiement ; « en attente » à la
+    livraison, crédités à la fin du délai de rétractation."""
 
-        demande = self._creer_retour_rembourse(Decimal("25000.00"))
+    def test_aucun_point_au_paiement(self):
+        self.assertEqual(self.solde(), 0)
+        self.assertFalse(GainFidelite.objects.exists())
 
-        compte.refresh_from_db()
-        self.assertEqual(compte.solde_points, 0)
+    def test_annulation_apres_paiement_ne_laisse_aucun_point(self):
+        annuler_commande(self.commande, Commande.MotifAnnulation.CLIENT, acteur=self.client1)
+        self.assertEqual(self.solde(), 0)
+        self.assertEqual(services.crediter_gains_echus(self.plus_tard(30)), 0)
+        self.assertFalse(GainFidelite.objects.exists())
 
-        reprise = TransactionFidelite.objects.filter(
-            compte=compte, reference_externe=demande.numero_retour
-        ).first()
-        self.assertIsNotNone(reprise)
-        self.assertEqual(reprise.points, -25)
-        self.assertEqual(reprise.type_transaction, TransactionFidelite.TypeTransaction.AJUSTEMENT_ADMIN)
+    def test_livraison_ouvre_un_gain_en_attente_visible_du_client(self):
+        gain = self.livrer()
+        self.assertEqual((gain.points, gain.statut), (25, GainFidelite.Statut.EN_ATTENTE))
+        self.assertEqual(self.solde(), 0)
+        self.client.force_authenticate(user=self.client1)
+        compte = self.client.get(reverse("fidelite:fidelite-mon-compte")).data
+        self.assertEqual((compte["solde_points"], compte["points_en_attente"]), (0, 25))
+        liste = self.client.get(reverse("fidelite:fidelite-gains")).data["results"]
+        self.assertEqual((liste[0]["numero_commande"], liste[0]["statut"]), (self.commande.numero_commande, "en_attente"))
 
-    def test_reprise_plafonnee_si_points_deja_depenses(self):
-        """Si le client a déjà converti ses points en coupon avant le
-        remboursement, la reprise doit se limiter au solde encore
-        disponible (jamais lever d'erreur ni faire échouer le retour)."""
+    def test_credit_a_la_fin_du_delai_une_seule_fois(self):
+        self.livrer()
+        self.assertEqual(services.crediter_gains_echus(), 0)  # délai pas écoulé
+        self.assertEqual(services.crediter_gains_echus(self.plus_tard()), 1)
+        self.assertEqual(services.crediter_gains_echus(self.plus_tard()), 0)
+        self.assertEqual(self.solde(), 25)
+        self.assertEqual(TransactionFidelite.objects.filter(type_transaction="gain").count(), 1)
+
+    def test_tache_periodique(self):
+        gain = self.livrer()
+        GainFidelite.objects.filter(pk=gain.pk).update(date_disponibilite=timezone.now() - timedelta(minutes=1))
+        self.assertIn("1 gain", crediter_points_echus())
+        self.assertEqual(self.solde(), 25)
+
+    def test_livraison_rejouee_un_seul_gain(self):
+        self.livrer()
+        self.assertIsNone(services.ouvrir_gain(self.commande))
+        self.assertEqual(GainFidelite.objects.count(), 1)
+
+    def test_commande_creditee_au_paiement_avant_la_refonte_pas_de_second_gain(self):
         compte, _ = CompteFidelite.objects.get_or_create(utilisateur=self.client1)
-        compte.crediter_points(25, description="Gain simulé")
-        # Le client dépense la totalité de son solde avant le remboursement.
-        compte.debiter_points(25, description="Conversion en coupon")
-        self.assertEqual(compte.solde_points, 0)
+        compte.crediter_points(25, reference_externe=self.paiement.reference)
+        Commande.objects.filter(pk=self.commande.pk).update(status=Commande.Status.EXPEDIEE)
+        synchroniser_depuis_livraison(self.commande, "livree")
+        self.assertFalse(GainFidelite.objects.exists())
 
-        demande = self._creer_retour_rembourse(Decimal("25000.00"))
+    def test_contestation_fondee_annule_les_points_en_attente(self):
+        from apps.livraison.services import resoudre_contestation
 
-        compte.refresh_from_db()
-        # Rien à reprendre (solde déjà à 0) : ne doit pas passer en négatif,
-        # et ne doit pas avoir levé d'exception dans le récepteur du signal.
-        self.assertEqual(compte.solde_points, 0)
+        self.livrer()
+        admin = Utilisateur.objects.create_user(email="admin.fid@anitche.ci", password="TestPassword123!",
+                                                nom="A", prenom="D", role=Role.ADMIN)
+        livraison = Livraison.objects.get(commande=self.commande)
+        ContestationLivraison.objects.create(livraison=livraison, motif="Colis jamais reçu")
+        self.assertEqual(services.crediter_gains_echus(self.plus_tard()), 0)  # contestation ouverte : attente
+        resoudre_contestation(livraison, admin, ContestationLivraison.Statut.FONDEE)
+        self.assertEqual(GainFidelite.objects.get().statut, GainFidelite.Statut.ANNULE)
+        self.assertEqual(services.crediter_gains_echus(self.plus_tard()), 0)
+        self.assertEqual(self.solde(), 0)
 
-    def test_pas_de_reprise_si_client_absent(self):
-        """Un GroupeCommande sans client (SET_NULL) ne doit jamais faire
-        planter le récepteur du signal."""
-        demande = DemandeRetour.objects.create(
-            commande=self.commande,
-            client=self.client1,
-            boutique=self.boutique,
-            description="Test",
-            montant_remboursement=Decimal("25000.00"),
-            statut=DemandeRetour.Statut.RECEPTIONNE,
-        )
-        demande.client = None
-        # Émission directe du signal avec un objet dont client a été mis à
-        # None en mémoire (sans toucher la FK réelle en base, non-nullable
-        # ici) : vérifie uniquement que le garde-fou `if not client: return`
-        # est bien atteint sans lever d'exception.
-        retour_status_change.send(
-            sender=DemandeRetour,
-            demande_retour=demande,
-            ancien_statut=DemandeRetour.Statut.RECEPTIONNE,
-            nouveau_statut=DemandeRetour.Statut.REMBOURSE,
-        )
+    def test_retour_ouvert_retarde_le_credit(self):
+        self.livrer()
+        DemandeRetour.objects.create(commande=self.commande, client=self.client1, boutique=self.boutique,
+                                     description="Défaut constaté", montant_remboursement=Decimal("12500"))
+        self.assertEqual(services.crediter_gains_echus(self.plus_tard()), 0)
 
-    def test_pas_de_reprise_sur_transition_non_remboursement(self):
-        """Une transition vers un autre statut (ex: 'approuve') ne doit
-        jamais déclencher de reprise de points."""
-        paiement = Paiement.objects.create(
-            client=self.client1,
-            commande=self.commande,
-            montant=Decimal("25000.00"),
-            methode=Paiement.Methode.WAVE,
-            adresse_livraison="Cocody, Abidjan",
-        )
-        paiement.commandes.add(self.commande)
-        valider_paiement(paiement)
-        compte = CompteFidelite.objects.get(utilisateur=self.client1)
-        self.assertEqual(compte.solde_points, 25)
 
-        demande = DemandeRetour.objects.create(
-            commande=self.commande,
-            client=self.client1,
-            boutique=self.boutique,
-            description="Test",
-            montant_remboursement=Decimal("25000.00"),
-            statut=DemandeRetour.Statut.APPROUVE,
-        )
-        retour_status_change.send(
-            sender=DemandeRetour,
-            demande_retour=demande,
-            ancien_statut=DemandeRetour.Statut.DEMANDE,
-            nouveau_statut=DemandeRetour.Statut.APPROUVE,
-        )
+class RetourEtPointsTests(GainsBase):
+    """F-c / F2 : retour pendant l'attente → points recalculés ; après le
+    crédit → reprise plafonnée, une seule fois par retour."""
 
-        compte.refresh_from_db()
-        self.assertEqual(compte.solde_points, 25)
+    def test_retour_partiel_pendant_l_attente(self):
+        self.livrer()
+        self.retour_rembourse("12500")
+        self.assertEqual(GainFidelite.objects.get().points, 12)
+        services.crediter_gains_echus(self.plus_tard())
+        self.assertEqual(self.solde(), 12)
+
+    def test_retour_total_pendant_l_attente_annule_le_gain(self):
+        self.livrer()
+        self.retour_rembourse("25000")
+        self.assertEqual(GainFidelite.objects.get().statut, GainFidelite.Statut.ANNULE)
+        self.assertEqual(services.crediter_gains_echus(self.plus_tard()), 0)
+
+    def test_signal_rejoue_pendant_l_attente_idempotent(self):
+        self.livrer()
+        demande = self.retour_rembourse("12500")
+        services.appliquer_retour_rembourse(demande)
+        self.assertEqual(GainFidelite.objects.get().points, 12)
+
+    def test_reprise_apres_credit_une_seule_fois(self):
+        self.livrer()
+        services.crediter_gains_echus(self.plus_tard())
+        demande = self.retour_rembourse("12500")
+        services.appliquer_retour_rembourse(demande)  # rejeu
+        self.assertEqual(self.solde(), 25 - 12)
+        self.assertEqual(TransactionFidelite.objects.filter(type_transaction="reprise").count(), 1)
+
+    def test_reprise_plafonnee_au_solde(self):
+        self.livrer()
+        services.crediter_gains_echus(self.plus_tard())
+        CompteFidelite.objects.get(utilisateur=self.client1).debiter_points(20, reference_externe="FID-TEST")
+        self.retour_rembourse("25000")
+        self.assertEqual(self.solde(), 0)
+
+    def test_transition_autre_que_rembourse_ignoree(self):
+        self.livrer()
+        demande = DemandeRetour.objects.create(commande=self.commande, client=self.client1, boutique=self.boutique,
+                                               description="x", montant_remboursement=Decimal("25000"),
+                                               statut=DemandeRetour.Statut.APPROUVE)
+        retour_status_change.send(sender=DemandeRetour, demande_retour=demande, ancien_statut="demande",
+                                  nouveau_statut="approuve", action="approuver")
+        self.assertEqual(GainFidelite.objects.get().points, 25)
+
+    def test_idempotence_en_base(self):
+        compte, _ = CompteFidelite.objects.get_or_create(utilisateur=self.client1)
+        compte.crediter_points(5, reference_externe="CMD-X")
+        with self.assertRaises(IntegrityError), transaction_db.atomic():
+            compte.crediter_points(5, reference_externe="CMD-X")
+
+
+class CouponsTests(BaseFideliteTestCase):
+    """F-d, F-e, F-f, F5 : utilisation, restitution, valeurs, confidentialité."""
+
+    def setUp(self):
+        super().setUp()
+        self.groupe = GroupeCommande.objects.create(client=self.client1)
+        Commande.objects.filter(pk=self.commande.pk).update(groupe=self.groupe)
+        self.commande.refresh_from_db()
+
+    def coupon(self, **champs):
+        valeurs = {"code": "PROMO10", "valeur": Decimal("10"), **champs}
+        return CouponReduction.objects.create(**valeurs)
+
+    def test_coupon_public_utilisable_par_chaque_client_une_fois(self):
+        coupon = self.coupon(utilisations_max=None)
+        services.consommer_coupon(coupon, self.client1, self.groupe)
+        coupon.refresh_from_db()
+        self.assertTrue(coupon.est_valide_pour(self.client2, Decimal("50000"))[0])
+        valide, message = coupon.est_valide_pour(self.client1, Decimal("50000"))
+        self.assertFalse(valide)
+        self.assertIn("déjà utilisé", message)
+
+    def test_limite_globale(self):
+        coupon = self.coupon(utilisations_max=1)
+        services.consommer_coupon(coupon, self.client1, self.groupe)
+        coupon.refresh_from_db()
+        self.assertTrue(coupon.est_utilise)
+        self.assertFalse(coupon.est_valide_pour(self.client2, Decimal("50000"))[0])
+
+    def test_une_utilisation_par_client_en_base(self):
+        coupon = self.coupon(utilisations_max=None)
+        UtilisationCoupon.objects.create(coupon=coupon, client=self.client1)
+        with self.assertRaises(IntegrityError), transaction_db.atomic():
+            UtilisationCoupon.objects.create(coupon=coupon, client=self.client1)
+
+    def test_coupon_rendu_si_tout_le_checkout_est_annule(self):
+        coupon = self.coupon(client=self.client1)
+        services.consommer_coupon(coupon, self.client1, self.groupe)
+        Commande.objects.filter(pk=self.commande.pk).update(coupon_code=coupon.code)
+        self.commande.refresh_from_db()
+        annuler_commande(self.commande, Commande.MotifAnnulation.EXPIRATION)
+        coupon.refresh_from_db()
+        self.assertEqual((coupon.est_utilise, coupon.nombre_utilisations), (False, 0))
+        self.assertTrue(coupon.est_valide_pour(self.client1, Decimal("50000"))[0])
+
+    def test_coupon_garde_si_une_commande_du_checkout_reste(self):
+        coupon = self.coupon(client=self.client1)
+        services.consommer_coupon(coupon, self.client1, self.groupe)
+        Commande.objects.filter(groupe=self.groupe).update(coupon_code=coupon.code)
+        autre = Commande.objects.create(boutique=self.boutique, client=self.client1, groupe=self.groupe,
+                                        montant_total=Decimal("1000"), coupon_code=coupon.code)
+        self.commande.refresh_from_db()
+        annuler_commande(self.commande, Commande.MotifAnnulation.EXPIRATION)
+        coupon.refresh_from_db()
+        self.assertTrue(coupon.est_utilise)
+        annuler_commande(autre, Commande.MotifAnnulation.EXPIRATION)
+        coupon.refresh_from_db()
+        self.assertFalse(coupon.est_utilise)
+
+    def test_coupon_expire_non_rendu(self):
+        coupon = self.coupon(client=self.client1, date_expiration=timezone.now() - timedelta(days=1))
+        UtilisationCoupon.objects.create(coupon=coupon, client=self.client1, groupe=self.groupe)
+        CouponReduction.objects.filter(pk=coupon.pk).update(est_utilise=True, nombre_utilisations=1)
+        Commande.objects.filter(pk=self.commande.pk).update(coupon_code=coupon.code)
+        self.commande.refresh_from_db()
+        self.assertFalse(services.restituer_coupon(self.commande))
+
+    def test_valeurs_impossibles_refusees_en_base(self):
+        for champs in ({"valeur": Decimal("150")}, {"valeur": Decimal("0")},
+                       {"type_reduction": "montant_fixe", "valeur": Decimal("-500")},
+                       {"montant_minimum_commande": Decimal("-1")}):
+            with self.subTest(champs=champs), self.assertRaises(IntegrityError), transaction_db.atomic():
+                self.coupon(**champs)
+
+    def test_remise_jamais_superieure_au_montant(self):
+        coupon = self.coupon(type_reduction="montant_fixe", valeur=Decimal("20000"))
+        self.assertEqual(coupon.calculer_remise(Decimal("5000")), Decimal("5000"))
+
+    def test_coupon_nominatif_d_autrui_indiscernable_d_un_code_inexistant(self):
+        self.coupon(code="FID-AYA00001", client=self.client1)
+        self.client.force_authenticate(user=self.client2)
+        url = reverse("fidelite:fidelite-verifier-coupon")
+        reponse = self.client.post(url, {"code": "FID-AYA00001", "montant_commande": "20000"}, format="json")
+        inexistant = self.client.post(url, {"code": "FID-ZZZ00000", "montant_commande": "20000"}, format="json")
+        self.assertEqual((reponse.status_code, inexistant.status_code), (404, 404))
+        self.assertNotIn("nominatif", str(reponse.data))
+
+
+class AdminFideliteTests(BaseFideliteTestCase):
+    """F-g : aucun point ni journal fabriqué à la main dans l'admin."""
+
+    def test_solde_et_journal_en_lecture_seule(self):
+        from .admin import CompteFideliteAdmin, TransactionFideliteAdmin
+
+        requete = RequestFactory().get("/")
+        requete.user = Utilisateur.objects.create_superuser(email="su@anitche.ci", password="TestPassword123!",
+                                                            nom="S", prenom="U")
+        self.assertIn("solde_points", CompteFideliteAdmin(CompteFidelite, AdminSite()).readonly_fields)
+        journal = TransactionFideliteAdmin(TransactionFidelite, AdminSite())
+        self.assertFalse(journal.has_add_permission(requete))
+        self.assertFalse(journal.has_change_permission(requete))
+        self.assertFalse(journal.has_delete_permission(requete))

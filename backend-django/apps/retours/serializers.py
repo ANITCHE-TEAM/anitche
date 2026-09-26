@@ -1,22 +1,26 @@
-from decimal import Decimal
 from django.db import models
 from rest_framework import serializers
+from django.urls import reverse
 from rest_framework.exceptions import ValidationError
 
 from .models import DemandeRetour, RetourItem, PhotoRetour
+from .services import TRANSITIONS, RetourRefuse, montant_a_rembourser, verifier_eligibilite
 from apps.commandes.models import Commande, CommandeItem
 
 
 class PhotoRetourSerializer(serializers.ModelSerializer):
+    """`image` en sortie : l'URL de téléchargement authentifiée
+    (GET /api/retours/<id>/photos/<photo_id>/), jamais le chemin /media/
+    (non servi en production, et public en développement)."""
+
     class Meta:
         model = PhotoRetour
         fields = ["id", "image", "date_ajout"]
         read_only_fields = ["id", "date_ajout"]
 
     def validate_image(self, value):
-        """Limite taille et type (A04/A08) : sans ce contrôle, n'importe
-        quel fichier pouvait être uploadé comme "preuve" de retour, sans
-        limite de poids ni vérification qu'il s'agit bien d'une image."""
+        """Taille et type déclaré ; le contenu réel (signature binaire) est
+        vérifié par le validateur du modèle (validateur_image_standard)."""
         if not value:
             return value
         if value.size > 3 * 1024 * 1024:
@@ -27,6 +31,16 @@ class PhotoRetourSerializer(serializers.ModelSerializer):
                 "Format d'image non autorisé (JPEG, PNG ou WebP uniquement)."
             )
         return value
+
+    def to_representation(self, instance):
+        donnees = super().to_representation(instance)
+        chemin = reverse(
+            "retours:retour-photo-fichier",
+            kwargs={"pk": instance.demande_retour_id, "photo_id": instance.pk},
+        )
+        requete = self.context.get("request")
+        donnees["image"] = requete.build_absolute_uri(chemin) if requete else chemin
+        return donnees
 
 
 class RetourItemSerializer(serializers.ModelSerializer):
@@ -84,7 +98,13 @@ class ArticleRetourInputSerializer(serializers.Serializer):
 class CreerDemandeRetourSerializer(serializers.Serializer):
     commande_id = serializers.UUIDField()
     motif = serializers.ChoiceField(choices=DemandeRetour.Motif.choices, default=DemandeRetour.Motif.PRODUIT_DEFECTUEUX)
-    type_resolution = serializers.ChoiceField(choices=DemandeRetour.TypeResolution.choices, default=DemandeRetour.TypeResolution.REMBOURSEMENT)
+    # Seul le remboursement est traité de bout en bout (argent rendu, part du
+    # vendeur réduite) : échange et avoir restent en base pour l'historique
+    # mais ne sont plus proposés.
+    type_resolution = serializers.ChoiceField(
+        choices=[DemandeRetour.TypeResolution.REMBOURSEMENT],
+        default=DemandeRetour.TypeResolution.REMBOURSEMENT,
+    )
     description = serializers.CharField(min_length=10)
     articles = ArticleRetourInputSerializer(many=True)
 
@@ -96,22 +116,22 @@ class CreerDemandeRetourSerializer(serializers.Serializer):
         if not articles_data:
             raise ValidationError({"articles": "Au moins un article doit être sélectionné pour le retour."})
 
-        try:
-            commande = Commande.objects.get(id=commande_id, client=user)
-        except Commande.DoesNotExist:
+        commande = Commande.objects.select_related("livraison").filter(id=commande_id, client=user).first()
+        if commande is None:
             raise ValidationError({"commande_id": "Commande introuvable ou non autorisée."})
 
-        # La commande doit être livrée ou confirmée pour demander un retour
-        if commande.status not in (Commande.Status.LIVREE, Commande.Status.EXPEDIEE, Commande.Status.CONFIRMEE):
-            raise ValidationError({"commande_id": "Impossible de demander un retour pour une commande non confirmée ou annulée."})
+        # Livrée (le colis a été remis) et dans le délai de retour.
+        try:
+            verifier_eligibilite(commande)
+        except RetourRefuse as refus:
+            raise ValidationError({"commande_id": refus.message})
 
         items_map = {item.id: item for item in commande.article.all()}
-        montant_total = Decimal("0.00")
         validated_items = []
 
         # Quantités déjà couvertes par des demandes de retour antérieures sur
-        # ces mêmes lignes de commande, hors demandes rejetées (qui ne
-        # bloquent rien puisqu'aucun retour n'a réellement eu lieu). Sans ce
+        # ces mêmes lignes de commande, hors demandes rejetées ou annulées
+        # (aucun retour n'a réellement eu lieu). Sans ce
         # calcul, chaque nouvelle demande n'était comparée qu'à la quantité
         # commandée initiale : un client pouvait soumettre plusieurs demandes
         # de retour distinctes sur le même article, chacune individuellement
@@ -122,7 +142,7 @@ class CreerDemandeRetourSerializer(serializers.Serializer):
             commande_item_id__in=[e["commande_item_id"] for e in articles_data],
             demande_retour__commande=commande,
         ).exclude(
-            demande_retour__statut=DemandeRetour.Statut.REJETE
+            demande_retour__statut__in=(DemandeRetour.Statut.REJETE, DemandeRetour.Statut.ANNULE)
         ).values("commande_item_id").annotate(total=models.Sum("quantite"))
         for row in anciens_items:
             deja_retourne[row["commande_item_id"]] = row["total"]
@@ -146,18 +166,19 @@ class CreerDemandeRetourSerializer(serializers.Serializer):
                     )
                 })
 
-            montant_total += c_item.prix_unitaire * qte
+            # Une même ligne citée deux fois dans la demande compte deux fois.
+            deja_retourne[c_item_id] = deja + qte
             validated_items.append((c_item, qte))
 
         attrs["_commande"] = commande
         attrs["_boutique"] = commande.boutique
-        attrs["_montant_remboursement"] = montant_total
+        attrs["_montant_remboursement"] = montant_a_rembourser(commande, validated_items)
         attrs["_validated_items"] = validated_items
 
         return attrs
 
 
 class TraiterDemandeRetourSerializer(serializers.Serializer):
-    action = serializers.ChoiceField(choices=["approuver", "rejeter", "en_transit", "receptionner", "rembourser", "cloturer"])
-    reponse = serializers.CharField(required=False, allow_blank=True, default="")
+    action = serializers.ChoiceField(choices=list(TRANSITIONS))
+    reponse = serializers.CharField(required=False, allow_blank=True, default="", max_length=2000)
     restock = serializers.BooleanField(default=True)

@@ -1,14 +1,15 @@
 import uuid
-from decimal import Decimal
-from django.db import models, transaction
+from django.db import models
 from django.conf import settings
 from django.utils import timezone
 
+from apps.core.storage import CheminUploadUUID
 from apps.core.validators import validateur_image_standard
 
 
 class DemandeRetour(models.Model):
-    """Demande de retour et de remboursement / échange initiée par un client suite à une livraison."""
+    """Demande de retour et de remboursement initiée par un client après la
+    livraison. Le statut ne change que par apps.retours.services."""
 
     class Motif(models.TextChoices):
         PRODUIT_DEFECTUEUX = "produit_defectueux", "Produit défectueux ou endommagé"
@@ -26,6 +27,7 @@ class DemandeRetour(models.Model):
         RECEPTIONNE = "receptionne", "Colis réceptionné"
         REMBOURSE = "rembourse", "Remboursé"
         CLOTURE = "cloture", "Clôturé"
+        ANNULE = "annule", "Annulée par le client"
 
     class TypeResolution(models.TextChoices):
         REMBOURSEMENT = "remboursement", "Remboursement"
@@ -90,34 +92,6 @@ class DemandeRetour(models.Model):
     def __str__(self):
         return f"{self.numero_retour} — Commande {self.commande.numero_commande} ({self.get_statut_display()})"
 
-    def approuver(self, reponse="", effectue_par=None):
-        """Approuve la demande de retour."""
-        self.statut = self.Statut.APPROUVE
-        self.reponse_vendeur = reponse
-        self.date_traitement = timezone.now()
-        self.save(update_fields=["statut", "reponse_vendeur", "date_traitement", "date_mise_a_jour"])
-
-    def rejeter(self, motif_refus="", effectue_par=None):
-        """Rejette la demande de retour."""
-        self.statut = self.Statut.REJETE
-        self.reponse_vendeur = motif_refus
-        self.date_traitement = timezone.now()
-        self.date_cloture = timezone.now()
-        self.save(update_fields=["statut", "reponse_vendeur", "date_traitement", "date_cloture", "date_mise_a_jour"])
-
-    def receptionner(self, restock=True):
-        """Marque le colis comme réceptionné et réintègre optionnellement les articles au stock."""
-        with transaction.atomic():
-            self.statut = self.Statut.RECEPTIONNE
-            self.save(update_fields=["statut", "date_mise_a_jour"])
-
-            if restock:
-                for item in self.articles.select_related("commande_item__variante__stock").all():
-                    variante = item.commande_item.variante
-                    stock = getattr(variante, "stock", None)
-                    if stock:
-                        stock.incrementer(item.quantite)
-
 
 class RetourItem(models.Model):
     """Article spécifique d'une commande inclus dans la demande de retour."""
@@ -160,8 +134,10 @@ class PhotoRetour(models.Model):
         verbose_name="Demande de retour",
     )
 
+    # Nom de fichier en UUID : le nom d'origine (souvent le nom du client,
+    # ou d'une pièce d'identité photographiée par erreur) n'est jamais conservé.
     image = models.ImageField(
-        upload_to="retours/preuves/%Y/%m/",
+        upload_to=CheminUploadUUID("retours/preuves"),
         validators=[validateur_image_standard],
     )
     date_ajout = models.DateTimeField(auto_now_add=True)

@@ -26,6 +26,8 @@ from apps.catalogue.models import Stock
 from apps.panier.models import Panier
 from apps.panier.services import get_or_create_panier
 from apps.fidelite.models import CouponReduction
+from apps.fidelite.services import consommer_coupon
+from apps.notifications.services import alerter_stock_bas
 from apps.paiements.frais import BaremeIntrouvable, bareme_en_vigueur, calculer_frais_ligne
 from apps.utilisateurs.permissions import EmailVerifie
 from apps.vendeurs.permissions import BoutiqueNonSuspendue, EstAdministrateur, EstVendeurValide
@@ -212,13 +214,17 @@ class ValiderPanierView(APIView):
                         quantite=item.quantite,
                         **calculer_frais_ligne(item.prix_unitaire, item.quantite, bareme),
                     )
+                    stock = stocks_verrouilles[item.variante_id]
+                    avant = stock.quantite_disponible
                     try:
-                        stocks_verrouilles[item.variante_id].decrementer(item.quantite)
+                        stock.decrementer(item.quantite)
                     except DjangoValidationError as exc:
                         # Filet de sécurité : normalement impossible grâce au
                         # verrou posé ci-dessus, mais on préfère un rollback +
                         # 400 propre à une erreur 500 si jamais ça se produit.
                         raise ValidationError(str(exc))
+                    # Franchissement du seuil d'alerte : le vendeur est prévenu (une fois).
+                    alerter_stock_bas(stock, avant, avant - item.quantite)
 
                 commandes_creees.append(commande)
 
@@ -227,8 +233,7 @@ class ValiderPanierView(APIView):
             # grâce au verrou posé plus haut, aucune autre requête n'a pu le
             # consommer entre-temps.
             if coupon is not None:
-                coupon.est_utilise = True
-                coupon.save(update_fields=["est_utilise"])
+                consommer_coupon(coupon, request.user, groupe)
 
             # 3. Vide le panier une fois les commandes créées
             panier.items.all().delete()

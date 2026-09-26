@@ -316,14 +316,11 @@ def contestation_ouverte(commande):
 def _alerter_administration(titre, message, metadata):
     from apps.notifications.models import Notification
     from apps.notifications.services import ServiceNotification
-    from apps.utilisateurs.models import Utilisateur
 
     logger_securite.warning("ALERTE ADMINISTRATION — %s", message)
-    for administrateur in Utilisateur.objects.filter(role__in=ROLES_ADMINISTRATION, is_active=True):
-        ServiceNotification.notifier_utilisateur(
-            administrateur, titre=titre, message=message,
-            type_notification=Notification.TypeNotification.LIVRAISON, metadata=metadata,
-        )
+    ServiceNotification.notifier_administration(
+        titre=titre, message=message, type_notification=Notification.TypeNotification.LIVRAISON, metadata=metadata,
+    )
 
 
 def contester_livraison(livraison, client, motif):
@@ -361,6 +358,7 @@ def resoudre_contestation(livraison, administrateur, decision, commentaire=""):
     from apps.notifications.services import ServiceNotification
     from apps.paiements import reversements
     from apps.paiements.models import Remboursement
+    from apps.fidelite.services import annuler_gain
     from apps.paiements.services import creer_remboursement, paiement_valide_de
 
     Decision = ContestationLivraison.Statut
@@ -387,6 +385,8 @@ def resoudre_contestation(livraison, administrateur, decision, commentaire=""):
             if paiement is not None:
                 creer_remboursement(paiement, commande, Remboursement.Motif.LIVRAISON_NON_RECUE)
             reversements.annuler_reversement(commande)
+            # Colis jamais reçu : les points en attente de la commande sont annulés.
+            annuler_gain(commande, "Livraison contestée : colis non reçu")
     logger_securite.info(
         "Contestation livraison %s %s par admin_id=%s", livraison.pk, decision, administrateur.pk,
     )

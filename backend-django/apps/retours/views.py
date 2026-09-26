@@ -1,256 +1,159 @@
-from django.shortcuts import get_object_or_404
-from django.db import transaction
-from django.utils import timezone
-from rest_framework import generics, status
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.pagination import PageNumberPagination
+import logging
+import uuid
 
-from .models import DemandeRetour, RetourItem, PhotoRetour
+from django.db import transaction
+from django.http import FileResponse, Http404
+from django.shortcuts import get_object_or_404
+from rest_framework import generics, status
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from apps.vendeurs.permissions import ROLES_ADMINISTRATION
+
+from . import services
+from .models import DemandeRetour, PhotoRetour
 from .serializers import (
-    DemandeRetourSerializer,
     CreerDemandeRetourSerializer,
+    DemandeRetourSerializer,
     PhotoRetourSerializer,
     TraiterDemandeRetourSerializer,
 )
-from .signals import retour_status_change
-from apps.utilisateurs.models import Role
-from apps.commandes.models import Commande
-from apps.paiements.reversements import reprendre_reversement, suspendre_reversement
-from apps.paiements.services import rembourser_retour
+
+logger_securite = logging.getLogger("securite")
 
 
+def identifiant_valide(valeur):
+    """UUID ou None (un identifiant mal formé est refusé ensuite par le serializer)."""
+    try:
+        return uuid.UUID(str(valeur))
+    except (TypeError, ValueError):
+        return None
 
-# Transitions d'état valides pour une demande de retour.
-# Clé = statut de départ (valeurs réelles de DemandeRetour.Statut, pas des libellés
-# inventés — un décalage ici fait échouer TOUTES les transitions silencieusement).
-# Voir apps/retours/models.py::DemandeRetour.Statut pour la liste canonique.
-TRANSITIONS_VALIDES = {
-    DemandeRetour.Statut.DEMANDE: {"approuver", "rejeter"},
-    DemandeRetour.Statut.APPROUVE: {"en_transit", "rejeter"},
-    DemandeRetour.Statut.EN_TRANSIT: {"receptionner"},
-    DemandeRetour.Statut.RECEPTIONNE: {"rembourser", "rejeter"},
-    DemandeRetour.Statut.REMBOURSE: {"cloturer"},
-    DemandeRetour.Statut.REJETE: {"cloturer"},
-    DemandeRetour.Statut.CLOTURE: set(),  # état terminal, aucune transition possible
-}
 
-# Mapping action -> nouveau statut résultant (à adapter si tes noms diffèrent)
-ACTION_VERS_STATUT = {
-    "approuver": "approuvee",
-    "rejeter": "rejetee",
-    "en_transit": "en_transit",
-    "receptionner": "receptionnee",
-    "rembourser": "remboursee",
-    "cloturer": "cloturee",
-}
+def reponse_refus(refus):
+    return Response({"detail": refus.message}, status=refus.code_http)
 
 
 class DemandeRetourListCreateView(APIView):
-    """Permet au client de lister ses demandes de retour ou d'en créer une nouvelle."""
+    """Le client liste ses demandes de retour ou en crée une (commande livrée,
+    dans le délai de retour)."""
 
     permission_classes = [IsAuthenticated]
 
+    def get_throttles(self):
+        # Limite dédiée à la création ; la liste garde le taux général.
+        self.throttle_scope = "retour_creation" if self.request.method == "POST" else None
+        return super().get_throttles()
+
     def get(self, request):
-        retours = DemandeRetour.objects.filter(client=request.user).select_related("commande", "boutique").prefetch_related("articles__commande_item", "photos")
-        # Pagination manuelle : cette vue est un APIView brut, pas un
-        # ListAPIView, donc DEFAULT_PAGINATION_CLASS (config/settings/base.py)
-        # ne s'applique jamais automatiquement ici (l'application automatique
-        # de DRF passe par ListAPIView.list(), jamais par un Response()
-        # construit à la main).
+        retours = (
+            DemandeRetour.objects.filter(client=request.user)
+            .select_related("commande", "boutique", "client")
+            .prefetch_related("articles__commande_item", "photos")
+        )
+        # APIView brut : la pagination par défaut ne s'applique pas d'elle-même.
         paginator = PageNumberPagination()
         page = paginator.paginate_queryset(retours, request, view=self)
-        serializer = DemandeRetourSerializer(page, many=True)
+        serializer = DemandeRetourSerializer(page, many=True, context={"request": request})
         return paginator.get_paginated_response(serializer.data)
 
     def post(self, request):
-        commande_id = request.data.get("commande_id")
-
         with transaction.atomic():
+            commande_id = identifiant_valide(request.data.get("commande_id"))
             if commande_id:
-                # Verrouille la ligne de la commande pour toute la durée de
-                # la validation + création : sans ce verrou, deux requêtes
-                # quasi simultanées pour le même article peuvent chacune
-                # lire "quantité encore disponible" avant qu'aucune des deux
-                # n'ait créé son RetourItem, et cumuler un remboursement/
-                # restock supérieur à ce qui a été réellement acheté
-                # (A04:2025 — race condition sur l'intégrité des données,
-                # même famille que F-09 sur le stock).
-                Commande.objects.select_for_update().filter(
-                    id=commande_id, client=request.user
-                ).first()
-
+                services.verrouiller_commande_du_client(commande_id, request.user)
             serializer = CreerDemandeRetourSerializer(data=request.data, context={"request": request})
             serializer.is_valid(raise_exception=True)
+            demande = services.creer_demande(request.user, serializer.validated_data)
 
-            data = serializer.validated_data
-            commande = data["_commande"]
-            boutique = data["_boutique"]
-            montant = data["_montant_remboursement"]
-            items_a_creer = data["_validated_items"]
-
-            demande = DemandeRetour.objects.create(
-                commande=commande,
-                client=request.user,
-                boutique=boutique,
-                motif=data["motif"],
-                type_resolution=data["type_resolution"],
-                description=data["description"],
-                montant_remboursement=montant,
-                statut=DemandeRetour.Statut.DEMANDE,
-            )
-
-            for commande_item, qte in items_a_creer:
-                RetourItem.objects.create(
-                    demande_retour=demande,
-                    commande_item=commande_item,
-                    quantite=qte,
-                )
-
-            # Retour ouvert : le reversement au vendeur attend son issue.
-            suspendre_reversement(commande)
-
-        return Response(DemandeRetourSerializer(demande).data, status=status.HTTP_201_CREATED)
+        demande = services.demandes_visibles(request.user).get(pk=demande.pk)
+        return Response(DemandeRetourSerializer(demande, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
 
 class DemandeRetourDetailView(generics.RetrieveAPIView):
-    """Détail d'une demande de retour précise."""
+    """Détail : client de la demande, vendeur de la boutique, administration."""
 
     permission_classes = [IsAuthenticated]
     serializer_class = DemandeRetourSerializer
 
     def get_queryset(self):
-        user = self.request.user
-        qs = DemandeRetour.objects.select_related("commande", "boutique", "client").prefetch_related("articles__commande_item", "photos")
-
-        if user.role in (Role.ADMIN, Role.SUPER_ADMIN):
-            return qs
-        if user.role == Role.VENDEUR:
-            return qs.filter(boutique__proprietaire=user)
-        return qs.filter(client=user)
+        return services.demandes_visibles(self.request.user)
 
 
 class EspaceVendeurRetoursListView(generics.ListAPIView):
-    """Liste des demandes de retour concernant la boutique du vendeur connecté."""
+    """Demandes de retour de la boutique du vendeur connecté (toutes pour
+    l'administration)."""
 
     permission_classes = [IsAuthenticated]
     serializer_class = DemandeRetourSerializer
 
     def get_queryset(self):
-        user = self.request.user
-        if user.role in (Role.ADMIN, Role.SUPER_ADMIN):
-            return DemandeRetour.objects.select_related("commande", "boutique", "client").prefetch_related("articles__commande_item", "photos")
-        return DemandeRetour.objects.filter(boutique__proprietaire=user).select_related("commande", "boutique", "client").prefetch_related("articles__commande_item", "photos")
+        qs = services.demandes_visibles(self.request.user)
+        if self.request.user.role in ROLES_ADMINISTRATION:
+            return qs
+        return qs.filter(boutique__proprietaire=self.request.user)
 
 
 class TraiterDemandeRetourView(APIView):
-    """Action de traitement d'un retour (approuver, rejeter, réceptionner, rembourser) par le vendeur ou admin."""
+    """Actions sur une demande (table des transitions : apps.retours.services).
+
+    Boutique (vendeur propriétaire ou administration) : approuver, rejeter
+    (motif obligatoire), en_transit, receptionner, rembourser, cloturer.
+    Client de la demande : en_transit (« j'ai expédié le colis »), annuler.
+    """
 
     permission_classes = [IsAuthenticated]
 
-    def get_object(self, request, pk):
-        """Ne renvoie la demande que si l'utilisateur est admin ou le
-        vendeur propriétaire de la boutique concernée — sans ce filtre,
-        n'importe quel compte authentifié pouvait traiter le retour
-        d'un autre vendeur (A01:2025 — Broken Access Control)."""
-        user = request.user
-        if user.role in (Role.ADMIN, Role.SUPER_ADMIN):
-            qs = DemandeRetour.objects.all()
-        else:
-            qs = DemandeRetour.objects.filter(boutique__proprietaire=user)
-        return get_object_or_404(qs, pk=pk)
-
-    def patch(self, request, *args, **kwargs):
-        user = request.user
-        demande = self.get_object(request, kwargs["pk"])
-        action = request.data.get("action")
-
-        if action not in ACTION_VERS_STATUT:
-            return Response(
-                {"detail": "Action inconnue."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        actions_autorisees = TRANSITIONS_VALIDES.get(demande.statut, set())
-        if action not in actions_autorisees:
-            return Response(
-                {
-                    "detail": (
-                        f"Transition invalide : l'action '{action}' n'est pas autorisée "
-                        f"depuis le statut '{demande.statut}'."
-                    )
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
+    def patch(self, request, pk):
         serializer = TraiterDemandeRetourSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-
-        action = serializer.validated_data["action"]
-        reponse = serializer.validated_data.get("reponse", "")
-        restock = serializer.validated_data.get("restock", True)
-
-        ancien_statut = demande.statut
-
-        if action == "approuver":
-            demande.approuver(reponse=reponse, effectue_par=user)
-        elif action == "rejeter":
-            demande.rejeter(motif_refus=reponse, effectue_par=user)
-        elif action == "en_transit":
-            demande.statut = DemandeRetour.Statut.EN_TRANSIT
-            demande.save(update_fields=["statut", "date_mise_a_jour"])
-        elif action == "receptionner":
-            demande.receptionner(restock=restock)
-        elif action == "rembourser":
-            # L'argent n'est rendu que par l'administration : ce statut crée
-            # un Remboursement à traiter et réduit la part du vendeur
-            # (apps.paiements, docs/MODULE_PAIEMENTS.md).
-            with transaction.atomic():
-                demande.statut = DemandeRetour.Statut.REMBOURSE
-                demande.save(update_fields=["statut", "date_mise_a_jour"])
-                rembourser_retour(demande)
-        elif action == "cloturer":
-            demande.statut = DemandeRetour.Statut.CLOTURE
-            demande.date_cloture = timezone.now()
-            demande.save(update_fields=["statut", "date_cloture", "date_mise_a_jour"])
-
-        if action in ("rejeter", "cloturer"):
-            # Retour clos sans (nouveau) remboursement : le reversement reprend.
-            reprendre_reversement(demande.commande)
-
-        retour_status_change.send(
-            sender=DemandeRetour,
-            demande_retour=demande,
-            ancien_statut=ancien_statut,
-            nouveau_statut=demande.statut,
-        )
-
-        return Response(DemandeRetourSerializer(demande).data, status=status.HTTP_200_OK)
+        donnees = serializer.validated_data
+        try:
+            services.traiter(pk, request.user, donnees["action"], donnees["reponse"], donnees["restock"])
+        except services.RetourRefuse as refus:
+            return reponse_refus(refus)
+        demande = services.demandes_visibles(request.user).get(pk=pk)
+        return Response(DemandeRetourSerializer(demande, context={"request": request}).data, status=status.HTTP_200_OK)
 
 
 class AjouterPhotoRetourView(APIView):
-    """Upload d'une photo justificative pour une demande de retour."""
+    """Photo justificative ajoutée par le client, tant que le retour n'est pas
+    traité (5 au plus). Fichier vérifié (taille, contenu réel) et renommé."""
+
+    permission_classes = [IsAuthenticated]
+    throttle_scope = "retour_photo"
+
+    def post(self, request, pk):
+        if "image" not in request.FILES:
+            return Response({"image": "Veuillez fournir un fichier image."}, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            try:
+                demande = services.verifier_ajout_photo(pk, request.user)
+            except services.RetourRefuse as refus:
+                return reponse_refus(refus)
+            # Le serializer applique les validateurs du modèle (signature
+            # binaire réelle) : un objects.create() direct les contournerait.
+            serializer = PhotoRetourSerializer(data=request.data, context={"request": request})
+            serializer.is_valid(raise_exception=True)
+            photo = serializer.save(demande_retour=demande)
+        return Response(PhotoRetourSerializer(photo, context={"request": request}).data, status=status.HTTP_201_CREATED)
+
+
+class TelechargerPhotoRetourView(APIView):
+    """Fichier d'une photo justificative, servi par Django après contrôle
+    d'accès (client, vendeur de la boutique, administration) : /media/
+    n'est pas exposé en production."""
 
     permission_classes = [IsAuthenticated]
 
-    def post(self, request, pk):
-        demande = get_object_or_404(DemandeRetour, pk=pk, client=request.user)
-
-        if "image" not in request.FILES:
-            return Response({"image": "Veuillez fournir un fichier image."}, status=status.HTTP_400_BAD_REQUEST)
-
-        # SÉCURITÉ (A04/A08) : PhotoRetour.image porte bien
-        # validators=[validateur_image_standard] (taille max, signature
-        # binaire réelle du fichier), mais Model.objects.create() ne
-        # déclenche JAMAIS ces validators — seuls full_clean() ou le
-        # passage par un serializer DRF le font. Un .objects.create()
-        # direct ici acceptait donc n'importe quel fichier, de n'importe
-        # quelle taille, sans aucune vérification de contenu. On passe
-        # désormais par PhotoRetourSerializer pour que la validation
-        # s'applique réellement, comme partout ailleurs dans le module.
-        serializer = PhotoRetourSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        photo = serializer.save(demande_retour=demande)
-
-        return Response(PhotoRetourSerializer(photo).data, status=status.HTTP_201_CREATED)
+    def get(self, request, pk, photo_id):
+        demande = get_object_or_404(services.demandes_visibles(request.user), pk=pk)
+        photo = get_object_or_404(PhotoRetour, pk=photo_id, demande_retour=demande)
+        try:
+            contenu = photo.image.open("rb")
+        except FileNotFoundError:
+            logger_securite.error("Photo de retour référencée mais absente du stockage (photo_id=%s).", photo.pk)
+            raise Http404("Ce fichier n'est plus disponible.")
+        return FileResponse(contenu, filename=photo.image.name.rsplit("/", 1)[-1])

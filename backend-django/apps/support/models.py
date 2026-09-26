@@ -3,6 +3,7 @@ from django.db import models
 from django.conf import settings
 from django.utils import timezone
 
+from apps.core.storage import CheminUploadUUID
 from apps.core.validators import validateur_document_standard
 
 
@@ -181,9 +182,10 @@ class TicketAttachment(models.Model):
         related_name="attachments",
     )
 
-    # Rangement par année/mois pour éviter d'entasser tous les fichiers dans un seul dossier.
+    # Nom de fichier en UUID : le nom d'origine (souvent un nom de personne
+    # ou de document) reste seulement dans original_filename, jamais sur disque.
     file = models.FileField(
-        upload_to="support/attachments/%Y/%m/",
+        upload_to=CheminUploadUUID("support/pieces_jointes"),
         validators=[validateur_document_standard],
     )
     file_type = models.CharField(max_length=10, choices=FileType.choices, default=FileType.OTHER)

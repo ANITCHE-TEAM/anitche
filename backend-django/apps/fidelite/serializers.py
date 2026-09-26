@@ -3,7 +3,8 @@ from decimal import Decimal
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 
-from .models import CompteFidelite, TransactionFidelite, CouponReduction
+from .models import CompteFidelite, CouponReduction, GainFidelite, TransactionFidelite
+from .services import points_en_attente
 
 
 class TransactionFideliteSerializer(serializers.ModelSerializer):
@@ -27,6 +28,8 @@ class TransactionFideliteSerializer(serializers.ModelSerializer):
 class CompteFideliteSerializer(serializers.ModelSerializer):
     palier_display = serializers.CharField(source="get_palier_display", read_only=True)
     utilisateur_email = serializers.EmailField(source="utilisateur.email", read_only=True)
+    # Points des commandes livrées, crédités à la fin du délai de rétractation.
+    points_en_attente = serializers.SerializerMethodField()
 
     class Meta:
         model = CompteFidelite
@@ -34,12 +37,29 @@ class CompteFideliteSerializer(serializers.ModelSerializer):
             "id",
             "utilisateur_email",
             "solde_points",
+            "points_en_attente",
             "points_cumules_total",
             "palier",
             "palier_display",
             "date_creation",
             "date_mise_a_jour",
         ]
+        read_only_fields = fields
+
+    def get_points_en_attente(self, compte):
+        return points_en_attente(compte.utilisateur_id)
+
+
+class GainFideliteSerializer(serializers.ModelSerializer):
+    """Points d'une commande : en attente (date_disponibilite), crédités ou annulés."""
+
+    numero_commande = serializers.CharField(source="commande.numero_commande", read_only=True)
+    statut_display = serializers.CharField(source="get_statut_display", read_only=True)
+
+    class Meta:
+        model = GainFidelite
+        fields = ["id", "commande", "numero_commande", "points", "statut", "statut_display",
+                  "date_disponibilite", "motif_annulation", "date_creation", "date_traitement"]
         read_only_fields = fields
 
 

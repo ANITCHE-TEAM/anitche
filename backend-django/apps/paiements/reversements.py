@@ -112,7 +112,10 @@ def rendre_disponibles(maintenant=None):
 def retour_ouvert(commande):
     from apps.retours.models import DemandeRetour
 
-    clos = (DemandeRetour.Statut.REJETE, DemandeRetour.Statut.REMBOURSE, DemandeRetour.Statut.CLOTURE)
+    clos = (
+        DemandeRetour.Statut.REJETE, DemandeRetour.Statut.ANNULE,
+        DemandeRetour.Statut.REMBOURSE, DemandeRetour.Statut.CLOTURE,
+    )
     return DemandeRetour.objects.filter(commande=commande).exclude(statut__in=clos).exists()
 
 

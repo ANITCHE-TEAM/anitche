@@ -358,8 +358,6 @@ def alerter_administration(remboursement):
     """Journal de sécurité + notification de chaque administrateur actif."""
     from apps.notifications.models import Notification
     from apps.notifications.services import ServiceNotification
-    from apps.utilisateurs.models import Utilisateur
-    from apps.vendeurs.permissions import ROLES_ADMINISTRATION
 
     commande = remboursement.commande
     message = (
@@ -367,14 +365,12 @@ def alerter_administration(remboursement):
         f"({int(remboursement.montant)} FCFA) — {remboursement.get_motif_display()}."
     )
     logger_securite.error("ALERTE ADMINISTRATION — %s", message)
-    for administrateur in Utilisateur.objects.filter(role__in=ROLES_ADMINISTRATION, is_active=True):
-        ServiceNotification.notifier_utilisateur(
-            administrateur,
-            titre="Remboursement à traiter",
-            message=message,
-            type_notification=Notification.TypeNotification.PAIEMENT,
-            metadata={"remboursement": str(remboursement.pk), "commande": str(commande.pk)},
-        )
+    ServiceNotification.notifier_administration(
+        titre="Remboursement à traiter",
+        message=message,
+        type_notification=Notification.TypeNotification.PAIEMENT,
+        metadata={"remboursement": str(remboursement.pk), "commande": str(commande.pk)},
+    )
 
 
 def traiter_remboursement(remboursement, administrateur, decision, reference_externe="", commentaire=""):
@@ -438,9 +434,13 @@ def rembourser_retour(demande_retour):
     if paiement is None:
         logger_securite.error("Retour %s remboursé sans paiement encaissé.", demande_retour.numero_retour)
         return None
-    remboursement, _ = creer_remboursement(
+    remboursement, cree = creer_remboursement(
         paiement, commande, Remboursement.Motif.RETOUR,
         montant=demande_retour.montant_remboursement, retour=demande_retour,
     )
-    reversements.appliquer_retour_rembourse(demande_retour)
+    # Une seule déduction par retour : le Remboursement (unique par retour)
+    # sert de marqueur. Un second appel ne réduit pas deux fois la part du
+    # vendeur (montant_retours n'est pas idempotent à lui seul).
+    if cree:
+        reversements.appliquer_retour_rembourse(demande_retour)
     return remboursement

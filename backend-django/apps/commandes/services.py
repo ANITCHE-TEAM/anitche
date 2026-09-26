@@ -104,6 +104,7 @@ def synchroniser_depuis_livraison(commande, statut_livraison):
     commande. Lève TransitionImpossible si la commande n'est pas prête
     (ex : expédier une commande pas encore en préparation, ou annulée).
     """
+    from apps.fidelite.services import ouvrir_gain
     from apps.paiements.reversements import ouvrir_retractation
 
     cible = SYNCHRONISATION_LIVRAISON.get(statut_livraison)
@@ -112,8 +113,10 @@ def synchroniser_depuis_livraison(commande, statut_livraison):
     _transitionner(commande, cible, {statut for statut, suivants in TRANSITIONS.items() if cible in suivants})
     if cible == Statut.LIVREE:
         # Livraison confirmée : le délai de rétractation avant reversement
-        # au vendeur commence (apps.paiements.reversements).
+        # au vendeur commence (apps.paiements.reversements), et les points
+        # de fidélité de la commande sont « en attente » jusqu'à sa fin.
         ouvrir_retractation(commande)
+        ouvrir_gain(commande)
 
 
 def annuler_commande(commande, motif, acteur=None, commentaire="Commande annulée."):
@@ -121,7 +124,9 @@ def annuler_commande(commande, motif, acteur=None, commentaire="Commande annulé
     remboursement des paiements déjà encaissés, annule le reversement et
     passe la fiche de livraison « annulée » (historique : `acteur`,
     `commentaire`)."""
+    from apps.fidelite.services import restituer_coupon
     from apps.livraison.services import annuler_livraison_de
+    from apps.notifications.services import notifier_annulation_commande
     from apps.paiements.services import traiter_paiements_apres_annulation
 
     with transaction.atomic():
@@ -146,6 +151,9 @@ def annuler_commande(commande, motif, acteur=None, commentaire="Commande annulé
                 stock.incrementer(article.quantite)
 
         traiter_paiements_apres_annulation(commande)
+        # Tout le checkout annulé : le coupon utilisé est rendu (s'il n'a pas expiré).
+        restituer_coupon(commande)
+        notifier_annulation_commande(commande, etait_payee=est_payee(commande))
 
     logger.info("Commande %s annulée (%s).", commande.numero_commande, motif)
 
