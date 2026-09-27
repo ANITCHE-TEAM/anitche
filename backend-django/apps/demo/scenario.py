@@ -184,9 +184,6 @@ class ScenarioDemo:
             'telephone_contact': '+2250102030405',
             'email_contact': vendeur.email,
             'livraison_offerte': definition['livraison_offerte'],
-            # Explicite : en multipart, DRF lit un booléen absent comme False
-            # (la boutique serait créée fermée).
-            'est_active': True,
             'logo': image_png(definition['nom'].replace(' & ', '\n& '), couleur, 'logo.png', (400, 400)),
         }, multipart=True)
         etat['boutique_id'] = boutique['id']

@@ -91,7 +91,7 @@ Toutes les erreurs de l'API ont la même forme :
 - `detail` : toujours une chaîne, le message principal à afficher.
 - `errors` : toujours un objet (jamais `null`), clé → **liste** de messages. `{}` quand aucun champ n'est en cause (401, 403, 404, refus métier…).
 - Champs imbriqués : clé à points (`adresse_livraison.commune`, `articles.0.quantite`) ; erreur sans champ : `non_field_errors`.
-- Codes à traiter : **400** validation ou refus métier, **401** non authentifié ou jeton expiré, **403** interdit, **404** introuvable (aussi pour une ressource d'un autre utilisateur), **409** transition impossible (annuler une commande en préparation…), **429** limite de débit (§ 7), **503** service indisponible, **500** erreur interne (message générique, rien de technique).
+- Codes à traiter : **400** validation ou refus métier, **401** non authentifié ou jeton expiré, **403** interdit, **404** introuvable (aussi pour une ressource d'un autre utilisateur ; `detail` vaut alors « Ressource introuvable. », sauf message plus précis de la route), **409** transition impossible (annuler une commande en préparation…), **429** limite de débit (§ 7), **503** service indisponible, **500** erreur interne (message générique, rien de technique).
 - Seule exception : les webhooks des fournisseurs de paiement, qui ne concernent pas le frontend.
 
 ## 6. Pagination
@@ -112,9 +112,18 @@ Limites les plus visibles côté interface (production) : connexion 10/h, envoi 
 
 ## 8. Conventions de données
 
-- **Montants en FCFA entiers.** Les champs monétaires arrivent comme des décimaux en chaîne (`"65000.00"`) dont la partie décimale est toujours nulle. Afficher sans décimales.
+- **Montants en FCFA entiers, reçus en chaînes décimales.** Tous les champs monétaires (`prix`, `montant_total`, `frais_livraison`…) arrivent comme des chaînes : `"65000.00"`, partie décimale toujours nulle. Ne jamais les additionner tels quels (`"1500.00" + "500.00"` concatène) :
+
+  ```js
+  // Chaîne décimale de l'API → entier FCFA (null reste null, ex. prix_promo absent)
+  const versFcfa = (valeur) => (valeur == null ? null : Math.round(Number(valeur)));
+  // Affichage : « 65 000 FCFA »
+  const afficherFcfa = (valeur) => `${new Intl.NumberFormat('fr-FR').format(versFcfa(valeur))} FCFA`;
+  ```
+
+  En envoi (prix d'un produit, montant d'un coupon à vérifier), transmettre un entier (`15000`) ou sa chaîne (`"15000"`) ; les prix du catalogue (`prix`, `prix_promo`, `prix_base`) avec centimes sont refusés (400). Les montants sont positifs, sauf `montant_ajustements` (toujours ≤ 0) et `montant_net` d'un reversement. `poids_kg`, `taux_commission` (pourcentage) et `valeur` d'un coupon (pourcentage ou montant) peuvent avoir des décimales. Swagger montre pour chaque champ un exemple réaliste (`"15000.00"`).
 - **Identifiants** : entiers pour les utilisateurs, boutiques et produits ; UUID pour les commandes, paiements, livraisons, retours et tickets.
-- **Envois de fichiers** (`multipart/form-data`) : KYC, logo de boutique, images produit, photos de retour, pièces jointes du support. En multipart, **un booléen absent est lu comme `false`** : envoyer explicitement chaque booléen utile (par exemple `est_active=true` à la création d'une boutique, sinon elle est créée fermée).
+- **Envois de fichiers** (`multipart/form-data`) : KYC, logo de boutique, images produit, photos de retour, pièces jointes du support. Un booléen **absent** du formulaire est ignoré, comme en JSON : il prend la valeur par défaut à la création (une boutique créée avec son logo est ouverte, un produit est actif) et garde sa valeur actuelle en modification. Pour changer un booléen, l'envoyer explicitement (`est_active=false`).
 - **Fichiers protégés** (KYC, photos de retour, pièces jointes) : jamais d'URL média directe ; les télécharger via leurs endpoints dédiés, avec le jeton.
 
 ## 9. Emails de dev et types TypeScript

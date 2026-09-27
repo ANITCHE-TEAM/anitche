@@ -32,6 +32,9 @@ INSTALLED_APPS = [
     'django_celery_beat',
     'drf_spectacular',
 
+    # Briques partagées (réglages DRF transverses : apps/core/apps.py)
+    'apps.core',
+
     # Apps métier (apps/<nom>)
     'apps.utilisateurs',
     'apps.catalogue',

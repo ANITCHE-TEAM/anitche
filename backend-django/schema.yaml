@@ -7480,8 +7480,9 @@ components:
         prix_unitaire:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '15000.00'
         quantite:
           type: integer
           readOnly: true
@@ -7534,8 +7535,9 @@ components:
         taux_commission:
           type: string
           format: decimal
-          pattern: ^-?\d{0,3}(?:\.\d{0,2})?$
+          pattern: ^\d{0,3}(?:\.\d{0,2})?$
           description: Commission en % du prix de vente (avant remise).
+          example: '10.00'
         frais_fixe_article:
           type: integer
           maximum: 2147483647
@@ -7577,8 +7579,9 @@ components:
         taux_commission:
           type: string
           format: decimal
-          pattern: ^-?\d{0,3}(?:\.\d{0,2})?$
+          pattern: ^\d{0,3}(?:\.\d{0,2})?$
           description: Commission en % du prix de vente (avant remise).
+          example: '10.00'
         frais_fixe_article:
           type: integer
           maximum: 2147483647
@@ -8023,21 +8026,24 @@ components:
         montant_total:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '15000.00'
         coupon_code:
           type: string
           readOnly: true
         montant_remise:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '1500.00'
         frais_livraison:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '1500.00'
         livraison_offerte:
           type: boolean
           readOnly: true
@@ -8098,21 +8104,24 @@ components:
         montant_total:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '15000.00'
         coupon_code:
           type: string
           readOnly: true
         montant_remise:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '1500.00'
         frais_livraison:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '1500.00'
         livraison_offerte:
           type: boolean
           readOnly: true
@@ -8171,8 +8180,9 @@ components:
         prix_unitaire:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '15000.00'
         quantite:
           type: integer
           readOnly: true
@@ -8212,26 +8222,30 @@ components:
         montant_total:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '15000.00'
         montant_remise:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '1500.00'
         frais_livraison:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '1500.00'
         livraison_offerte:
           type: boolean
           readOnly: true
         frais_livraison_vendeur:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '1500.00'
         articles:
           type: array
           items:
@@ -8484,16 +8498,18 @@ components:
         valeur:
           type: string
           format: decimal
-          pattern: ^-?\d{0,8}(?:\.\d{0,2})?$
+          pattern: ^\d{0,8}(?:\.\d{0,2})?$
           readOnly: true
           description: 'Valeur de la réduction (ex: 10 pour 10% ou 2000 pour 2000
             FCFA)'
+          example: '10.00'
         montant_minimum_commande:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
           description: Montant minimum d'achat requis en FCFA
+          example: '10000.00'
         points_requis:
           type: integer
           readOnly: true
@@ -8702,15 +8718,17 @@ components:
           - string
           - 'null'
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
           description: Montant total à rembourser calculé sur la base des articles
             retournés
+          example: '15000.00'
         frais_livraison_rembourses:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '1500.00'
         reponse_vendeur:
           type: string
           readOnly: true
@@ -9251,25 +9269,30 @@ components:
         prix_unitaire:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
+          example: '15000.00'
         taux_commission:
           type: string
           format: decimal
-          pattern: ^-?\d{0,3}(?:\.\d{0,2})?$
+          pattern: ^\d{0,3}(?:\.\d{0,2})?$
+          example: '10.00'
         frais_fixe_unitaire:
           type: integer
         montant_commission:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
+          example: '1500.00'
         montant_frais_fixes:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
+          example: '100.00'
         montant_net_vendeur:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
+          example: '15000.00'
       required:
       - frais_fixe_unitaire
       - montant_commission
@@ -10684,8 +10707,9 @@ components:
         montant:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '15000.00'
         devise:
           type: string
           readOnly: true
@@ -10792,8 +10816,9 @@ components:
         montant:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '15000.00'
         devise:
           type: string
           readOnly: true
@@ -10896,8 +10921,9 @@ components:
         total:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '15000.00'
         nombre_articles:
           type: integer
           readOnly: true
@@ -10945,13 +10971,15 @@ components:
         prix_unitaire:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '15000.00'
         sous_total:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '15000.00'
         est_disponible:
           type: boolean
           readOnly: true
@@ -11265,8 +11293,9 @@ components:
         taux_commission:
           type: string
           format: decimal
-          pattern: ^-?\d{0,3}(?:\.\d{0,2})?$
+          pattern: ^\d{0,3}(?:\.\d{0,2})?$
           description: Commission en % du prix de vente (avant remise).
+          example: '10.00'
         frais_fixe_article:
           type: integer
           maximum: 2147483647
@@ -11449,8 +11478,9 @@ components:
         prix_base:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           description: Prix de base ou prix indicatif en FCFA
+          example: '15000.00'
         est_actif:
           type: boolean
           description: Décochez pour retirer le produit du catalogue public.
@@ -11574,22 +11604,25 @@ components:
         prix:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           description: Prix de vente standard en FCFA
+          example: '15000.00'
         prix_promo:
           type:
           - string
           - 'null'
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           description: Prix promotionnel optionnel en FCFA
+          example: '12500.00'
         poids_kg:
           type:
           - string
           - 'null'
           format: decimal
-          pattern: ^-?\d{0,4}(?:\.\d{0,2})?$
+          pattern: ^\d{0,4}(?:\.\d{0,2})?$
           description: Poids unitaire en kg (utile pour le calcul des frais de livraison)
+          example: '1.50'
         est_active:
           type: boolean
           description: Désactiver cette déclinaison sans toucher aux autres
@@ -11749,8 +11782,9 @@ components:
         prix_base:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           description: Prix de base ou prix indicatif en FCFA
+          example: '15000.00'
         est_actif:
           type: boolean
           description: Décochez pour retirer le produit du catalogue public.
@@ -11817,8 +11851,9 @@ components:
         prix_base:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           description: Prix de base ou prix indicatif en FCFA
+          example: '15000.00'
         prix_min:
           type: number
           format: double
@@ -11892,8 +11927,9 @@ components:
         prix_base:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           description: Prix de base ou prix indicatif en FCFA
+          example: '15000.00'
         est_actif:
           type: boolean
           description: Décochez pour retirer le produit du catalogue public.
@@ -11957,8 +11993,9 @@ components:
         prix_base:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           description: Prix de base ou prix indicatif en FCFA
+          example: '15000.00'
         est_actif:
           type: boolean
           description: Décochez pour retirer le produit du catalogue public.
@@ -12096,8 +12133,9 @@ components:
         montant:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '15000.00'
         motif:
           allOf:
           - $ref: '#/components/schemas/MotifRemboursementEnum'
@@ -12156,8 +12194,9 @@ components:
         montant:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '15000.00'
         motif:
           allOf:
           - $ref: '#/components/schemas/MotifRemboursementEnum'
@@ -12267,8 +12306,9 @@ components:
         prix_unitaire:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '15000.00'
         quantite:
           type: integer
           maximum: 2147483647
@@ -12317,43 +12357,51 @@ components:
         montant_brut:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '15000.00'
         montant_commission:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '1500.00'
         montant_frais_fixes:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '100.00'
         montant_retours:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '0.00'
         montant_livraison:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '1500.00'
         montant_net:
           type: string
           format: decimal
           pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '13400.00'
         montant_ajustements:
           type: string
           format: decimal
           pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '-2500.00'
         montant_a_verser:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '15000.00'
         lignes:
           type: array
           items:
@@ -12454,43 +12502,51 @@ components:
         montant_brut:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '15000.00'
         montant_commission:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '1500.00'
         montant_frais_fixes:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '100.00'
         montant_retours:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '0.00'
         montant_livraison:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '1500.00'
         montant_net:
           type: string
           format: decimal
           pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '13400.00'
         montant_ajustements:
           type: string
           format: decimal
           pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '-2500.00'
         montant_a_verser:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '15000.00'
         lignes:
           type: array
           items:
@@ -13442,30 +13498,34 @@ components:
         prix:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
           description: Prix de vente standard en FCFA
+          example: '15000.00'
         prix_promo:
           type:
           - string
           - 'null'
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
           description: Prix promotionnel optionnel en FCFA
+          example: '12500.00'
         prix_effectif:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '12500.00'
         poids_kg:
           type:
           - string
           - 'null'
           format: decimal
-          pattern: ^-?\d{0,4}(?:\.\d{0,2})?$
+          pattern: ^\d{0,4}(?:\.\d{0,2})?$
           readOnly: true
           description: Poids unitaire en kg (utile pour le calcul des frais de livraison)
+          example: '1.50'
         est_active:
           type: boolean
           readOnly: true
@@ -13516,27 +13576,31 @@ components:
         prix:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           description: Prix de vente standard en FCFA
+          example: '15000.00'
         prix_promo:
           type:
           - string
           - 'null'
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           description: Prix promotionnel optionnel en FCFA
+          example: '12500.00'
         prix_effectif:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '12500.00'
         poids_kg:
           type:
           - string
           - 'null'
           format: decimal
-          pattern: ^-?\d{0,4}(?:\.\d{0,2})?$
+          pattern: ^\d{0,4}(?:\.\d{0,2})?$
           description: Poids unitaire en kg (utile pour le calcul des frais de livraison)
+          example: '1.50'
         est_active:
           type: boolean
           description: Désactiver cette déclinaison sans toucher aux autres
@@ -13574,22 +13638,25 @@ components:
         prix:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           description: Prix de vente standard en FCFA
+          example: '15000.00'
         prix_promo:
           type:
           - string
           - 'null'
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           description: Prix promotionnel optionnel en FCFA
+          example: '12500.00'
         poids_kg:
           type:
           - string
           - 'null'
           format: decimal
-          pattern: ^-?\d{0,4}(?:\.\d{0,2})?$
+          pattern: ^\d{0,4}(?:\.\d{0,2})?$
           description: Poids unitaire en kg (utile pour le calcul des frais de livraison)
+          example: '1.50'
         est_active:
           type: boolean
           description: Désactiver cette déclinaison sans toucher aux autres
@@ -13617,30 +13684,34 @@ components:
         prix:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
           description: Prix de vente standard en FCFA
+          example: '15000.00'
         prix_promo:
           type:
           - string
           - 'null'
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
           description: Prix promotionnel optionnel en FCFA
+          example: '12500.00'
         prix_effectif:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '12500.00'
         poids_kg:
           type:
           - string
           - 'null'
           format: decimal
-          pattern: ^-?\d{0,4}(?:\.\d{0,2})?$
+          pattern: ^\d{0,4}(?:\.\d{0,2})?$
           readOnly: true
           description: Poids unitaire en kg (utile pour le calcul des frais de livraison)
+          example: '1.50'
         est_active:
           type: boolean
           readOnly: true
@@ -13694,27 +13765,31 @@ components:
         prix:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           description: Prix de vente standard en FCFA
+          example: '15000.00'
         prix_promo:
           type:
           - string
           - 'null'
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           description: Prix promotionnel optionnel en FCFA
+          example: '12500.00'
         prix_effectif:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
+          example: '12500.00'
         poids_kg:
           type:
           - string
           - 'null'
           format: decimal
-          pattern: ^-?\d{0,4}(?:\.\d{0,2})?$
+          pattern: ^\d{0,4}(?:\.\d{0,2})?$
           description: Poids unitaire en kg (utile pour le calcul des frais de livraison)
+          example: '1.50'
         est_active:
           type: boolean
           description: Désactiver cette déclinaison sans toucher aux autres
@@ -13745,22 +13820,25 @@ components:
         prix:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           description: Prix de vente standard en FCFA
+          example: '15000.00'
         prix_promo:
           type:
           - string
           - 'null'
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
           description: Prix promotionnel optionnel en FCFA
+          example: '12500.00'
         poids_kg:
           type:
           - string
           - 'null'
           format: decimal
-          pattern: ^-?\d{0,4}(?:\.\d{0,2})?$
+          pattern: ^\d{0,4}(?:\.\d{0,2})?$
           description: Poids unitaire en kg (utile pour le calcul des frais de livraison)
+          example: '1.50'
         est_active:
           type: boolean
           description: Désactiver cette déclinaison sans toucher aux autres
@@ -13789,15 +13867,18 @@ components:
         remise:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
+          example: '1500.00'
         montant_initial:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
+          example: '15000.00'
         montant_final:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
+          example: '15000.00'
         coupon:
           $ref: '#/components/schemas/CouponReduction'
       required:
@@ -13830,7 +13911,8 @@ components:
         montant_commande:
           type: string
           format: decimal
-          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
+          example: '15000.00'
       required:
       - code
       - montant_commande

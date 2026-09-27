@@ -73,7 +73,9 @@ Vérifier en `-v 2` que chaque test affiche `ok` et non `skipped`. La suite comp
 
 ## 6. Pièges rencontrés
 
-- **Multipart et booléens** : en `multipart/form-data`, DRF lit un booléen absent comme `false` (une boutique créée sans `est_active=true` est fermée). À garder en tête côté frontend et dans les collections Postman.
+- **Multipart et booléens** : par défaut, DRF lit un booléen absent d'un formulaire comme `false` (une boutique créée avec son logo naissait fermée, un `PUT` multipart la fermait). C'est corrigé globalement dans `apps/core/apps.py` (`BooleanField.default_empty_html`) : absent = non fourni, comme en JSON. Ne pas retirer ce réglage ; `config/tests.py::BooleensMultipartTests` le vérifie pour tous les serializers.
+- **404 génériques** : `get_object_or_404` produit « No Commande matches the given query. » ; `config/exceptions.py` le remplace par « Ressource introuvable. » (sans nom de modèle). Un `Http404("message")` écrit par une vue est conservé.
+- **Montants dans le schéma** : `config/schema.py` retire le signe moins du motif des décimaux (sauf `DECIMAUX_SIGNES`) et fixe des exemples FCFA réalistes. Un nouveau montant pouvant être négatif doit être ajouté à `DECIMAUX_SIGNES`.
 - **`apps.py`** : `name = 'apps.<nom>'`, sinon Django ne retrouve pas l'app.
 - **Tests et `DEBUG`** : le lanceur de tests force `DEBUG=False` ; un test qui en dépend doit utiliser `override_settings(DEBUG=True)`.
 - **`transaction.on_commit`** : les emails et notifications partent après le commit ; dans un `TestCase`, utiliser `captureOnCommitCallbacks` pour les vérifier.

@@ -105,8 +105,45 @@ TAGS_PAR_PREFIXE = {
 
 METHODES_AVEC_CORPS = {"POST", "PUT", "PATCH"}
 
+# Décimaux renvoyés en chaîne (« 15000.00 ») : drf-spectacular produit un motif
+# qui accepte le signe moins, d'où des exemples absurdes dans Swagger (« -04 »).
+# Montants positifs par défaut, sauf ceux qui peuvent réellement être négatifs.
+#: Montants de reversement pouvant être négatifs (ajustements ≤ 0, net après retours).
+DECIMAUX_SIGNES = {"montant_ajustements", "montant_net"}
+EXEMPLE_MONTANT_FCFA = "15000.00"
+#: Exemples par nom de champ quand le montant type ne convient pas.
+EXEMPLES_DECIMAUX = {
+    "prix_promo": "12500.00",
+    "prix_effectif": "12500.00",
+    "frais_livraison": "1500.00",
+    "frais_livraison_vendeur": "1500.00",
+    "frais_livraison_rembourses": "1500.00",
+    "montant_livraison": "1500.00",
+    "montant_remise": "1500.00",
+    "remise": "1500.00",
+    "montant_commission": "1500.00",
+    "montant_frais_fixes": "100.00",
+    "montant_retours": "0.00",
+    "montant_ajustements": "-2500.00",
+    "montant_net": "13400.00",
+    "montant_minimum_commande": "10000.00",
+    # Hors montants FCFA.
+    "poids_kg": "1.50",
+    "taux_commission": "10.00",
+    "valeur": "10.00",
+}
+
 
 class SchemaAnitche(AutoSchema):
+    def _map_serializer_field(self, field, direction, bypass_extensions=False):
+        schema = super()._map_serializer_field(field, direction, bypass_extensions)
+        if isinstance(field, serializers.DecimalField) and schema.get("format") == "decimal":
+            # Type inchangé (chaîne décimale) : seuls le motif et l'exemple changent.
+            if field.field_name not in DECIMAUX_SIGNES and "pattern" in schema:
+                schema["pattern"] = schema["pattern"].replace("^-?", "^", 1)
+            schema.setdefault("example", EXEMPLES_DECIMAUX.get(field.field_name, EXEMPLE_MONTANT_FCFA))
+        return schema
+
     def get_tags(self):
         segments = self.path.strip("/").split("/")
         if len(segments) >= 2 and segments[0] == "api" and segments[1] in TAGS_PAR_PREFIXE:

@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from decimal import Decimal
 from pathlib import Path
 
 import yaml
@@ -130,6 +131,29 @@ class SchemaOpenAPITests(SimpleTestCase):
         requete = self.schema["components"]["schemas"]["ProduitVendeurRequest"]
         for champ in ("id", "slug", "boutique_nom", "images", "variantes"):
             self.assertNotIn(champ, requete["properties"])
+
+    def test_montants_positifs_avec_exemples_realistes(self):
+        """Décimaux (chaînes) : plus d'exemples absurdes (« -04 ») générés par
+        Swagger à partir d'un motif autorisant le signe moins. Montants FCFA
+        entiers et positifs, sauf les deux montants de reversement qui
+        peuvent être négatifs."""
+        signes = {"montant_ajustements", "montant_net"}
+        hors_fcfa = {"poids_kg", "taux_commission", "valeur"}
+        vus = 0
+        for composant, schema in self.schema["components"]["schemas"].items():
+            for nom, propriete in (schema.get("properties") or {}).items():
+                if propriete.get("format") != "decimal":
+                    continue
+                vus += 1
+                with self.subTest(composant=composant, champ=nom):
+                    exemple = propriete.get("example")
+                    self.assertIsInstance(exemple, str)
+                    self.assertRegex(exemple, propriete["pattern"])
+                    self.assertTrue(exemple.endswith(".00") or nom in hors_fcfa, exemple)
+                    if nom not in signes:
+                        self.assertFalse(propriete["pattern"].startswith("^-"), propriete["pattern"])
+                        self.assertGreaterEqual(Decimal(exemple), 0)
+        self.assertGreater(vus, 50)
 
     def test_enumerations_nommees(self):
         composants = self.schema["components"]["schemas"]

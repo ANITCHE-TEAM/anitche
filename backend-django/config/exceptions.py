@@ -1,4 +1,8 @@
 import logging
+import re
+
+from django.http import Http404
+from rest_framework.exceptions import NotFound
 from rest_framework.views import exception_handler
 from rest_framework.response import Response
 from rest_framework import status
@@ -8,6 +12,7 @@ logger = logging.getLogger("anitche.exceptions")
 
 MESSAGE_ERREUR_GENERIQUE = "Une erreur est survenue lors du traitement de la requête."
 MESSAGE_ERREUR_INTERNE = "Une erreur interne du serveur est survenue. L'incident a été enregistré."
+MESSAGE_RESSOURCE_INTROUVABLE = "Ressource introuvable."
 
 
 def _aplatir(valeur, prefixe, erreurs):
@@ -65,6 +70,22 @@ def normaliser_erreurs(donnees):
     return detail, erreurs
 
 
+#: Message de django.shortcuts.get_object_or_404 (utilisé aussi par les vues
+#: génériques DRF) : en anglais et révélant le nom du modèle.
+MOTIF_404_DJANGO = re.compile(r"^No .+ matches the given query\.$")
+
+
+def _est_404_generique(exc):
+    """Http404 sans message, ou avec le message automatique de Django.
+
+    Un Http404 levé par une vue avec son propre message (« Document demandé
+    inconnu. ») n'est pas générique : il est conservé."""
+    if not isinstance(exc, Http404):
+        return False
+    message = str(exc.args[0]) if exc.args else ""
+    return not message or bool(MOTIF_404_DJANGO.match(message))
+
+
 def custom_exception_handler(exc, context):
     """Gestionnaire d'exceptions global pour Django REST Framework.
 
@@ -81,6 +102,11 @@ def custom_exception_handler(exc, context):
     notifications des fournisseurs de paiement (apps.paiements.views),
     qui répondent au format attendu par le fournisseur.
     """
+    # 404 automatique (get_object_or_404) : message neutre, en français, sans
+    # nom de modèle, identique quel que soit le module.
+    if _est_404_generique(exc):
+        exc = NotFound(MESSAGE_RESSOURCE_INTROUVABLE)
+
     # Appel du gestionnaire par défaut de DRF
     response = exception_handler(exc, context)
 

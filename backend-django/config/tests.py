@@ -7,23 +7,38 @@ paiement (apps.paiements.views._VueNotification), qui répondent au format
 attendu par le fournisseur.
 """
 
+import importlib
+import inspect
+import io
 import uuid
 from decimal import Decimal
 from unittest import mock
 
 from django.core.cache import cache
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.http import Http404, QueryDict
 from django.test import SimpleTestCase
-from rest_framework.exceptions import ValidationError
+from PIL import Image
+from rest_framework import serializers
+from rest_framework.exceptions import NotFound, ValidationError
+from rest_framework.fields import empty
 from rest_framework.test import APITestCase
 from rest_framework.throttling import ScopedRateThrottle
 
+from apps.catalogue.models import ImageProduit, Produit, VarianteProduit
 from apps.commandes.models import Commande, GroupeCommande
+from apps.livraison.models import TarifLivraison
 from apps.paiements.models import Paiement
-from apps.support.models import SupportTicket
+from apps.support.models import SupportTicket, TicketMessage
 from apps.utilisateurs.models import Role, StatutKYC, Utilisateur
 from apps.vendeurs.models import Boutique
 
-from .exceptions import MESSAGE_ERREUR_INTERNE, custom_exception_handler, normaliser_erreurs
+from .exceptions import (
+    MESSAGE_ERREUR_INTERNE,
+    MESSAGE_RESSOURCE_INTROUVABLE,
+    custom_exception_handler,
+    normaliser_erreurs,
+)
 
 
 MOT_DE_PASSE = "MotDePasseSolide123!"
@@ -318,3 +333,181 @@ class FormatErreursParModuleTests(VerificationFormatMixin, APITestCase):
 
     def test_passeport_introuvable(self):
         self.verifier_format(self.client.get("/api/passeports/verifier/INCONNU/"), 404)
+
+
+# =========================================================================
+# 404 génériques : message français, sans nom de modèle
+# =========================================================================
+
+class Introuvable404Tests(VerificationFormatMixin, APITestCase):
+    """Les 404 de get_object_or_404 (« No Commande matches the given
+    query. ») deviennent un message neutre dans tous les modules ; un
+    message 404 écrit par une vue est conservé."""
+
+    def setUp(self):
+        self.client_user = creer_utilisateur("client404@anitche.ci")
+        self.admin = creer_utilisateur("admin404@anitche.ci", role=Role.ADMIN)
+        self.vendeur = creer_utilisateur("vendeur404@anitche.ci", role=Role.VENDEUR, statut_kyc=StatutKYC.VALIDE)
+        Boutique.objects.create(proprietaire=self.vendeur, nom="Boutique 404")
+
+    def test_message_generique_dans_chaque_module(self):
+        inconnu = uuid.uuid4()
+        cas = [
+            (None, "get", "/api/catalogue/produits/inexistant/"),
+            (None, "get", "/api/vendeurs/boutiques/inexistante/"),
+            ("vendeur", "get", "/api/catalogue/vendeur/produits/999999/"),
+            ("admin", "post", "/api/vendeurs/administration/demandes/999999/valider/"),
+            ("client", "get", f"/api/commandes/{inconnu}/"),
+            ("client", "post", f"/api/commandes/{inconnu}/annuler/"),
+            ("client", "get", f"/api/paiements/{inconnu}/"),
+            ("client", "get", f"/api/livraison/{inconnu}/"),
+            ("admin", "patch", f"/api/livraison/admin/tarifs/{inconnu}/"),
+            ("client", "get", f"/api/retours/{inconnu}/"),
+            ("client", "get", f"/api/support/tickets/{inconnu}/"),
+            ("client", "patch", f"/api/notifications/{inconnu}/lire/"),
+        ]
+        comptes = {"client": self.client_user, "admin": self.admin, "vendeur": self.vendeur, None: None}
+        for compte, methode, url in cas:
+            with self.subTest(url=url):
+                self.client.force_authenticate(comptes[compte])
+                donnees = self.verifier_format(getattr(self.client, methode)(url, {}, format="json"), 404)
+                self.assertEqual(donnees["detail"], MESSAGE_RESSOURCE_INTROUVABLE)
+                self.assertEqual(donnees["errors"], {})
+
+    def test_message_ecrit_par_la_vue_conserve(self):
+        self.client.force_authenticate(self.client_user)
+        reponse = self.client.get(f"/api/utilisateurs/kyc/{self.client_user.pk}/champ_inconnu/")
+        self.assertEqual(self.verifier_format(reponse, 404)["detail"], "Document demandé inconnu.")
+
+    def test_handler(self):
+        for exception in (Http404(), Http404("No Commande matches the given query.")):
+            reponse = custom_exception_handler(exception, {})
+            self.assertEqual(reponse.status_code, 404)
+            self.assertEqual(reponse.data["detail"], MESSAGE_RESSOURCE_INTROUVABLE)
+        self.assertEqual(custom_exception_handler(NotFound("Aucune boutique."), {}).data["detail"], "Aucune boutique.")
+
+
+# =========================================================================
+# Multipart : un booléen absent prend la valeur par défaut, pas False
+# =========================================================================
+
+APPLICATIONS_METIER = [
+    "utilisateurs", "vendeurs", "catalogue", "panier", "commandes", "paiements", "livraison",
+    "retours", "fidelite", "notifications", "support", "passeport_qr",
+]
+
+
+def image_png(nom="image.png"):
+    tampon = io.BytesIO()
+    Image.new("RGB", (8, 8), (200, 50, 50)).save(tampon, format="PNG")
+    return SimpleUploadedFile(nom, tampon.getvalue(), content_type="image/png")
+
+
+class BooleensMultipartTests(APITestCase):
+    """En multipart, DRF lisait un booléen absent comme False : une boutique
+    créée avec son logo naissait fermée, un produit ou une variante
+    inactifs. Un booléen absent est désormais ignoré : valeur par défaut du
+    modèle à la création, valeur actuelle conservée en mise à jour."""
+
+    def setUp(self):
+        self.vendeur = creer_utilisateur("vendeur.multipart@anitche.ci", role=Role.VENDEUR, statut_kyc=StatutKYC.VALIDE)
+        self.client.force_authenticate(self.vendeur)
+
+    def creer_boutique(self):
+        reponse = self.client.post(
+            "/api/vendeurs/ma-boutique/", {"nom": "Boutique Multipart", "logo": image_png()}, format="multipart",
+        )
+        self.assertEqual(reponse.status_code, 201, reponse.data)
+        return Boutique.objects.get(proprietaire=self.vendeur)
+
+    def creer_produit(self, boutique):
+        return Produit.objects.create(boutique=boutique, nom="Pagne", prix_base=Decimal("5000"))
+
+    def test_boutique_creee_avec_logo_reste_ouverte(self):
+        boutique = self.creer_boutique()
+        self.assertTrue(boutique.est_active)
+        self.assertFalse(boutique.livraison_offerte)
+        self.assertTrue(boutique.est_publiable)
+
+    def test_boutique_mise_a_jour_complete_ne_la_ferme_pas(self):
+        boutique = self.creer_boutique()
+        reponse = self.client.put(
+            "/api/vendeurs/ma-boutique/", {"nom": boutique.nom, "description": "Nouvelle"}, format="multipart",
+        )
+        self.assertEqual(reponse.status_code, 200, reponse.data)
+        boutique.refresh_from_db()
+        self.assertTrue(boutique.est_active)
+        self.assertEqual(boutique.description, "Nouvelle")
+
+    def test_booleen_envoye_reste_pris_en_compte(self):
+        self.creer_boutique()
+        reponse = self.client.patch("/api/vendeurs/ma-boutique/", {"est_active": "false"}, format="multipart")
+        self.assertEqual(reponse.status_code, 200, reponse.data)
+        self.assertFalse(Boutique.objects.get(proprietaire=self.vendeur).est_active)
+
+    def test_produit_cree_actif(self):
+        self.creer_boutique()
+        reponse = self.client.post(
+            "/api/catalogue/vendeur/produits/", {"nom": "Pagne", "prix_base": "5000"}, format="multipart",
+        )
+        self.assertEqual(reponse.status_code, 201, reponse.data)
+        self.assertTrue(Produit.objects.get(pk=reponse.data["id"]).est_actif)
+
+    def test_variante_creee_active(self):
+        produit = self.creer_produit(self.creer_boutique())
+        reponse = self.client.post(
+            f"/api/catalogue/vendeur/produits/{produit.pk}/variantes/",
+            {"nom": "Taille M", "prix": "5000", "quantite_initiale": "3"}, format="multipart",
+        )
+        self.assertEqual(reponse.status_code, 201, reponse.data)
+        self.assertTrue(VarianteProduit.objects.get(pk=reponse.data["id"]).est_active)
+
+    def test_image_produit(self):
+        produit = self.creer_produit(self.creer_boutique())
+        url = f"/api/catalogue/vendeur/produits/{produit.pk}/images/"
+        secondaire = self.client.post(url, {"image": image_png()}, format="multipart")
+        principale = self.client.post(url, {"image": image_png(), "est_principale": "true"}, format="multipart")
+        self.assertEqual((secondaire.status_code, principale.status_code), (201, 201))
+        self.assertFalse(ImageProduit.objects.get(pk=secondaire.data["id"]).est_principale)
+        self.assertTrue(ImageProduit.objects.get(pk=principale.data["id"]).est_principale)
+
+    def test_tarif_de_livraison_cree_actif(self):
+        self.client.force_authenticate(creer_utilisateur("admin.multipart@anitche.ci", role=Role.ADMIN))
+        reponse = self.client.post(
+            "/api/livraison/admin/tarifs/",
+            {"zone": "hors_abidjan", "commune": "Yamoussoukro", "montant": "3000"}, format="multipart",
+        )
+        self.assertEqual(reponse.status_code, 201, reponse.data)
+        self.assertTrue(TarifLivraison.objects.get(pk=reponse.data["id"]).est_actif)
+
+    def test_message_support_sans_note_interne(self):
+        agent = creer_utilisateur("agent.multipart@anitche.ci", role=Role.SUPPORT)
+        ticket = SupportTicket.objects.create(created_by=self.vendeur, subject="Colis", description="Où est-il ?")
+        self.client.force_authenticate(agent)
+        reponse = self.client.post(
+            f"/api/support/tickets/{ticket.pk}/messages/", {"content": "Nous vérifions."}, format="multipart",
+        )
+        self.assertEqual(reponse.status_code, 201, reponse.data)
+        self.assertFalse(TicketMessage.objects.get(pk=reponse.data["id"]).is_internal_note)
+
+    def test_aucun_booleen_ecrit_ne_retombe_sur_false_en_multipart(self):
+        """Garde-fou sur tous les serializers (KYC, retours, notifications,
+        passeports… compris) : absent d'un formulaire, un booléen écrit est
+        ignoré, ou prend son défaut déclaré (`restock` des retours : True)."""
+        formulaire_vide = QueryDict("")
+        for application in APPLICATIONS_METIER:
+            module = importlib.import_module(f"apps.{application}.serializers")
+            for nom, classe in inspect.getmembers(module, inspect.isclass):
+                if not issubclass(classe, serializers.Serializer) or classe.__module__ != module.__name__:
+                    continue
+                if issubclass(classe, serializers.ModelSerializer) and not hasattr(classe, "Meta"):
+                    continue
+                for nom_champ, champ in classe().fields.items():
+                    if isinstance(champ, serializers.BooleanField) and not champ.read_only:
+                        with self.subTest(serializer=nom, champ=nom_champ):
+                            self.assertIs(champ.get_value(formulaire_vide), empty)
+        from apps.retours.serializers import TraiterDemandeRetourSerializer
+
+        traitement = TraiterDemandeRetourSerializer(data=QueryDict("action=approuver"))
+        self.assertTrue(traitement.is_valid(), traitement.errors)
+        self.assertIs(traitement.validated_data["restock"], True)
