@@ -130,6 +130,7 @@ Avant ce correctif, `X-Forwarded-For` était lu tel quel : IP falsifiable dans l
 | Plusieurs passeports possibles pour un même lot | 400 `errors.numero_lot` |
 | Passeport accepté sur produit/variante inactifs | 400 |
 | Limite `anon` globale (50/h) | Limite dédiée `passeport_verification` (600/h) |
+| Code inconnu : `{"detail": …}` seul | Format d'erreur commun `{success: false, status_code: 404, detail, errors: {}}` (même message dans `detail`) |
 
 ## 9. Décisions en attente
 

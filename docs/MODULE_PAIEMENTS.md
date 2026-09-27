@@ -197,6 +197,7 @@ Rien d'autre ne change : commandes, remboursements, reversements et frais ignore
 7. **Espace vendeur.** Nouvel écran « Mes reversements » : `GET /api/paiements/vendeur/reversements/` (ce qui a été vendu, frais déduits, net, date de disponibilité) et le résumé `…/resume/`.
 8. **Back-office.** Écrans remboursements à traiter, reversements disponibles (versement manuel ou transfert), barèmes de frais (§ 4).
 9. **KYC.** Retirer `compte_bancaire` du formulaire (ignoré s'il est envoyé).
+10. **Format d'erreur unifié (septembre 2026).** Le **502** (fournisseur indisponible), les **409** (annulation d'un paiement qui n'est plus en attente, remboursement ou reversement déjà traité) et le **404** du résumé des reversements portaient avant un simple `{"detail": …}` : ils suivent désormais le format commun `{success: false, status_code, detail, errors}`, `errors` toujours un objet clé → liste de messages (`{}` si aucun champ n'est en cause). **Exception** : les notifications des fournisseurs (`webhook/<fournisseur>/`, `webhook/<fournisseur>/transfert/`) ne sont pas appelées par le frontend et répondent au format attendu par le fournisseur : `{"message": …}` en 200, `{"erreur": …}` sinon (les 429 de leur limite de débit suivent le format commun).
 
 ## 11. Sécurité — failles corrigées (diagnostic de septembre 2026)
 

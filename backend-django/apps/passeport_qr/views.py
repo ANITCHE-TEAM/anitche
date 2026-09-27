@@ -1,7 +1,7 @@
 from django.db import IntegrityError
 from django.db.models import Exists, OuterRef
 from rest_framework import generics, status
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
@@ -56,10 +56,7 @@ class PasseportPublicVerificationView(APIView):
         )
 
         if not passeport:
-            return Response(
-                {"detail": f"Passeport numérique introuvable pour le code '{code}'."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+            raise NotFound(f"Passeport numérique introuvable pour le code '{code}'.")
 
         # Un scan de passeport révoqué est aussi journalisé : un code
         # révoqué encore scanné peut signaler des QR recopiés.

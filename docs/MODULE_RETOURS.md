@@ -88,6 +88,7 @@ Avec le délai de 7 jours (égal à la rétractation), le cas « retour après v
 6. **Vendeur** : le rejet exige un motif (`reponse`) ; plus de bouton « Rejeter » après réception ; la réception est possible directement depuis `approuve`. **403** pour une action du client, **400** pour une transition invalide.
 7. **`cloturer`** n'existe plus après un rejet (le rejet est définitif).
 8. **Erreurs à prévoir** : **429** au-delà de 10 demandes ou 30 photos par heure.
+9. **Format d'erreur unifié (septembre 2026).** Les refus portaient avant un simple `{"detail": …}` (et `{"image": "…"}` pour une photo manquante) : ils suivent désormais le format commun `{success: false, status_code, detail, errors}`, `errors` toujours un objet clé → liste de messages (`{}` si aucun champ n'est en cause) ; photo manquante → **400** `errors.image` (liste).
 
 ## 9. Sécurité — failles corrigées (diagnostic de septembre 2026)
 

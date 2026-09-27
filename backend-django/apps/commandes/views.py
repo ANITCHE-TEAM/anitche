@@ -7,7 +7,7 @@ from rest_framework import generics
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.exceptions import APIException, ValidationError
+from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework import status
 
@@ -31,6 +31,7 @@ from .services import (
     trouver_coupon,
 )
 from apps.catalogue.models import Stock
+from apps.core.exceptions import ErreurMetier
 from apps.panier.models import Panier
 from apps.panier.services import get_or_create_panier
 from apps.fidelite.services import consommer_coupon
@@ -263,10 +264,6 @@ class CommandeDetailView(generics.RetrieveAPIView):
         return Commande.objects.filter(client=self.request.user).select_related("groupe").prefetch_related("article")
 
 
-def reponse_transition_impossible(erreur):
-    return Response({"detail": str(erreur)}, status=status.HTTP_409_CONFLICT)
-
-
 class AnnulerCommandeView(APIView):
     """Annulation par le client, tant que la commande n'est pas en
     préparation. Stock restitué une seule fois ; un paiement déjà encaissé
@@ -278,7 +275,7 @@ class AnnulerCommandeView(APIView):
         try:
             annuler_commande(commande, Commande.MotifAnnulation.CLIENT, acteur=request.user)
         except TransitionImpossible as erreur:
-            return reponse_transition_impossible(erreur)
+            raise ErreurMetier(str(erreur), status.HTTP_409_CONFLICT)
         commande = Commande.objects.select_related("groupe").prefetch_related("article").get(pk=commande.pk)
         return Response(CommandeDetailSerializer(commande).data, status=status.HTTP_200_OK)
 
@@ -322,11 +319,11 @@ class PasserEnPreparationView(APIView):
     def post(self, request, pk):
         commande = get_object_or_404(commandes_du_vendeur(request.user), pk=pk)
         if commande.boutique.est_suspendue and not est_payee(commande):
-            return Response({"detail": BoutiqueNonSuspendue.message}, status=status.HTTP_403_FORBIDDEN)
+            raise PermissionDenied(BoutiqueNonSuspendue.message)
         try:
             passer_en_preparation(commande)
         except TransitionImpossible as erreur:
-            return reponse_transition_impossible(erreur)
+            raise ErreurMetier(str(erreur), status.HTTP_409_CONFLICT)
         commande = commandes_du_vendeur(request.user).get(pk=commande.pk)
         return Response(CommandeVendeurSerializer(commande).data, status=status.HTTP_200_OK)
 
@@ -344,7 +341,7 @@ class AnnulerCommandeAdministrationView(APIView):
         try:
             annuler_commande(commande, Commande.MotifAnnulation.ADMINISTRATION, acteur=request.user)
         except TransitionImpossible as erreur:
-            return reponse_transition_impossible(erreur)
+            raise ErreurMetier(str(erreur), status.HTTP_409_CONFLICT)
         logger_securite.info(
             "Commande %s annulée par admin_id=%s", commande.numero_commande, request.user.id,
         )

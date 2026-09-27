@@ -51,7 +51,7 @@ Le module dépend de `apps/core` (validateurs de fichiers, `CheminUploadUUID`, `
 
 Également protégé par `EmailVerifie` hors de ce module : `POST /api/commandes/valider-panier/`.
 
-Format d'erreur commun (`config/exceptions.py`) : `success`, `status_code`, `detail`, `errors` ; les vues OTP et mot de passe oublié renvoient directement `{"message": …}`.
+Format d'erreur commun (`config/exceptions.py`) à toutes les erreurs, OTP, mot de passe oublié, connexion Google et déconnexion compris : `{success: false, status_code, detail, errors}`, `errors` étant toujours un objet clé → liste de messages (vide si l'erreur ne porte sur aucun champ). Les réponses de succès gardent leur `{"message": …}`.
 
 ## 4. JWT et chiffrement
 
@@ -113,7 +113,7 @@ Ne jamais passer à l'étape 5 tant que l'étape 4 signale des valeurs illisible
 
 ## 6. Email vérifié
 
-La connexion reste possible sans email vérifié (navigation, panier). Sont refusées tant que l'email n'est pas vérifié, avec **403** et `errors.code = "email_non_verifie"` :
+La connexion reste possible sans email vérifié (navigation, panier). Sont refusées tant que l'email n'est pas vérifié, avec **403** et `errors.code = ["email_non_verifie"]` :
 - `POST upload-kyc/` (dépôt KYC = demande vendeur) ;
 - `POST changement-contact/` ;
 - `POST /api/commandes/valider-panier/`.
@@ -167,18 +167,25 @@ Adresse mal saisie à l'inscription : la personne ne reçoit aucun code et ne pe
 Changements de contrat à intégrer (tous testés côté backend) :
 
 1. **Inscription sans téléphone.** `POST /api/utilisateurs/inscription/` accepte `email`, `password`, `nom`, `prenom`. Envoyer `telephone` renvoie **400** (`errors.telephone`). Retirer le champ du formulaire d'inscription ; proposer l'ajout du numéro ensuite, depuis le compte (`POST /api/utilisateurs/changement-contact/` avec `nouveau_telephone`, puis `verification-otp/` avec `type_usage = changement_telephone`).
-2. **Email vérifié obligatoire pour les actions sensibles.** Réponse **403** avec `errors.code = "email_non_verifie"` (et un message dans `detail`) sur :
+2. **Email vérifié obligatoire pour les actions sensibles.** Réponse **403** avec `errors.code = ["email_non_verifie"]` (et un message dans `detail`) sur :
    - `POST /api/utilisateurs/upload-kyc/` (devenir vendeur) ;
    - `POST /api/utilisateurs/changement-contact/` ;
    - `POST /api/commandes/valider-panier/` (commander).
 
-   À ce code, afficher l'écran de vérification de l'email (saisie du code) plutôt qu'une erreur générique. Se fier à `errors.code`, pas au texte. La connexion, la navigation et le panier restent accessibles sans vérification.
+   À ce code, afficher l'écran de vérification de l'email (saisie du code) plutôt qu'une erreur générique. Se fier à `errors.code[0]`, pas au texte. La connexion, la navigation et le panier restent accessibles sans vérification.
 3. **Nouvel endpoint de renvoi du code.** `POST /api/utilisateurs/renvoyer-code-inscription/` (connecté, sans corps) : **200** `{"message": "Code envoyé."}` ; **400** si l'email est déjà vérifié ; **429** au-delà de 5 envois de code par heure (compteur partagé avec les autres envois). Le code se saisit dans `POST /api/utilisateurs/verification-otp/` avec `{"code": "…", "type_usage": "inscription"}`.
 4. **`telephone_verifie` reste `false`** après un changement de téléphone (le code part par email) : ne pas afficher de badge « téléphone vérifié » sur la base de ce champ pour l'instant.
 5. **Limites de débit** (réponses **429**) : inscription 10/h par IP ; rafraîchissement du jeton 300/h par IP ; envois de code 5/h ; vérifications de code 10/h.
 6. **Téléchargement d'une pièce KYC perdue** : **404** « Ce document n'est plus disponible. » au lieu d'une erreur 500.
 
 7. **`compte_bancaire` retiré du dépôt KYC** (`POST /api/utilisateurs/upload-kyc/`) et de la fiche KYC vue par l'administration (`/api/vendeurs/…`). Retirer le champ du formulaire ; s'il est encore envoyé, il est ignoré (pas d'erreur).
+
+8. **Format d'erreur unifié** (toutes les erreurs de l'API) : `{"success": false, "status_code": 400, "detail": "Message principal", "errors": {"champ": ["message"]}}`. `errors` est toujours un objet dont chaque valeur est une **liste** de messages ; vide (`{}`) quand l'erreur ne porte sur aucun champ. Changements dans ce module :
+   - `verification-otp/` : code faux ou expiré → **400** `errors.code = ["…essais restants…"]` ; aucun code en attente → **400**, message dans `detail` (avant : `{"message": …}`) ;
+   - `renvoyer-code-inscription/` (email déjà vérifié), `mot-de-passe-oublie/confirmer/` (code invalide ou expiré, message générique inchangé) → **400**, message dans `detail` (avant : `{"message": …}`) ;
+   - `connexion-google/` : jeton invalide → **400** `errors.id_token` ; informations Google incomplètes → **400** ; compte désactivé → **403** ; compte existant non vérifié → **409**, message dans `detail` (avant : `{"message": …}`) ;
+   - `deconnexion/` : refresh absent ou invalide → **400** `errors.refresh` (avant : `{"message": …}`) ;
+   - `errors.code` de l'email non vérifié devient une liste : `["email_non_verifie"]`.
 
 Aucun autre champ de réponse ne change (le profil, les jetons et le dépôt KYC gardent leur format ; `numero_mobile_money` est renvoyé en clair au titulaire comme avant).
 

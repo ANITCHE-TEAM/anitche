@@ -2,7 +2,7 @@
 
 from rest_framework.permissions import BasePermission
 
-#: Code machine renvoyé dans `errors.code` : le frontend s'y fie pour
+#: Code machine renvoyé dans `errors.code[0]` : le frontend s'y fie pour
 #: proposer la vérification de l'email, sans analyser le texte du message.
 CODE_EMAIL_NON_VERIFIE = 'email_non_verifie'
 

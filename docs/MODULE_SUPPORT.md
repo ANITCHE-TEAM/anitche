@@ -74,6 +74,7 @@ Le frontend oriente le client : sur une commande livrée dans le délai, les bou
 6. **Back-office support** : file des tickets non assignés, bouton « Prendre en charge » (`assign/`), réassignation par l'administration, case « note interne » (`is_internal_note`).
 7. **Messages** : `read_at` est désormais renseigné (« Lu à … »).
 8. **Erreurs à prévoir** : **429** au-delà de 10 tickets, 60 messages ou 20 pièces jointes par heure.
+9. **Format d'erreur unifié (septembre 2026).** Les refus portaient avant un simple `{"detail": …}` : ils suivent désormais le format commun `{success: false, status_code, detail, errors}`, `errors` toujours un objet clé → liste de messages (`{}` si aucun champ n'est en cause). Note hors de 1 à 5 ou non entière → **400** `errors.satisfaction_rating` ; ticket pas encore résolu ou déjà noté → **400** (message dans `detail`) ; note par un autre que le créateur → **403**.
 
 ## 7. Sécurité — failles corrigées (diagnostic de septembre 2026)
 

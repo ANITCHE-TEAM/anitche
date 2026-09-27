@@ -4,10 +4,12 @@ from django.db import transaction
 from django.http import FileResponse, Http404
 from django.utils import timezone
 from rest_framework import generics, status
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from apps.core.exceptions import ErreurMetier
 
 from . import services
 from .models import SupportTicket, TicketAttachment, TicketMessage
@@ -17,8 +19,9 @@ from .services import STAFF_ROLES, get_visible_tickets  # noqa: F401 (réexport�
 logger_securite = logging.getLogger("securite")
 
 
-def error_response(error):
-    return Response({"detail": error.message}, status=error.status_code)
+def api_error(error):
+    """SupportError → exception rendered in the common error format."""
+    return ErreurMetier(error.message, error.status_code)
 
 
 class ScopedOnPostMixin:
@@ -86,7 +89,7 @@ class SupportTicketChangeStatusView(APIView):
         try:
             ticket = services.change_status(pk, request.user, request.data.get("status"))
         except services.SupportError as error:
-            return error_response(error)
+            raise api_error(error)
         return Response(SupportTicketSerializer(ticket, context={"request": request}).data)
 
 
@@ -100,7 +103,7 @@ class SupportTicketAssignView(APIView):
         try:
             ticket = services.assign(pk, request.user, request.data.get("assigned_to"))
         except services.SupportError as error:
-            return error_response(error)
+            raise api_error(error)
         return Response(SupportTicketSerializer(ticket, context={"request": request}).data)
 
 
@@ -115,17 +118,17 @@ class SupportTicketRateView(APIView):
             if ticket is None:
                 raise Http404
             if ticket.created_by_id != request.user.pk:
-                return Response({"detail": "Seul le créateur du ticket peut le noter."}, status=status.HTTP_403_FORBIDDEN)
+                raise PermissionDenied("Seul le créateur du ticket peut le noter.")
             if ticket.status not in (SupportTicket.Status.RESOLVED, SupportTicket.Status.CLOSED):
-                return Response({"detail": "Le ticket se note une fois résolu ou fermé."}, status=status.HTTP_400_BAD_REQUEST)
+                raise ErreurMetier("Le ticket se note une fois résolu ou fermé.")
             if ticket.satisfaction_rating is not None:
-                return Response({"detail": "Ce ticket a déjà été noté."}, status=status.HTTP_400_BAD_REQUEST)
+                raise ErreurMetier("Ce ticket a déjà été noté.")
             try:
                 rating = int(request.data.get("satisfaction_rating"))
             except (TypeError, ValueError):
-                return Response({"detail": "La note doit être un nombre entier."}, status=status.HTTP_400_BAD_REQUEST)
+                raise ValidationError({"satisfaction_rating": ["La note doit être un nombre entier."]})
             if rating < 1 or rating > 5:
-                return Response({"detail": "La note doit être comprise entre 1 et 5."}, status=status.HTTP_400_BAD_REQUEST)
+                raise ValidationError({"satisfaction_rating": ["La note doit être comprise entre 1 et 5."]})
             ticket.satisfaction_rating = rating
             ticket.save(update_fields=["satisfaction_rating", "updated_at"])
         return Response(SupportTicketSerializer(ticket, context={"request": request}).data)
@@ -166,7 +169,7 @@ class TicketMessageListCreateView(ScopedOnPostMixin, generics.ListCreateAPIView)
                 serializer.validated_data["content"], serializer.validated_data.get("is_internal_note", False),
             )
         except services.SupportError as error:
-            return error_response(error)
+            raise api_error(error)
         return Response(self.get_serializer(message).data, status=status.HTTP_201_CREATED)
 
 
@@ -190,7 +193,7 @@ class TicketAttachmentListCreateView(ScopedOnPostMixin, generics.ListCreateAPIVi
             try:
                 message = services.check_new_attachment(request.user, self.kwargs["message_id"])
             except services.SupportError as error:
-                return error_response(error)
+                raise api_error(error)
             serializer = self.get_serializer(data=request.data)
             serializer.is_valid(raise_exception=True)
             attachment = serializer.save(

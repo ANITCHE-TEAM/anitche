@@ -83,6 +83,8 @@ Point d'entrée unique des transitions : `apps/vendeurs/services.py`. L'API et l
 
 Un compte hors file d'attente renvoie **404** sur les deux routes de décision.
 
+**Format d'erreur unifié (septembre 2026).** Les refus des routes de décision (auto-approbation → **403**, transition impossible → **400**) renvoyaient `{"message": …}` : ils suivent désormais le format commun `{success: false, status_code, detail, errors}` (message dans `detail`, `errors` toujours un objet clé → liste de messages), comme toutes les autres erreurs de l'API.
+
 ## 5. Dépendances avec les autres modules
 
 - **catalogue** (à venir) : rattacher le produit à la boutique via `models.ForeignKey('vendeurs.Boutique', related_name='produits')`, et protéger les écritures avec `apps.vendeurs.permissions.EstVendeurValide`. Côté publication, tester `boutique.est_publiable` — ne pas retester `role`/`statut_kyc` à la main.

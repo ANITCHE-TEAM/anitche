@@ -157,7 +157,9 @@ class FideliteAPITestCase(BaseFideliteTestCase):
 
         response = self.client.post(url, data, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertFalse(response.data["valide"])
+        # Format d'erreur commun : le motif est rattaché au champ `code`.
+        self.assertFalse(response.data["success"])
+        self.assertIn("minimum", response.data["errors"]["code"][0])
 
     def test_rejet_coupon_autre_client(self):
         CouponReduction.objects.create(
@@ -178,7 +180,14 @@ class FideliteAPITestCase(BaseFideliteTestCase):
         # F5 : même réponse qu'un code inexistant (404), sans révéler le coupon.
         response = self.client.post(url, data, format="json")
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
-        self.assertFalse(response.data["valide"])
+        inexistant = self.client.post(url, {**data, "code": "INEXISTANT"}, format="json")
+        self.assertEqual(inexistant.status_code, status.HTTP_404_NOT_FOUND)
+        # Même forme qu'un code inexistant : seul le code saisi diffère.
+        self.assertEqual(
+            response.data["detail"].replace("NOMINATIF_AYA", "X"),
+            inexistant.data["detail"].replace("INEXISTANT", "X"),
+        )
+        self.assertEqual(response.data["errors"], {})
 
 
 class FideliteThrottleTestCase(BaseFideliteTestCase):

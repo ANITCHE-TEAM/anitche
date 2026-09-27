@@ -8,7 +8,7 @@ from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.throttling import ScopedRateThrottle
 
 from .models import CompteFidelite, CouponReduction, GainFidelite, TransactionFidelite
@@ -157,17 +157,11 @@ class VerifierCouponView(APIView):
         if coupon and coupon.client_id and coupon.client_id != request.user.pk:
             coupon = None
         if not coupon:
-            return Response(
-                {"valide": False, "detail": f"Le code promo '{code}' n'existe pas."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+            raise NotFound(f"Le code promo '{code}' n'existe pas.")
 
         valide, message = coupon.est_valide_pour(request.user, montant)
         if not valide:
-            return Response(
-                {"valide": False, "detail": message},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            raise ValidationError({"code": [message]})
 
         remise = coupon.calculer_remise(montant)
         nouveau_montant = max(Decimal("0.00"), montant - remise)

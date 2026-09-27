@@ -70,6 +70,7 @@ Toutes les vues filtrent par `request.user` (IDOR vérifié).
 3. **Nouveau type de transaction** `reprise` (« Reprise (achat remboursé) »).
 4. **`verifier-coupon/`** : un coupon nominatif d'un autre client renvoie désormais **404** « n'existe pas » (avant : 400 « nominatif »). Nouveau message 400 « Vous avez déjà utilisé ce coupon ».
 5. **Coupon rendu** : après l'annulation de tout un checkout, le coupon réapparaît utilisable dans `mes-coupons/` (`est_utilise: false`).
+6. **Format d'erreur unifié (septembre 2026).** `verifier-coupon/` ne renvoie plus `{"valide": false, "detail": …}` en cas de refus : code inexistant (ou nominatif d'un autre client) → **404** au format commun `{success: false, status_code, detail, errors}`, `errors` toujours un objet clé → liste de messages (`{}` si aucun champ n'est en cause), message dans `detail` ; coupon inapplicable (déjà utilisé, montant minimum, expiré…) → **400** avec le motif dans `errors.code`. La réponse **200** garde `valide: true`.
 
 ## 7. Sécurité — failles corrigées (diagnostic de septembre 2026)
 

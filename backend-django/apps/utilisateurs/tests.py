@@ -1947,7 +1947,7 @@ class EmailVerifieTests(TestCase):
             with self.subTest(libelle):
                 response = self.client.post(url, corps)
                 self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-                self.assertEqual(response.data['errors']['code'], CODE_EMAIL_NON_VERIFIE)
+                self.assertEqual(response.data['errors']['code'], [CODE_EMAIL_NON_VERIFIE])
         self.assertFalse(DocumentKYC.objects.exists())
         self.assertEqual(mail.outbox, [])
 

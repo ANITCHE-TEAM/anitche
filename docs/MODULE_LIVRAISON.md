@@ -163,6 +163,7 @@ Création et modification des tarifs sont tracées (`modifie_par`, journal `secu
 11. **Administration** : ne plus proposer de transitions libres (400 / 403, § 4).
 12. **Erreurs à prévoir** : **429** au-delà de 120 changements de statut par heure et par compte, ou de 10 contestations par heure.
 13. **Frais de livraison (§ 9).** Checkout : **ne plus demander la zone** (champ ignoré par le serveur). Menu déroulant des communes construit depuis `GET /api/livraison/tarifs/` (`communes`, avec le tarif de chacune), plus une entrée « Autre ville (hors Abidjan) » avec saisie libre de la ville au tarif `autres_villes`. Pour Abidjan, **toujours passer par le menu** : une saisie libre (« Riviera », « Le Plateau », « Abidjan ») n'est pas reconnue et part au tarif hors Abidjan. Afficher les montants et la `zone` déduite renvoyés par `POST /api/commandes/simuler-frais/` avant le paiement (frais par commande, « livraison offerte »). `adresse` contient `zone` (déduite). Back-office : écran des tarifs (`admin/tarifs/`), où l'ajout d'un tarif de commune en zone Abidjan étend le district.
+14. **Format d'erreur unifié (septembre 2026).** Les refus (400, 403, 409) portaient avant un simple `{"detail": …}` : ils suivent désormais le format commun `{success: false, status_code, detail, errors}`, `errors` toujours un objet clé → liste de messages (`{}` si aucun champ n'est en cause) ; le message reste dans `detail`. Assignation à un livreur inexistant → **400** `errors.livreur_id`.
 
 ## 11. Sécurité — failles corrigées (diagnostic de septembre 2026)
 

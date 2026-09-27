@@ -12,6 +12,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 from django.conf import settings
 import logging
 
+from apps.core.exceptions import ErreurMetier
 from apps.core.reseau import adresse_ip_client
 from .permissions import EmailVerifie
 
@@ -31,7 +32,7 @@ from .services import (
 
 from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from .models import (
     Utilisateur,
@@ -229,18 +230,12 @@ class VerificationOTPView(APIView):
         ).order_by('-date_creation').first()
 
         if not otp:
-            return Response(
-                {"message": "Aucun code en attente pour cette action."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            raise ErreurMetier("Aucun code en attente pour cette action.")
 
         valide, message = otp.verifier(data['code'])
 
         if not valide:
-            return Response(
-                {"message": message},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            raise ValidationError({"code": [message]})
 
         # Confirmation de l'inscription (F-04) : le compte a déjà été
         # créé (email_verifie=False par défaut) ; on ne le marque vérifié
@@ -307,10 +302,7 @@ class RenvoyerCodeInscriptionView(APIView):
 
     def post(self, request):
         if request.user.email_verifie:
-            return Response(
-                {"message": "Votre adresse email est déjà vérifiée."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            raise ErreurMetier("Votre adresse email est déjà vérifiée.")
 
         _, code = CodeOTP.generer(request.user, TypeUsageOTP.INSCRIPTION)
         envoyer_code_otp_email.delay(request.user.email, code, TypeUsageOTP.INSCRIPTION)
@@ -489,10 +481,7 @@ class ConfirmationMotDePasseOublieView(APIView):
         ).first()
 
         if not utilisateur:
-            return Response(
-                {"message": message_generique},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            raise ErreurMetier(message_generique)
 
         # Récupère le dernier OTP valide.
         otp = CodeOTP.objects.filter(
@@ -502,18 +491,12 @@ class ConfirmationMotDePasseOublieView(APIView):
         ).order_by('-date_creation').first()
 
         if not otp:
-            return Response(
-                {"message": message_generique},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            raise ErreurMetier(message_generique)
 
         valide, _ = otp.verifier(data['code'])
 
         if not valide:
-            return Response(
-                {"message": message_generique},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            raise ErreurMetier(message_generique)
 
         # Le mot de passe est automatiquement haché.
         utilisateur.set_password(data['nouveau_password'])
@@ -558,34 +541,21 @@ class ConnexionGoogleView(APIView):
                 settings.GOOGLE_OAUTH_CLIENT_ID,
             )
         except ValueError:
-            return Response(
-                {"message": "Token Google invalide."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            raise ValidationError({"id_token": ["Token Google invalide."]})
 
         try:
             utilisateur = resoudre_utilisateur_google(infos)
         except InfosGoogleIncompletes as erreur:
-            return Response(
-                {"message": str(erreur)},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            raise ErreurMetier(str(erreur))
         except CompteDesactive:
-            return Response(
-                {"message": "Ce compte a été désactivé."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+            raise PermissionDenied("Ce compte a été désactivé.")
         except LiaisonGoogleRefusee:
-            return Response(
-                {
-                    "message": (
-                        "Un compte existe déjà avec cet email mais n'a "
-                        "pas été vérifié. Réinitialisez le mot de passe "
-                        "de ce compte ou contactez le support avant de "
-                        "vous connecter avec Google."
-                    )
-                },
-                status=status.HTTP_409_CONFLICT,
+            raise ErreurMetier(
+                "Un compte existe déjà avec cet email mais n'a "
+                "pas été vérifié. Réinitialisez le mot de passe "
+                "de ce compte ou contactez le support avant de "
+                "vous connecter avec Google.",
+                status.HTTP_409_CONFLICT,
             )
 
         refresh = RefreshToken.for_user(utilisateur)
@@ -647,18 +617,12 @@ class LogoutView(APIView):
         refresh_token = request.data.get('refresh')
 
         if not refresh_token:
-            return Response(
-                {"message": "Le refresh token est requis."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            raise ValidationError({"refresh": ["Le refresh token est requis."]})
 
         try:
             token = RefreshToken(refresh_token)
         except TokenError:
-            return Response(
-                {"message": "Token invalide ou déjà expiré."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            raise ValidationError({"refresh": ["Token invalide ou déjà expiré."]})
 
         token.blacklist()
 

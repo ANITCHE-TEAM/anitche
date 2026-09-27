@@ -3,11 +3,13 @@ import logging
 from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.commandes.services import TransitionImpossible
+from apps.core.exceptions import ErreurMetier
 from apps.utilisateurs.models import Role, Utilisateur
 from apps.vendeurs.permissions import ROLES_ADMINISTRATION, EstAdministrateur, EstVendeurValide
 
@@ -67,9 +69,10 @@ def _representation(utilisateur, livraison):
 
 
 def _refus(erreur):
+    """Refus d'un service de livraison → exception au format d'erreur commun."""
     if isinstance(erreur, TransitionImpossible):
-        return Response({"detail": str(erreur)}, status=status.HTTP_409_CONFLICT)
-    return Response({"detail": str(erreur)}, status=erreur.code_http)
+        return ErreurMetier(str(erreur), status.HTTP_409_CONFLICT)
+    return ErreurMetier(str(erreur), erreur.code_http)
 
 
 class LivraisonListView(generics.ListAPIView):
@@ -117,7 +120,7 @@ class LivraisonChangerStatusView(APIView):
                 commentaire=donnees["commentaire"], code=donnees["code"],
             )
         except (services.LivraisonRefusee, TransitionImpossible) as erreur:
-            return _refus(erreur)
+            raise _refus(erreur)
         return Response(_representation(request.user, livraison), status=status.HTTP_200_OK)
 
 
@@ -150,7 +153,7 @@ class ContesterLivraisonView(APIView):
         try:
             contestation = services.contester_livraison(livraison, request.user, serializer.validated_data["motif"])
         except services.LivraisonRefusee as erreur:
-            return _refus(erreur)
+            raise _refus(erreur)
         return Response(ContestationSerializer(contestation).data, status=status.HTTP_201_CREATED)
 
 
@@ -191,14 +194,14 @@ class AssignerLivreurView(APIView):
         serializer.is_valid(raise_exception=True)
         livreur = Utilisateur.objects.filter(pk=serializer.validated_data["livreur_id"]).first()
         if livreur is None:
-            return Response({"detail": "Livreur introuvable."}, status=status.HTTP_400_BAD_REQUEST)
+            raise ValidationError({"livreur_id": ["Livreur introuvable."]})
         try:
             livraison = services.assigner_livreur(
                 livraison, livreur, request.user,
                 date_livraison_estimee=serializer.validated_data.get("date_livraison_estimee"),
             )
         except services.LivraisonRefusee as erreur:
-            return _refus(erreur)
+            raise _refus(erreur)
         return Response(_representation(request.user, livraison), status=status.HTTP_200_OK)
 
 
@@ -214,7 +217,7 @@ class AbandonnerLivraisonView(APIView):
         try:
             livraison = services.abandonner_livraison(livraison, request.user, serializer.validated_data["commentaire"])
         except (services.LivraisonRefusee, TransitionImpossible) as erreur:
-            return _refus(erreur)
+            raise _refus(erreur)
         return Response(_representation(request.user, livraison), status=status.HTTP_200_OK)
 
 
@@ -231,7 +234,7 @@ class ResoudreContestationView(APIView):
                 serializer.validated_data["commentaire"],
             )
         except services.LivraisonRefusee as erreur:
-            return _refus(erreur)
+            raise _refus(erreur)
         return Response(ContestationSerializer(contestation).data, status=status.HTTP_200_OK)
 
 
@@ -263,7 +266,7 @@ class NommerLivreurView(APIView):
         try:
             services.nommer_livreur(utilisateur, request.user)
         except services.LivraisonRefusee as erreur:
-            return _refus(erreur)
+            raise _refus(erreur)
         return Response(LivreurSerializer(_livreurs().get(pk=utilisateur.pk)).data, status=status.HTTP_200_OK)
 
 
@@ -276,7 +279,7 @@ class RetirerLivreurView(APIView):
         try:
             utilisateur, a_reassigner = services.retirer_livreur(utilisateur, request.user)
         except services.LivraisonRefusee as erreur:
-            return _refus(erreur)
+            raise _refus(erreur)
         return Response({
             "utilisateur": {"id": utilisateur.pk, "prenom": utilisateur.prenom, "nom": utilisateur.nom,
                             "role": utilisateur.role},

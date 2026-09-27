@@ -2,12 +2,13 @@ import logging
 
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
+from apps.core.exceptions import ErreurMetier
 from apps.vendeurs.permissions import ROLES_ADMINISTRATION, EstAdministrateur, EstVendeurValide
 
 from . import reversements, services
@@ -68,7 +69,7 @@ class InitierPaiementView(APIView):
         except MontantHorsLimites as erreur:
             raise ValidationError(str(erreur))
         except ErreurFournisseur:
-            return Response({"detail": MESSAGE_FOURNISSEUR_INDISPONIBLE}, status=status.HTTP_502_BAD_GATEWAY)
+            raise ErreurMetier(MESSAGE_FOURNISSEUR_INDISPONIBLE, status.HTTP_502_BAD_GATEWAY)
         return Response(PaiementSerializer(paiements_visibles(request.user).get(pk=paiement.pk)).data,
                         status=status.HTTP_201_CREATED)
 
@@ -105,7 +106,7 @@ class AnnulerPaiementView(APIView):
         try:
             services.annuler_paiement_client(paiement)
         except services.TransitionPaiementImpossible as erreur:
-            return Response({"detail": str(erreur)}, status=status.HTTP_409_CONFLICT)
+            raise ErreurMetier(str(erreur), status.HTTP_409_CONFLICT)
         return Response(PaiementSerializer(paiements_visibles(request.user).get(pk=pk)).data)
 
 
@@ -167,7 +168,7 @@ class ResumeReversementsVendeurView(APIView):
     def get(self, request):
         boutique = getattr(request.user, "boutique", None)
         if boutique is None:
-            return Response({"detail": "Aucune boutique."}, status=status.HTTP_404_NOT_FOUND)
+            raise NotFound("Aucune boutique.")
         return Response(reversements.resume_vendeur(boutique))
 
 
@@ -195,7 +196,7 @@ class TraiterRemboursementView(APIView):
         try:
             remboursement = services.traiter_remboursement(remboursement, request.user, **serializer.validated_data)
         except services.TransitionPaiementImpossible as erreur:
-            return Response({"detail": str(erreur)}, status=status.HTTP_409_CONFLICT)
+            raise ErreurMetier(str(erreur), status.HTTP_409_CONFLICT)
         remboursement = Remboursement.objects.select_related("commande", "paiement__client", "retour").get(pk=pk)
         return Response(RemboursementAdminSerializer(remboursement).data)
 
@@ -226,7 +227,7 @@ class VerserReversementView(APIView):
         try:
             reversements.verser_manuellement(reversement, request.user, serializer.validated_data["reference_externe"])
         except reversements.ErreurVersement as erreur:
-            return Response({"detail": str(erreur)}, status=status.HTTP_409_CONFLICT)
+            raise ErreurMetier(str(erreur), status.HTTP_409_CONFLICT)
         return Response(ReversementAdminSerializer(reversements_admin().get(pk=pk)).data)
 
 
@@ -242,7 +243,7 @@ class TransfererReversementView(APIView):
         try:
             reversements.transferer_reversement(reversement, request.user, serializer.validated_data.get("operateur"))
         except reversements.ErreurVersement as erreur:
-            return Response({"detail": str(erreur)}, status=status.HTTP_409_CONFLICT)
+            raise ErreurMetier(str(erreur), status.HTTP_409_CONFLICT)
         return Response(ReversementAdminSerializer(reversements_admin().get(pk=pk)).data)
 
 

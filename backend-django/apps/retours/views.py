@@ -5,11 +5,13 @@ from django.db import transaction
 from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
+from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.core.exceptions import ErreurMetier
 from apps.vendeurs.permissions import ROLES_ADMINISTRATION
 
 from . import services
@@ -32,8 +34,9 @@ def identifiant_valide(valeur):
         return None
 
 
-def reponse_refus(refus):
-    return Response({"detail": refus.message}, status=refus.code_http)
+def erreur_refus(refus):
+    """Refus du service des retours → exception au format d'erreur commun."""
+    return ErreurMetier(refus.message, refus.code_http)
 
 
 class DemandeRetourListCreateView(APIView):
@@ -113,7 +116,7 @@ class TraiterDemandeRetourView(APIView):
         try:
             services.traiter(pk, request.user, donnees["action"], donnees["reponse"], donnees["restock"])
         except services.RetourRefuse as refus:
-            return reponse_refus(refus)
+            raise erreur_refus(refus)
         demande = services.demandes_visibles(request.user).get(pk=pk)
         return Response(DemandeRetourSerializer(demande, context={"request": request}).data, status=status.HTTP_200_OK)
 
@@ -127,12 +130,12 @@ class AjouterPhotoRetourView(APIView):
 
     def post(self, request, pk):
         if "image" not in request.FILES:
-            return Response({"image": "Veuillez fournir un fichier image."}, status=status.HTTP_400_BAD_REQUEST)
+            raise ValidationError({"image": ["Veuillez fournir un fichier image."]})
         with transaction.atomic():
             try:
                 demande = services.verifier_ajout_photo(pk, request.user)
             except services.RetourRefuse as refus:
-                return reponse_refus(refus)
+                raise erreur_refus(refus)
             # Le serializer applique les validateurs du modèle (signature
             # binaire réelle) : un objects.create() direct les contournerait.
             serializer = PhotoRetourSerializer(data=request.data, context={"request": request})
