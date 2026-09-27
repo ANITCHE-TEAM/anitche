@@ -220,15 +220,16 @@ class ScenarioDemo:
     # Commandes
     # -----------------------------------------------------------------
 
-    def commander(self, cle_boutique, articles):
-        """Panier → validation (une commande, une seule boutique). Renvoie la commande."""
+    def commander(self, cle_boutique, articles, position=None):
+        """Panier → validation (une commande, une seule boutique). Renvoie la
+        commande. `position` : point GPS ajouté à l'adresse (facultatif)."""
         variantes = self.boutiques[cle_boutique]['variantes']
         for (produit, variante), quantite in articles:
             self.appeler(self.client, 'post', '/api/panier/panier/items/', {
                 'variante': variantes[(produit, variante)], 'quantite': quantite,
             })
         commandes = self.appeler(self.client, 'post', '/api/commandes/valider-panier/', {
-            'adresse_livraison': donnees.ADRESSE_LIVRAISON,
+            'adresse_livraison': {**donnees.ADRESSE_LIVRAISON, **(position or {})},
         })
         return commandes[0]
 
@@ -299,8 +300,11 @@ class ScenarioDemo:
             'action': 'approuver', 'reponse': 'Retour accepté : déposez le colis au point relais.',
         })
 
-        # 3. Payée puis passée en préparation par la boutique.
-        self.commande_preparation = self.commander('maison', [(('Marmite en fonte', '5 litres'), 1)])
+        # 3. Payée puis passée en préparation par la boutique. Seule commande
+        # avec un point GPS (suivi du livreur et estimation d'arrivée).
+        self.commande_preparation = self.commander(
+            'maison', [(('Marmite en fonte', '5 litres'), 1)], position=donnees.POSITION_LIVRAISON,
+        )
         self.payer(self.commande_preparation)
         self.preparer('maison', self.commande_preparation)
 
@@ -313,7 +317,7 @@ class ScenarioDemo:
         # 5. Annulée par le client avant paiement (stock restitué).
         commande_annulee = self.commander('maison', [(('Nappe en kita', 'Modèle standard'), 1)])
         self.appeler(self.client, 'post', f"/api/commandes/{commande_annulee['id']}/annuler/")
-        self.journal("Commandes créées : livrée, livrée avec retour, en préparation, payée, annulée.")
+        self.journal("Commandes créées : livrée, livrée avec retour, en préparation (avec point GPS), payée, annulée.")
 
     # -----------------------------------------------------------------
     # Fidélité et support

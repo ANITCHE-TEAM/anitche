@@ -473,6 +473,22 @@ class AdresseLivraisonTests(DonneesCycleDeVie, APITestCase):
         self.assertFalse(Commande.objects.exists())
         self.assertEqual(self.stock(self.variante1), 10)
 
+    def test_corps_qui_n_est_pas_un_objet_400_comme_la_simulation(self):
+        # Avant : 500 à la validation (request.data.get sur une liste).
+        panier, _ = Panier.objects.get_or_create(utilisateur=self.client_user)
+        PanierItem.objects.create(panier=panier, variante=self.variante1, quantite=1)
+        self.en_tant_que(self.client_user)
+        for corps in ("[1, 2]", "[]", '"adresse"', "42", "true", "null"):
+            with self.subTest(corps):
+                validation = self.client.post(URL_VALIDER, corps, content_type="application/json")
+                simulation = self.client.post(URL_SIMULER, corps, content_type="application/json")
+                self.assertEqual((validation.status_code, simulation.status_code), (400, 400))
+                self.assertEqual(list(validation.data["errors"]), ["non_field_errors"])
+                self.assertEqual(validation.data["errors"], simulation.data["errors"])
+                self.assertEqual(validation.data["detail"], simulation.data["detail"])
+        self.assertFalse(Commande.objects.exists())
+        self.assertEqual(self.stock(self.variante1), 10)
+
     def test_adresse_stockee_et_reprise_par_le_paiement(self):
         self.commander((self.variante1, 1))
         commande = Commande.objects.get()
@@ -1037,3 +1053,202 @@ class SimulationDuCheckoutTests(DonneesCycleDeVie, APITestCase):
         from .views import SimulerFraisView
 
         self.assertEqual(SimulerFraisView.throttle_scope, "commande_simulation")
+
+
+# =====================================================================
+# POINT GPS DU LIEU DE LIVRAISON (docs/MODULE_COMMANDES.md, § 3 bis)
+# =====================================================================
+
+import json
+
+from django.db import IntegrityError, transaction
+
+from .serializers import AdresseLivraisonSerializer
+
+# Un point à Cocody, déjà à 6 décimales.
+POSITION = {"latitude": 5.359952, "longitude": -3.986912}
+
+
+class PositionLivraisonCheckoutTests(DonneesCycleDeVie, APITestCase):
+    """Point facultatif au checkout (validation et simulation) : les deux
+    coordonnées ou aucune, des nombres, en Côte d'Ivoire, arrondis à 6
+    décimales."""
+
+    def setUp(self):
+        self.creer_donnees()
+        panier, _ = Panier.objects.get_or_create(utilisateur=self.client_user)
+        PanierItem.objects.create(panier=panier, variante=self.variante1, quantite=1)
+        self.en_tant_que(self.client_user)
+
+    def corps(self, **position):
+        return {"adresse_livraison": {**ADRESSE_LIVRAISON, **position}}
+
+    def valider(self, **position):
+        return self.client.post(URL_VALIDER, self.corps(**position), format="json")
+
+    def simuler(self, **position):
+        return self.client.post(URL_SIMULER, self.corps(**position), format="json")
+
+    def test_sans_point_le_checkout_ne_change_pas(self):
+        r = self.valider()
+        self.assertEqual(r.status_code, 201, r.data)
+        groupe = GroupeCommande.objects.get()
+        self.assertEqual((groupe.livraison_latitude, groupe.livraison_longitude), (None, None))
+        adresse = self.client.get(f"/api/commandes/{r.data[0]['id']}/").data["adresse_livraison"]
+        self.assertEqual((adresse["latitude"], adresse["longitude"]), (None, None))
+
+    def test_point_null_equivaut_a_absent(self):
+        self.assertEqual(self.simuler(latitude=None, longitude=None).status_code, 200)
+        self.assertEqual(self.valider(latitude=None, longitude=None).status_code, 201)
+        groupe = GroupeCommande.objects.get()
+        self.assertEqual((groupe.livraison_latitude, groupe.livraison_longitude), (None, None))
+
+    def test_point_enregistre_et_sans_effet_sur_les_montants(self):
+        sans_point = self.simuler().data
+        self.assertEqual(self.simuler(**POSITION).data, sans_point)
+        self.assertEqual(self.valider(**POSITION).status_code, 201)
+        groupe = GroupeCommande.objects.get()
+        self.assertEqual((groupe.livraison_latitude, groupe.livraison_longitude),
+                         (Decimal("5.359952"), Decimal("-3.986912")))
+        self.assertEqual(Commande.objects.get().montant_total, Decimal("1005") + FRAIS_ABIDJAN)
+
+    def test_arrondi_a_6_decimales(self):
+        cas = [
+            ((5.35995171, -3.98691249), (Decimal("5.359952"), Decimal("-3.986912"))),
+            ((5.1234565, -3.9869125), (Decimal("5.123457"), Decimal("-3.986913"))),  # moitié : vers le haut
+            ((5, -4), (Decimal("5.000000"), Decimal("-4.000000"))),  # entiers JSON acceptés
+            ((4.0, -9.0), (Decimal("4.000000"), Decimal("-9.000000"))),  # bornes incluses
+            ((11.0, -2.0), (Decimal("11.000000"), Decimal("-2.000000"))),
+        ]
+        for (latitude, longitude), attendu in cas:
+            with self.subTest(latitude=latitude, longitude=longitude):
+                adresse = AdresseLivraisonSerializer(
+                    data={**ADRESSE_LIVRAISON, "latitude": latitude, "longitude": longitude},
+                )
+                self.assertTrue(adresse.is_valid(), adresse.errors)
+                self.assertEqual((adresse.validated_data["latitude"], adresse.validated_data["longitude"]), attendu)
+        self.assertEqual(self.valider(latitude=5.35995171, longitude=-3.98691249).status_code, 201)
+        groupe = GroupeCommande.objects.get()
+        self.assertEqual((groupe.livraison_latitude, groupe.livraison_longitude),
+                         (Decimal("5.359952"), Decimal("-3.986912")))
+
+    def test_refus_400_sur_la_cle_concernee(self):
+        cas = {
+            "latitude seule": ({"latitude": 5.36}, "longitude"),
+            "longitude seule": ({"longitude": -3.98}, "latitude"),
+            "latitude nulle avec une longitude": ({"latitude": None, "longitude": -3.98}, "latitude"),
+            "trop au sud (golfe de Guinée)": ({"latitude": 3.99, "longitude": -3.98}, "latitude"),
+            "trop au nord (Mali)": ({"latitude": 11.01, "longitude": -5.5}, "latitude"),
+            "trop à l'est (Ghana)": ({"latitude": 5.6, "longitude": -1.99}, "longitude"),
+            "trop à l'ouest (Libéria)": ({"latitude": 6.3, "longitude": -9.01}, "longitude"),
+            "Paris": ({"latitude": 48.8566, "longitude": 2.3522}, "latitude"),
+            "chaîne numérique": ({"latitude": "5.36", "longitude": -3.98}, "latitude"),
+            "chaîne": ({"latitude": 5.36, "longitude": "ouest"}, "longitude"),
+            "booléen": ({"latitude": True, "longitude": -3.98}, "latitude"),
+            "liste": ({"latitude": [5.36], "longitude": -3.98}, "latitude"),
+            "entier démesuré": ({"latitude": 10 ** 40, "longitude": -3.98}, "latitude"),
+        }
+        for libelle, (position, champ) in cas.items():
+            for endpoint, envoyer in (("valider", self.valider), ("simuler", self.simuler)):
+                with self.subTest(libelle, endpoint=endpoint):
+                    r = envoyer(**position)
+                    self.assertEqual(r.status_code, 400, r.data)
+                    self.assertIn(f"adresse_livraison.{champ}", r.data["errors"])
+        self.assertFalse(GroupeCommande.objects.exists())
+        self.assertFalse(Commande.objects.exists())
+        self.assertEqual((self.stock(self.variante1), PanierItem.objects.count()), (10, 1))
+
+    def test_nan_et_infini_refuses(self):
+        # En JSON, NaN et Infinity sont refusés dès la lecture du corps (JSON strict)...
+        for valeur in ("NaN", "Infinity", "-Infinity"):
+            corps = json.dumps(self.corps(longitude=-3.98))[:-2] + f', "latitude": {valeur}}}}}'
+            for url in (URL_VALIDER, URL_SIMULER):
+                with self.subTest(valeur, url=url):
+                    r = self.client.post(url, corps, content_type="application/json")
+                    self.assertEqual(r.status_code, 400)
+        self.assertFalse(GroupeCommande.objects.exists())
+        # ... et par le champ lui-même, quelle que soit la façon dont il est lu.
+        for valeur in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(valeur=valeur):
+                adresse = AdresseLivraisonSerializer(data={**ADRESSE_LIVRAISON, "latitude": valeur, "longitude": -3.98})
+                self.assertFalse(adresse.is_valid())
+                self.assertIn("latitude", adresse.errors)
+
+    def test_erreurs_d_adresse_sur_des_cles_a_points_a_la_validation(self):
+        # Avant : « telephone » à la validation, « adresse_livraison.telephone »
+        # à la simulation. Désormais la même clé des deux côtés.
+        adresse = {**ADRESSE_LIVRAISON, "telephone": "abc"}
+        for url in (URL_VALIDER, URL_SIMULER):
+            with self.subTest(url):
+                r = self.client.post(url, {"adresse_livraison": adresse}, format="json")
+                self.assertEqual(r.status_code, 400)
+                self.assertEqual(list(r.data["errors"]), ["adresse_livraison.telephone"])
+        r = self.client.post(URL_VALIDER, {}, format="json")
+        self.assertEqual(list(r.data["errors"]), ["adresse_livraison"])
+
+
+class PositionLivraisonVisibiliteTests(DonneesCycleDeVie, APITestCase):
+    """Même règle que l'adresse, sauf pour le vendeur : il ne voit jamais le
+    point (côté livraison : apps.livraison.tests.PositionLivraisonTests)."""
+
+    def setUp(self):
+        self.creer_donnees()
+        r = self.commander((self.variante1, 1), adresse_livraison={**ADRESSE_LIVRAISON, **POSITION})
+        self.assertEqual(r.status_code, 201, r.data)
+        self.commande = Commande.objects.get()
+
+    def lire(self, utilisateur, url, methode="get"):
+        self.en_tant_que(utilisateur)
+        r = getattr(self.client, methode)(url)
+        self.assertEqual(r.status_code, 200, r.content)
+        return r
+
+    def assertPoint(self, adresse):
+        # Des nombres JSON, pas des chaînes décimales comme les montants.
+        self.assertEqual((adresse["latitude"], adresse["longitude"]), (5.359952, -3.986912))
+        self.assertIsInstance(adresse["latitude"], float)
+        self.assertIsInstance(adresse["longitude"], float)
+
+    def assertSansPoint(self, reponse):
+        contenu = reponse.content.decode()
+        for fragment in ("latitude", "longitude", "5.359952", "3.986912"):
+            self.assertNotIn(fragment, contenu)
+
+    def test_le_client_voit_le_point_de_sa_commande_en_nombres(self):
+        detail = json.loads(self.lire(self.client_user, f"/api/commandes/{self.commande.pk}/").content)
+        self.assertPoint(detail["adresse_livraison"])
+        groupes = json.loads(self.lire(self.client_user, "/api/commandes/groupes/").content)
+        self.assertPoint(groupes["results"][0]["adresse_livraison"])
+        annulation = self.lire(self.client_user, f"/api/commandes/{self.commande.pk}/annuler/", "post")
+        self.assertPoint(json.loads(annulation.content)["adresse_livraison"])
+
+    def test_un_autre_client_ne_voit_rien(self):
+        self.en_tant_que(self.autre_client)
+        self.assertEqual(self.client.get(f"/api/commandes/{self.commande.pk}/").status_code, 404)
+        self.assertSansPoint(self.client.get("/api/commandes/groupes/"))
+
+    def test_le_vendeur_ne_voit_jamais_le_point(self):
+        detail = self.lire(self.vendeur1, f"/api/commandes/vendeur/{self.commande.pk}/")
+        self.assertEqual(detail.data["adresse_livraison"]["quartier"], ADRESSE_LIVRAISON["quartier"])
+        self.assertSansPoint(detail)
+        self.assertSansPoint(self.lire(self.vendeur1, "/api/commandes/vendeur/"))
+        # Réponse du passage en préparation (même représentation vendeur).
+        self.payer(self.commande)
+        Commande.objects.filter(pk=self.commande.pk).update(status=Commande.Status.CONFIRMEE)
+        preparation = self.lire(self.vendeur1, f"/api/commandes/vendeur/{self.commande.pk}/preparation/", "post")
+        self.assertSansPoint(preparation)
+
+    def test_l_administration_voit_le_point(self):
+        r = self.lire(self.admin, f"/api/commandes/administration/{self.commande.pk}/annuler/", "post")
+        self.assertPoint(json.loads(r.content)["adresse_livraison"])
+
+    def test_contrainte_de_base_les_deux_ou_aucune(self):
+        for position in ({"livraison_latitude": Decimal("5.36")}, {"livraison_longitude": Decimal("-3.98")}):
+            with self.subTest(position), self.assertRaises(IntegrityError), transaction.atomic():
+                GroupeCommande.objects.create(client=self.client_user, **position)
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            GroupeCommande.objects.filter(pk=self.commande.groupe_id).update(livraison_longitude=None)
+        # Les deux vides (groupes existants, checkout sans point) : accepté.
+        GroupeCommande.objects.filter(pk=self.commande.groupe_id).update(
+            livraison_latitude=None, livraison_longitude=None,
+        )

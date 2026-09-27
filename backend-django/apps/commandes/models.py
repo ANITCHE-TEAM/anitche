@@ -139,7 +139,27 @@ class GroupeCommande(models.Model):
     # Zone tarifaire (apps.livraison.models.TarifLivraison.Zone), vide pour
     # les groupes créés avant les frais de livraison.
     livraison_zone = models.CharField(max_length=20, blank=True)
+    # Point GPS du lieu de livraison (degrés décimaux, 6 décimales), facultatif :
+    # donné par le client au checkout (« ma position »), il sert au suivi du
+    # livreur et à l'estimation d'arrivée. Sans point, aucune distance ni
+    # estimation n'est calculée. Point précis du domicile : visible par le
+    # client, le livreur assigné pendant la livraison et l'administration,
+    # jamais par le vendeur (serializers.adresse_du_groupe).
+    livraison_latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    livraison_longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            # Un point est complet ou absent : jamais une latitude sans longitude.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(livraison_latitude__isnull=True, livraison_longitude__isnull=True)
+                    | models.Q(livraison_latitude__isnull=False, livraison_longitude__isnull=False)
+                ),
+                name="groupe_commande_position_complete_ou_absente",
+            ),
+        ]
 
     @property
     def a_une_adresse(self):

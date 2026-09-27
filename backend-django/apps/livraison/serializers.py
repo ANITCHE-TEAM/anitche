@@ -2,8 +2,8 @@
 
 - client  : suivi (prénom du livreur, son téléphone pendant « en cours »
             seulement, estimation, code de livraison pendant « en cours ») ;
-- livreur : adresse et téléphone du client, masqués une fois la livraison
-            terminée (livrée ou annulée) ;
+- livreur : adresse (point GPS compris) et téléphone du client, masqués
+            une fois la livraison terminée (livrée ou annulée) ;
 - vendeur : statut, prénom du livreur, dates — jamais le code ;
 - administration : tout sauf le code.
 
@@ -18,7 +18,7 @@ from django.utils import timezone
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
-from apps.commandes.serializers import AdresseLivraisonLectureSerializer, adresse_du_groupe
+from apps.commandes.serializers import AdresseLivraisonAvecPositionLectureSerializer, adresse_du_groupe
 
 from .models import ContestationLivraison, Livraison, LivraisonHistorique, TarifLivraison, normaliser_commune
 from .services import CODE_ESSAIS_MAX, STATUTS_TERMINES, fin_du_delai_de_contestation, role_acteur
@@ -80,16 +80,18 @@ class _LivraisonBaseSerializer(serializers.ModelSerializer):
 
 
 class _CoordonneesClientMixin(serializers.Serializer):
-    """Adresse (texte et structurée) et téléphone choisi par le client au
-    checkout (GroupeCommande) — jamais le téléphone de son profil."""
+    """Adresse (texte et structurée, point GPS compris) et téléphone choisi
+    par le client au checkout (GroupeCommande) — jamais le téléphone de son
+    profil. Pour le client, le livreur (masquées une fois la livraison
+    terminée) et l'administration ; jamais pour le vendeur."""
 
     adresse_livraison = serializers.CharField(read_only=True)
     adresse = serializers.SerializerMethodField()
     telephone_contact = serializers.SerializerMethodField()
 
-    @extend_schema_field(AdresseLivraisonLectureSerializer(allow_null=True))
+    @extend_schema_field(AdresseLivraisonAvecPositionLectureSerializer(allow_null=True))
     def get_adresse(self, livraison):
-        return adresse_du_groupe(livraison.commande.groupe)
+        return adresse_du_groupe(livraison.commande.groupe, avec_position=True)
 
     def get_telephone_contact(self, livraison) -> str:
         groupe = livraison.commande.groupe

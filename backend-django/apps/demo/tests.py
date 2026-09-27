@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from decimal import Decimal
 from io import StringIO
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from django.core.management.base import CommandError
 from django.test import SimpleTestCase, TestCase, override_settings
 
 from apps.catalogue.models import Categorie, Produit
-from apps.commandes.models import Commande
+from apps.commandes.models import Commande, GroupeCommande
 from apps.demo import donnees
 from apps.fidelite.models import CompteFidelite, CouponReduction, GainFidelite
 from apps.paiements.models import Paiement
@@ -88,6 +89,16 @@ class SeedDemoTests(TestCase):
         self.assertEqual(
             Commande.objects.get(client=self.client_demo, status=S.ANNULEE).motif_annulation,
             Commande.MotifAnnulation.CLIENT,
+        )
+
+    def test_un_seul_point_gps_sur_la_commande_en_preparation(self):
+        groupes = GroupeCommande.objects.filter(client=self.client_demo, livraison_latitude__isnull=False)
+        self.assertEqual(groupes.count(), 1)
+        groupe = groupes.get()
+        self.assertEqual([commande.status for commande in groupe.commandes.all()], [Commande.Status.PREPARATION])
+        self.assertEqual(
+            (groupe.livraison_latitude, groupe.livraison_longitude),
+            (Decimal('5.397340'), Decimal('-3.986620')),
         )
 
     def test_retour_points_credites_coupon_et_ticket(self):

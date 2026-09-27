@@ -49,7 +49,7 @@ Tous les comptes ont le mot de passe **`Demo-Anitche-2026!`** et un email déjà
 Contenu créé :
 
 - **Catalogue** : 4 catégories (Mode, Électronique, Maison, Beauté), 4 boutiques publiques de vendeurs validés, 12 produits avec variantes, prix promotionnels, stock et une image générée par produit (logo de boutique compris).
-- **Commandes de la cliente** : livrée, livrée avec un retour approuvé, en préparation, payée (`confirmee`), annulée par la cliente. Les paiements sont passés par le fournisseur simulé (notification signée), comme en réel.
+- **Commandes de la cliente** : livrée, livrée avec un retour approuvé, en préparation, payée (`confirmee`), annulée par la cliente. Les paiements sont passés par le fournisseur simulé (notification signée), comme en réel. Seule la commande **en préparation** (Maison Akwaba) a un **point GPS** (environ Angré, Cocody : `5.397340`, `-3.986620`) : c'est la prochaine à livrer, pour tester le suivi du livreur et l'estimation d'arrivée. Les autres n'en ont pas (cas « sans point »).
 - **Fidélité** : 65 points crédités sur la commande livrée (le délai de rétractation est simulé par une horloge décalée), dont 50 convertis en coupon de 5 % ; les points de la commande avec retour restent en attente.
 - **Support** : un ticket sur la commande en préparation.
 
@@ -160,3 +160,61 @@ Chaque module documente les changements de contrat à intégrer côté interface
 | Notifications | [`MODULE_NOTIFICATIONS.md` § 5](./MODULE_NOTIFICATIONS.md#5-impact-frontend) |
 | Support | [`MODULE_SUPPORT.md` § 6](./MODULE_SUPPORT.md#6-impact-frontend) |
 | Vendeurs, catalogue, panier, passeports QR | pas de section dédiée : le contrat de chaque endpoint est dans le `MODULE_*.md` correspondant |
+
+## 11. Point GPS au checkout (« ma position »)
+
+Facultatif. Le checkout (`POST /api/commandes/valider-panier/` et `simuler-frais/`) fonctionne sans point, comme avant. Avec un point, le livreur peut naviguer jusqu'au lieu exact, et le suivi peut estimer son arrivée. **Sans point, aucune distance ni estimation n'est affichée** : ne pas en inventer une.
+
+```json
+{
+  "adresse_livraison": {
+    "commune": "Cocody",
+    "quartier": "Angré 8e Tranche",
+    "point_de_repere": "Derrière la pharmacie",
+    "telephone": "0707070707",
+    "latitude": 5.359952,
+    "longitude": -3.986912
+  }
+}
+```
+
+Règles du serveur ([`MODULE_COMMANDES.md`](./MODULE_COMMANDES.md) § 3 bis) :
+
+- `latitude` et `longitude` sont des **nombres** (jamais des chaînes, pas de `toFixed()`), envoyés **ensemble** ou pas du tout (`null` vaut absent).
+- Côte d'Ivoire uniquement : latitude de 4 à 11, longitude de -9 à -2. Le serveur arrondit à 6 décimales.
+- Refus **400** sur `errors["adresse_livraison.latitude"]` ou `errors["adresse_livraison.longitude"]` : coordonnée seule, point hors de Côte d'Ivoire (géolocalisation d'un ordinateur via un VPN, par exemple), valeur non numérique. Afficher « Position non reconnue » et proposer de **continuer sans point**.
+- En lecture, `adresse_livraison.latitude` / `longitude` (détail de commande, groupes) et `adresse.latitude` / `longitude` (suivi de livraison) sont des nombres, ou `null` sans point.
+
+Bouton « Utiliser ma position » :
+
+```js
+// Position de l'appareil, ou null (refus, délai dépassé, navigateur sans
+// géolocalisation) : le checkout continue alors sans point.
+function lirePosition() {
+  return new Promise((resoudre) => {
+    if (!('geolocation' in navigator)) return resoudre(null);
+    navigator.geolocation.getCurrentPosition(
+      ({ coords }) => resoudre({ latitude: coords.latitude, longitude: coords.longitude, precision: coords.accuracy }),
+      () => resoudre(null),
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 },
+    );
+  });
+}
+
+// Au clic sur le bouton (jamais au chargement de la page) :
+const position = await lirePosition();
+
+const corps = {
+  adresse_livraison: {
+    commune, quartier, point_de_repere, telephone,
+    // Des nombres, les deux ensemble ; rien du tout sans position.
+    ...(position && { latitude: position.latitude, longitude: position.longitude }),
+  },
+};
+```
+
+- Demander la position **seulement au clic**, avec une phrase claire : « Utiliser ma position actuelle comme lieu de livraison ». Le client doit être **sur le lieu de livraison** : sinon il laisse le champ vide et se fie au point de repère. Afficher `precision` (mètres) aide à juger un point approximatif.
+- La géolocalisation du navigateur exige **HTTPS** (ou `localhost` en dev).
+- Pour changer de lieu, redemander la position ou retirer le point (bouton « Ne pas utiliser ma position »).
+
+> **Vie privée.** Ce point est l'emplacement précis du domicile du client. L'API ne le montre qu'**au client**, **au livreur assigné pendant la livraison** (masqué une fois la livraison livrée ou annulée) et **à l'administration** ; **jamais au vendeur**. Côté interface : ne pas l'afficher aux autres rôles, ne pas le garder dans `localStorage` au-delà du checkout, ne pas l'envoyer à un service tiers (analytics, logs).

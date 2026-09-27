@@ -729,8 +729,10 @@ class IsolationEtSuiviTests(DonneesLivraison, APITestCase):
         donnees = self.detail(self.client_user).data
         self.assertEqual(donnees["livreur"], {"prenom": "User", "telephone": None})
         self.assertEqual(donnees["date_livraison_estimee"], demain.isoformat())
+        # Point GPS : null, ce checkout n'en a pas (PositionLivraisonTests).
         self.assertEqual(donnees["adresse"], {"zone": "abidjan", "commune": "Cocody", "quartier": "Angré",
-                                              "point_de_repere": "Face pharmacie", "telephone": "0700000000"})
+                                              "point_de_repere": "Face pharmacie", "telephone": "0700000000",
+                                              "latitude": None, "longitude": None})
         self.mettre_en_cours()
         self.assertEqual(self.detail(self.client_user).data["livreur"]["telephone"], "0102030405")
         self.assertEqual(self.patch(self.livreur, Statut.LIVREE, code=self.code()).status_code, 200)
@@ -758,6 +760,75 @@ class IsolationEtSuiviTests(DonneesLivraison, APITestCase):
         requete = RequestFactory().get("/")
         requete.user = staff
         self.assertFalse(LivraisonAdmin(Livraison, AdminSite()).has_change_permission(requete, self.livraison))
+
+
+class PositionLivraisonTests(DonneesLivraison, APITestCase):
+    """Point GPS du lieu de livraison : mêmes règles que l'adresse (client,
+    livreur assigné tant que la livraison n'est pas terminée,
+    administration), et jamais le vendeur."""
+
+    def setUp(self):
+        self.creer_donnees()
+        GroupeCommande.objects.filter(pk=self.groupe.pk).update(
+            livraison_latitude=Decimal("5.359952"), livraison_longitude=Decimal("-3.986912"),
+        )
+
+    def passer(self, statut):
+        Livraison.objects.filter(pk=self.livraison.pk).update(status=statut)
+
+    def point(self, utilisateur):
+        r = self.detail(utilisateur)
+        self.assertEqual(r.status_code, 200)
+        adresse = r.json()["adresse"]
+        return None if adresse is None else (adresse["latitude"], adresse["longitude"])
+
+    def test_client_et_administration_voient_le_point_a_tout_statut(self):
+        for statut in Statut.values:
+            with self.subTest(statut):
+                self.passer(statut)
+                for utilisateur in (self.client_user, self.admin):
+                    self.assertEqual(self.point(utilisateur), (5.359952, -3.986912))
+
+    def test_livreur_assigne_seulement_pendant_la_livraison(self):
+        for statut in (Statut.EN_ATTENTE, Statut.EXPEDIEE, Statut.EN_COURS, Statut.ECHOUEE):
+            with self.subTest(statut):
+                self.passer(statut)
+                self.assertEqual(self.point(self.livreur), (5.359952, -3.986912))
+        for statut in (Statut.LIVREE, Statut.ANNULEE):
+            with self.subTest(statut):
+                self.passer(statut)
+                self.assertIsNone(self.point(self.livreur))
+                liste = self.api(self.livreur).get(reverse("livraison:livraison-list"))
+                self.assertNotIn("5.359952", liste.content.decode())
+        self.assertEqual(self.detail(self.autre_livreur).status_code, 404)
+
+    def test_masque_apres_une_vraie_livraison(self):
+        self.livrer()
+        self.assertIsNone(self.point(self.livreur))
+        self.assertEqual(self.point(self.client_user), (5.359952, -3.986912))
+
+    def test_le_vendeur_ne_voit_jamais_le_point(self):
+        vendeur = self.api(self.vendeur)
+        urls = [
+            reverse("livraison:vendeur-livraison-list"),
+            reverse("livraison:vendeur-livraison-detail", args=[self.livraison.pk]),
+            f"/api/commandes/vendeur/{self.commande.pk}/",
+            "/api/commandes/vendeur/",
+        ]
+        for statut in Statut.values:
+            self.passer(statut)
+            for url in urls:
+                with self.subTest(statut, url=url):
+                    r = vendeur.get(url)
+                    self.assertEqual(r.status_code, 200)
+                    self.assertNotIn("5.359952", r.content.decode())
+                    self.assertNotIn("latitude", r.content.decode())
+        self.assertEqual(self.detail(self.vendeur).status_code, 404)
+
+    def test_sans_point_null(self):
+        GroupeCommande.objects.filter(pk=self.groupe.pk).update(livraison_latitude=None, livraison_longitude=None)
+        for utilisateur in (self.client_user, self.livreur, self.admin):
+            self.assertEqual(self.point(utilisateur), (None, None))
 
 
 class PerformanceEtLimitesTests(DonneesLivraison, APITestCase):

@@ -28,7 +28,7 @@ admin.py        Django admin : livreur (livreurs actifs seulement) et date estim
 
 ## 3. Modèles
 
-- **`Livraison`** : `commande` (1-1), `livreur`, `status`, `adresse_livraison` (texte d'une ligne, copié du checkout), `date_livraison_estimee`, `date_expedition`, `date_livraison`, `tentatives` (passages « en cours »), `code_hash` (vérification), `code_chiffre` (Fernet, pour le réafficher au client et l'envoyer par email), `code_essais`. Le code est **effacé** dès que la livraison est livrée ou annulée.
+- **`Livraison`** : `commande` (1-1), `livreur`, `status`, `adresse_livraison` (texte d'une ligne, copié du checkout ; le point GPS n'y est pas copié : il est lu dans `GroupeCommande`, § 5), `date_livraison_estimee`, `date_expedition`, `date_livraison`, `tentatives` (passages « en cours »), `code_hash` (vérification), `code_chiffre` (Fernet, pour le réafficher au client et l'envoyer par email), `code_essais`. Le code est **effacé** dès que la livraison est livrée ou annulée.
 - **`LivraisonHistorique`** : chaque changement (statut, assignation) avec `effectue_par`, **`role_acteur`** figé au moment de l'action (`livreur`, `administration`, `client`, `systeme`) et `commentaire`.
 - **`ContestationLivraison`** (1-1 avec la livraison) : `motif`, `statut` (`ouverte` → `rejetee` / `fondee`), `commentaire_resolution`, `resolue_par`, dates.
 
@@ -83,13 +83,24 @@ Le livreur doit, à chaque transition, être **assigné**, avoir le **rôle livr
 | Champ | Client | Livreur | Vendeur | Administration |
 |---|---|---|---|---|
 | `livreur` | `{prenom, telephone}` — téléphone **seulement pendant `en_cours`**, sinon `null` | `{prenom}` | `{prenom}` | `{id, prenom, nom}` |
-| `adresse_livraison`, `adresse` (commune, quartier, point de repère, téléphone), `telephone_contact` | oui | oui, **masqués** (`""` / `null`) une fois `livree` ou `annulee` | non | oui |
+| `adresse_livraison`, `adresse` (commune, quartier, point de repère, téléphone, **point GPS** `latitude` / `longitude`), `telephone_contact` | oui | oui, **masqués** (`""` / `null`) une fois `livree` ou `annulee` | non | oui |
 | `code_livraison` | seulement pendant `en_cours` | non | non | non |
 | `tentatives` | non | oui | non | oui |
 | `code_essais_restants` / `code_essais` | non | pendant `en_cours` | non | `code_essais` |
 | `contestation`, `date_limite_contestation` | oui (`statut`, dates) | non | non | `contestation` (avec le motif) |
 
 `telephone_contact` et `adresse.telephone` sont le numéro choisi par le client au checkout, jamais celui de son profil.
+
+**Point GPS du lieu de livraison** (`adresse.latitude`, `adresse.longitude` : nombres, ou `null` si le client ne l'a pas donné au checkout, [`MODULE_COMMANDES.md`](./MODULE_COMMANDES.md) § 3 bis). Point précis du domicile du client : il suit **exactement** la règle de l'adresse, sauf qu'il n'est jamais montré au vendeur. Où chaque règle est appliquée :
+
+| Qui | Règle | Où |
+|---|---|---|
+| Client | le point de ses propres commandes, à tout statut | `livraisons_visibles` (`commande__client=utilisateur`) → `LivraisonClientSerializer` → `_CoordonneesClientMixin.get_adresse` (`adresse_du_groupe(…, avec_position=True)`) |
+| Livreur | seulement les livraisons qui lui sont assignées, et plus rien une fois `livree` ou `annulee` | `livraisons_visibles` (`livreur=utilisateur`) → `LivraisonLivreurSerializer.to_representation` : `adresse` → `null` pour `STATUTS_TERMINES`, donc le point avec |
+| Vendeur | **jamais** | `LivraisonVendeurSerializer` n'hérite pas de `_CoordonneesClientMixin` ; côté commandes, `CommandeVendeurSerializer` appelle `adresse_du_groupe` sans point |
+| Administration | toujours | `LivraisonAdministrationSerializer` (`_CoordonneesClientMixin`) ; Django admin de `GroupeCommande` |
+
+Sans point, le suivi n'affiche ni distance ni estimation d'arrivée (aucune valeur inventée, pas de repli sur un « centre de commune »).
 
 ## 6. Code de livraison
 
@@ -164,6 +175,7 @@ Création et modification des tarifs sont tracées (`modifie_par`, journal `secu
 12. **Erreurs à prévoir** : **429** au-delà de 120 changements de statut par heure et par compte, ou de 10 contestations par heure.
 13. **Frais de livraison (§ 9).** Checkout : **ne plus demander la zone** (champ ignoré par le serveur). Menu déroulant des communes construit depuis `GET /api/livraison/tarifs/` (`communes`, avec le tarif de chacune), plus une entrée « Autre ville (hors Abidjan) » avec saisie libre de la ville au tarif `autres_villes`. Pour Abidjan, **toujours passer par le menu** : une saisie libre (« Riviera », « Le Plateau », « Abidjan ») n'est pas reconnue et part au tarif hors Abidjan. Afficher les montants et la `zone` déduite renvoyés par `POST /api/commandes/simuler-frais/` avant le paiement (frais par commande, « livraison offerte »). `adresse` contient `zone` (déduite). Back-office : écran des tarifs (`admin/tarifs/`), où l'ajout d'un tarif de commune en zone Abidjan étend le district.
 14. **Format d'erreur unifié (septembre 2026).** Les refus (400, 403, 409) portaient avant un simple `{"detail": …}` : ils suivent désormais le format commun `{success: false, status_code, detail, errors}`, `errors` toujours un objet clé → liste de messages (`{}` si aucun champ n'est en cause) ; le message reste dans `detail`. Assignation à un livreur inexistant → **400** `errors.livreur_id`.
+15. **Point GPS (septembre 2026).** `adresse` porte `latitude` et `longitude` (nombres, ou `null` sans point) pour le client, le livreur et l'administration ; jamais dans la vue vendeur. App livreur : ouvrir la navigation vers ce point quand il existe, sinon se guider à l'adresse texte ; comme le reste de l'adresse, il arrive `null` après « livrée » ou « annulée » (ne pas le garder en cache).
 
 ## 11. Sécurité — failles corrigées (diagnostic de septembre 2026)
 
@@ -202,6 +214,7 @@ Vérifié et correct dès le diagnostic : `is_staff` sans rôle admin n'a aucun 
 - **commandes 0007** : motif `livraison_echouee`.
 - **paiements 0005** : motif de remboursement `livraison_non_recue`.
 - **Frais de livraison (§ 9)** : **livraison 0004** (`TarifLivraison` + tarifs initiaux provisoires), **commandes 0008** (`Commande.frais_livraison`, `livraison_offerte`, `frais_livraison_vendeur` ; `GroupeCommande.livraison_zone`), **vendeurs 0005** (`Boutique.livraison_offerte`), **livraison 0005** (communes du district d'Abidjan, une zone par commune, un défaut par zone), **retours 0004** (`DemandeRetour.frais_livraison_rembourses`), **paiements 0006** (`Reversement.montant_livraison` ; `AjustementVendeur.nature` et `commande`, un ajustement de chaque nature par commande). Les commandes existantes gardent 0 de frais et une zone vide.
+- **Point GPS du lieu de livraison (§ 5)** : **commandes 0009** (`GroupeCommande.livraison_latitude` / `livraison_longitude`, facultatifs, les deux ou aucun ; voir [`MODULE_COMMANDES.md`](./MODULE_COMMANDES.md) § 12). Aucune migration côté livraison : le point n'est pas copié dans la fiche.
 
 En dev : `docker exec anitche-backend python manage.py migrate`, puis **redémarrer le worker Celery** (`docker restart infra-celery-worker-1`) pour qu'il connaisse la tâche d'envoi du code.
 
@@ -219,6 +232,8 @@ docker exec -e DJANGO_SETTINGS_MODULE=config.settings.ci -e DB_NAME=anitche_test
 Suite complète : **578 tests, OK, aucun « skipped »** (26/09/2026).
 
 **Frais de livraison (§ 9)** — 41 tests : `livraison.TarifsDeLivraisonTests` (normalisation des communes, communes du district créées par migration, zone déduite de la commune, tarif applicable, commune désactivée restée à Abidjan, une zone par commune en base, livraison offerte, grille publique, administration réservée, traçabilité, validations, pas de suppression), `commandes.FraisDeLivraisonCheckoutTests` (frais par commande, commune d'Abidjan écrite de plusieurs façons → abidjan, ville hors Abidjan déclarée « abidjan » → tarif hors Abidjan et l'inverse, ville hors Abidjan avec tarif propre, tarif inactif, montants du client ignorés, 503 sans tarif, livraison offerte, frais figés, coupon sans effet sur les frais), `commandes.SimulationDuCheckoutTests` (mêmes montants que la validation, aucune écriture, part du vendeur jamais exposée, refus, limite dédiée), `paiements.FraisDeLivraisonFinancesTests` (frais hors reversement, livraison offerte déduite et plafonnée, reste dû après livraison seulement, annulation, contestation fondée, frais rendus pour un retour imputable au vendeur une fois par commande et facturés au vendeur, motifs sans frais, points de fidélité hors frais), `retours.RetoursConcurrenceTestCase` (deux demandes simultanées : frais rendus une seule fois, PostgreSQL), `vendeurs.MaBoutiqueAPITests` (option du vendeur). Tests existants adaptés : adresses sans zone, montants attendus frais compris (`FRAIS_ABIDJAN`), tarifs recréés dans les `TransactionTestCase` (`livraison.tests.recreer_tarifs_initiaux`, comme le barème). Suite complète : **728 tests, OK, aucun « skipped »** (27/09/2026).
+
+**Point GPS du lieu de livraison (§ 5)** — `livraison.PositionLivraisonTests`, 5 tests : client et administration le voient à tout statut ; livreur assigné pendant `en_attente`, `expediee`, `en_cours`, `echouee`, masqué (détail et liste) après `livree` et `annulee`, et après une vraie livraison avec code ; autre livreur : 404 ; vendeur : jamais (livraisons et commandes, à tout statut) ; sans point : `null`. `test_suivi_client` adapté : l'objet `adresse` contient désormais `latitude` et `longitude` (`null` pour ce checkout sans point). Suite complète : **835 tests, OK, aucun « skipped »** (27/09/2026).
 
 Postman : dossier **10. Frais de livraison** de `postman_livraison.json` (grille publique, administration des tarifs et refus, simulation, frais figés après changement de tarif, livraison offerte jusqu'au reversement, remises en état) ; plus de `zone` dans les checkouts des collections (et un scénario « zone abidjan déclarée pour une ville de l'intérieur → tarif hors Abidjan »), montants attendus frais compris (`postman_paiements.json`, `postman_retours.json`).
 
@@ -286,3 +301,9 @@ Postman : `postman_livraison.json` (hors dépôt, reconstruite ; l'ancienne est 
 
 - Principe de minimisation : le livreur n'a besoin de l'adresse et du téléphone que pour livrer. Après la livraison (ou l'annulation), les garder accessibles n'apporte rien et expose le client (démarchage, harcèlement).
 - Le téléphone du livreur n'est montré au client que pendant la tournée, pour la même raison.
+
+### Pourquoi le point GPS suit l'adresse, mais jamais pour le vendeur
+
+- Le point est plus sensible que l'adresse texte : c'est l'emplacement exact d'un domicile, exploitable sans connaître le quartier. Il suit donc la règle la plus stricte déjà en place (livreur assigné, masqué après la fin) sans en créer une nouvelle.
+- Le vendeur prépare le colis, il ne le livre pas : la commune, le quartier et le téléphone de livraison lui suffisent. Lui donner le point n'apporterait rien et l'exposerait à des milliers de domiciles de clients.
+- Une seule source : le point vit dans `GroupeCommande` et n'est copié nulle part (ni dans le paiement ni dans la fiche de livraison). Il n'y a donc qu'un endroit à masquer, et une future anonymisation n'aura qu'une colonne à effacer.

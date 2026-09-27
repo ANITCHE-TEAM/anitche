@@ -27,6 +27,11 @@ ADRESSE_LIVRAISON = {
     'telephone': '+2250701020304',
 }
 
+# Point GPS de la même adresse (environ Angré, Cocody), donné au checkout d'une
+# seule commande : celle en préparation, prochaine à livrer, pour tester le
+# suivi du livreur et l'estimation d'arrivée. Les autres n'ont pas de point.
+POSITION_LIVRAISON = {'latitude': 5.397340, 'longitude': -3.986620}
+
 CATEGORIES = [
     {'nom': 'Mode', 'description': 'Vêtements, pagnes et accessoires.', 'ordre': 1},
     {'nom': 'Électronique', 'description': 'Téléphones, audio et accessoires.', 'ordre': 2},
