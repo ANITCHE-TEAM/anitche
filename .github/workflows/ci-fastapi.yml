@@ -6,13 +6,25 @@ on:
     paths:
       - "backend-fastapi/**"
       - ".github/workflows/ci-fastapi.yml"
+      # Vérifiés par tests/test_core_infra.py.
+      - "infra/docker-compose.yml"
+      - "infra/docker-compose.prod.yml"
   pull_request:
     paths:
       - "backend-fastapi/**"
+      - ".github/workflows/ci-fastapi.yml"
+      - "infra/docker-compose.yml"
+      - "infra/docker-compose.prod.yml"
 
 defaults:
   run:
     working-directory: backend-fastapi
+
+env:
+  # Réglages de test (app/core/settings.py) : doc active, aucune exigence
+  # de prod. Les tests injectent leurs propres ressources (Redis, Django et
+  # PostgreSQL simulés) : aucun service n'est nécessaire au module 0.
+  ENVIRONMENT: test
 
 jobs:
   test:
@@ -25,16 +37,18 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
-          cache-dependency-path: backend-fastapi/requirements.txt
+          cache-dependency-path: |
+            backend-fastapi/requirements.txt
+            backend-fastapi/requirements-dev.txt
 
       - name: Installer les dépendances
-        run: |
-          pip install -r requirements.txt
-          pip install pytest httpx
+        run: pip install -r requirements-dev.txt
 
-      - name: Vérifier que l'app démarre (import + routes)
-        run: |
-          python -c "from app.main import app; from fastapi.routing import APIRoute; print('Routes chargées :', [r.path for r in app.routes if isinstance(r, APIRoute)])"
+      # Construit l'application comme uvicorn --factory (réglages validés,
+      # routeurs importés). Depuis FastAPI 0.137, app.routes est un arbre :
+      # on n'énumère plus les routes ici, les tests couvrent chaque route.
+      - name: Vérifier que l'app se construit
+        run: python -c "from app.main import create_app; create_app(); print('Application construite.')"
 
       - name: Lancer les tests
         run: python -m pytest -q
