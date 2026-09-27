@@ -82,13 +82,18 @@ class InscriptionSerializer(serializers.ModelSerializer):
 # PROFIL
 # =====================================================
 
+# Service FastAPI (F-11 : un livreur ne publie que sa propre position GPS) :
+# il ne doit plus lire l'id ici, mais sur la route interne
+# jeton/verification/ (VerificationJetonServiceView), qui ne renvoie que
+# l'id et le rôle et a sa propre limite de débit (elle ne consomme pas la
+# limite 'user' du compte). backend-fastapi appelle encore profil/ tant que
+# son module 0 n'a pas basculé. Commentaire et non docstring : le docstring
+# est exporté dans schema.yaml, où une route interne n'a pas à figurer.
 class ProfilSerializer(serializers.ModelSerializer):
     """
     Returns the private profile of the authenticated user.
 
-    'id' is read-only. It is meant for the FastAPI service (F-11: checking
-    that a delivery driver publishes their own GPS position); that check
-    does not exist yet in backend-fastapi.
+    'id' is read-only.
 
     telephone_verifie stays False as long as no SMS provider is plugged in
     (team decision): the phone-change code is sent by email, which proves

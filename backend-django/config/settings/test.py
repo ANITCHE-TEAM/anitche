@@ -67,6 +67,7 @@ REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {
     'support_ticket': '100000/day',
     'support_message': '100000/day',
     'support_piece_jointe': '100000/day',
+    'service_fastapi': '100000/day',
 }
 # Cache en mémoire rapide pour les tests
 CACHES = {

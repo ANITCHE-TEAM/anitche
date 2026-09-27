@@ -219,6 +219,12 @@ REST_FRAMEWORK = {
         'support_ticket': '10/hour',
         'support_message': '60/hour',
         'support_piece_jointe': '20/hour',
+        # Vérification du jeton par le service FastAPI (route interne
+        # jeton/verification/), par compte. Seule limite de cette route :
+        # elle ne consomme pas 'user'. FastAPI garde chaque réponse 30 s en
+        # cache, soit au plus ~120 appels par heure et par jeton : 600/h
+        # laisse de la marge (plusieurs onglets, plusieurs instances FastAPI).
+        'service_fastapi': '600/hour',
     },
     # Sans cette ligne, config/exceptions.py::custom_exception_handler
     # n'est jamais appelé : les 500 utilisent le handler DRF par défaut.

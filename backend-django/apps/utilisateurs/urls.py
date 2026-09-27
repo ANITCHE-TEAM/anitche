@@ -6,6 +6,7 @@ from .views import (
     RafraichissementView,
     RenvoyerCodeInscriptionView,
     ProfilView,
+    VerificationJetonServiceView,
     DemandeChangementContactView,
     VerificationOTPView,
     UploadKYCView,
@@ -49,6 +50,15 @@ urlpatterns = [
         'profil/',
         ProfilView.as_view(),
         name='profil'
+    ),
+
+    # Route interne : vérification du jeton par le service FastAPI
+    # (id et rôle uniquement). Hors schéma OpenAPI ; à bloquer
+    # publiquement dans nginx.
+    path(
+        'jeton/verification/',
+        VerificationJetonServiceView.as_view(),
+        name='jeton-verification'
     ),
 
     # Demande de changement d'email ou de téléphone.
