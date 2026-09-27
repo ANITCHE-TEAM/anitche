@@ -16,6 +16,7 @@ Comptes, authentification (JWT, Google), codes OTP et dossier KYC. C'est le socl
 | `is_active` | vendeurs, catalogue | Un compte désactivé ne publie rien (`est_publiable`) et ne reçoit pas de jeton |
 | `EmailVerifie` (`apps/utilisateurs/permissions.py`) | utilisateurs, commandes | Actions sensibles réservées aux emails vérifiés (§ 6) |
 | `DocumentKYC` | vendeurs | Instruction des demandes vendeur (validation / refus : `MODULE_VENDEURS.md`) |
+| `jeton/verification/` (route interne) | service FastAPI (`backend-fastapi`) | Validation du jeton d'accès d'un client, `{id, role}` (§ 3 bis) |
 
 Le module dépend de `apps/core` (validateurs de fichiers, `CheminUploadUUID`, `EncryptedCharField`, `adresse_ip_client`) et de `rest_framework_simplejwt` (+ `token_blacklist`), `google-auth`, `cryptography` (Fernet), Celery (envoi des emails, tâches planifiées).
 
@@ -43,6 +44,7 @@ Le module dépend de `apps/core` (validateurs de fichiers, `CheminUploadUUID`, `
 | POST | `renvoyer-code-inscription/` | IsAuthenticated | `otp_envoi` | **Nouveau.** Envoie un nouveau code de vérification de l'email. 400 si l'email est déjà vérifié. **200** |
 | POST | `verification-otp/` | IsAuthenticated | `otp_verification` | `code`, `type_usage`. Vérifie le dernier OTP non utilisé de ce type et applique l'effet (§ 5) |
 | GET / PUT / PATCH | `profil/` | IsAuthenticated | `user` | Seuls `nom` et `prenom` sont modifiables |
+| GET | `jeton/verification/` | IsAuthenticated | `service_fastapi` | **Route interne, réservée au service FastAPI** : `{id, role}` uniquement. Hors schéma OpenAPI, à bloquer publiquement dans nginx (§ 3 bis) |
 | POST | `changement-contact/` | IsAuthenticated + **email vérifié** | `otp_envoi` | `nouvel_email` **ou** `nouveau_telephone`. Refus si la valeur appartient déjà à un autre compte |
 | POST | `mot-de-passe-oublie/` | AllowAny | `otp_envoi` | `email`. Réponse identique que le compte existe ou non |
 | POST | `mot-de-passe-oublie/confirmer/` | AllowAny | `otp_verification` | `email`, `code`, `nouveau_password`. Erreur unique « Code invalide ou expiré. » ; succès : mot de passe changé, **tous les refresh tokens révoqués** |
@@ -52,6 +54,25 @@ Le module dépend de `apps/core` (validateurs de fichiers, `CheminUploadUUID`, `
 Également protégé par `EmailVerifie` hors de ce module : `POST /api/commandes/valider-panier/`.
 
 Format d'erreur commun (`config/exceptions.py`) à toutes les erreurs, OTP, mot de passe oublié, connexion Google et déconnexion compris : `{success: false, status_code, detail, errors}`, `errors` étant toujours un objet clé → liste de messages (vide si l'erreur ne porte sur aucun champ). Les réponses de succès gardent leur `{"message": …}`.
+
+## 3 bis. Route interne pour le service FastAPI
+
+FastAPI ne valide pas lui-même les JWT : il transmet le jeton du client à `GET /api/utilisateurs/jeton/verification/` (`VerificationJetonServiceView`). La révocation (`CHECK_REVOKE_TOKEN`) et la désactivation du compte restent donc gérées par Django, sans secret de signature partagé. FastAPI garde chaque réponse 200 en cache 30 s (côté FastAPI) : une révocation ou une désactivation y prend effet en 30 s au plus.
+
+| Cas | Réponse |
+|---|---|
+| Jeton valide | **200** `{"id": 12, "role": "livreur"}`, rien d'autre (minimisation) |
+| Sans jeton | **401**, `errors` vide |
+| Jeton invalide ou expiré | **401**, `errors.code = ["token_not_valid"]` |
+| Mot de passe changé depuis l'émission | **401**, `errors.code = ["password_changed"]` |
+| Compte désactivé | **401**, `errors.code = ["user_inactive"]` (SimpleJWT ; constaté, et non 404) |
+| Au-delà de la limite | **429** avec `Retry-After`, que FastAPI relaie tel quel |
+
+- **Limite dédiée** `service_fastapi` (600/h par compte) : `throttle_classes` remplace les limites par défaut, donc ces appels **ne consomment pas** la limite `user` (300/h) du compte, et inversement. Avant, FastAPI appelait `profil/` : le suivi GPS épuisait la limite générale de l'utilisateur.
+- Distincte de `profil/`, qui reste inchangé (son `id` fait partie du contrat public). On ne peut pas distinguer, sur `profil/`, un appel de FastAPI d'un appel du client.
+- **Hors schéma OpenAPI** (`@extend_schema(exclude=True)`) : aucun chemin dans `schema.yaml`. Pour la même raison, la note sur FastAPI de `ProfilSerializer` est un commentaire et non un docstring (drf-spectacular exporte les docstrings des serializers dans le schéma).
+- **Production** : FastAPI appelle Django directement sur le réseau Docker, en HTTP (`http://backend-django:8000`), sans nginx. D'où `SECURE_REDIRECT_EXEMPT` dans `prod.py` (cette seule route échappe à la redirection HTTPS) et `backend-django` dans `ALLOWED_HOSTS` (`infra/.env`, sinon 400 DisallowedHost). En dev, l'hôte à utiliser est `http://anitche-backend:8000`, déjà dans `ALLOWED_HOSTS` de `dev.py` (URL à configurer côté FastAPI, module 0).
+- **Point ouvert (étape hébergement)** : bloquer la route publiquement dans nginx (`location = /api/utilisateurs/jeton/verification/ { return 404; }`). Tant que ce n'est pas fait, elle reste joignable depuis Internet ; le risque est faible (un jeton valide est exigé et la réponse ne contient que l'id et le rôle de son propre titulaire), mais la route n'est pas destinée au frontend.
 
 ## 4. JWT et chiffrement
 
@@ -150,6 +171,7 @@ Adresse mal saisie à l'inscription : la personne ne reçoit aucun code et ne pe
 | `otp_verification` | 10/h | `verification-otp/`, `mot-de-passe-oublie/confirmer/` | compte, ou IP si anonyme |
 | `kyc` | 5/h | `upload-kyc/` | compte |
 | `logout` | 30/h | `deconnexion/` | IP |
+| `service_fastapi` | 600/h | `jeton/verification/` (route interne, § 3 bis). Seule limite de cette route | compte |
 | `user` | 300/h | autres routes authentifiées | compte |
 
 - Un scope = un compteur partagé par ses endpoints. Envoi et vérification des codes sont désormais comptés à part : demander plusieurs codes ne bloque plus la vérification. Chaque code reste limité à 5 essais.
@@ -193,6 +215,7 @@ Aucun autre champ de réponse ne change (le profil, les jetons et le dépôt KYC
 
 - **Fournisseur SMS** absent : conditionne `telephone_verifie` (§ 10).
 - `GOOGLE_OAUTH_CLIENT_ID` vide par défaut : la connexion Google refuse tout jeton tant qu'il n'est pas configuré.
+- **Route interne `jeton/verification/` pas encore bloquée dans nginx** (point ouvert, à faire à l'étape hébergement, § 3 bis).
 - **Niveau 2 — comptes jamais vérifiés** : aucune purge. Une tâche Celery planifiée (même modèle que `nettoyer_otp_expires`) devra supprimer les comptes dont l'email n'a jamais été vérifié après N jours (N à fixer en équipe), pour éviter les comptes fantômes (adresses mal saisies, inscriptions abandonnées, comptes créés avec l'email d'un tiers). À cadrer avant de l'écrire : exclure tout compte lié à des données (commande, dossier KYC, boutique, ticket) et prévenir le titulaire avant suppression.
 
 ## 13. Tests
@@ -207,6 +230,6 @@ DJANGO_SETTINGS_MODULE=config.settings.ci DB_NAME=anitche_test DB_USER=postgres 
 
 Vérifier dans la sortie `-v 2` que tout est `ok` et rien `skipped`. Les tests écrivent leurs fichiers dans un `MEDIA_ROOT` temporaire (`config/settings/test.py`), jamais dans `media/`.
 
-`apps/utilisateurs/tests.py` — 97 tests. Passe 2 : chiffrement en base et relecture, longueurs métier, valeur illisible jamais écrasée, rotation de clé et commande de re-chiffrement (dont simulation et valeurs illisibles), migration 0008 aller-retour, IP de la notification (mot de passe, Google, sans proxy), durée affichée dans l'email OTP, pièce KYC perdue (404), email vérifié (connexion libre, 3 actions refusées avec le code machine, renvoi du code puis vérification), inscription sans téléphone et limite par IP, limites OTP séparées, limite de rafraîchissement dédiée, `telephone_verifie` non validé sans SMS, isolation de `MEDIA_ROOT`.
+`apps/utilisateurs/tests.py` — 110 tests. Route interne FastAPI (§ 3 bis) : réponse limitée à `id` et `role`, 401 sans jeton, jeton invalide, jeton révoqué et compte désactivé (avec le code machine), limite `service_fastapi` (429 et `Retry-After`) sans consommer la limite `user`, taux de production, route absente du schéma, pas de redirection HTTPS avec les réglages de production (une autre route l'est). Passe 2 : chiffrement en base et relecture, longueurs métier, valeur illisible jamais écrasée, rotation de clé et commande de re-chiffrement (dont simulation et valeurs illisibles), migration 0008 aller-retour, IP de la notification (mot de passe, Google, sans proxy), durée affichée dans l'email OTP, pièce KYC perdue (404), email vérifié (connexion libre, 3 actions refusées avec le code machine, renvoi du code puis vérification), inscription sans téléphone et limite par IP, limites OTP séparées, limite de rafraîchissement dédiée, `telephone_verifie` non validé sans SMS, isolation de `MEDIA_ROOT`.
 
 Postman : `utilisateurs.postman_collection.json` (hors dépôt) ; scénarios automatiques 5 (email non vérifié) et 6 (téléphone refusé à l'inscription), les autres demandent de saisir les codes OTP à la main.

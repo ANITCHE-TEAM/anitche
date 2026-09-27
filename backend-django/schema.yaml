@@ -11489,9 +11489,7 @@ components:
       description: |-
         Returns the private profile of the authenticated user.
 
-        'id' is read-only. It is meant for the FastAPI service (F-11: checking
-        that a delivery driver publishes their own GPS position); that check
-        does not exist yet in backend-fastapi.
+        'id' is read-only.
 
         telephone_verifie stays False as long as no SMS provider is plugged in
         (team decision): the phone-change code is sent by email, which proves
@@ -12006,9 +12004,7 @@ components:
       description: |-
         Returns the private profile of the authenticated user.
 
-        'id' is read-only. It is meant for the FastAPI service (F-11: checking
-        that a delivery driver publishes their own GPS position); that check
-        does not exist yet in backend-fastapi.
+        'id' is read-only.
 
         telephone_verifie stays False as long as no SMS provider is plugged in
         (team decision): the phone-change code is sent by email, which proves
@@ -12070,9 +12066,7 @@ components:
       description: |-
         Returns the private profile of the authenticated user.
 
-        'id' is read-only. It is meant for the FastAPI service (F-11: checking
-        that a delivery driver publishes their own GPS position); that check
-        does not exist yet in backend-fastapi.
+        'id' is read-only.
 
         telephone_verifie stays False as long as no SMS provider is plugged in
         (team decision): the phone-change code is sent by email, which proves

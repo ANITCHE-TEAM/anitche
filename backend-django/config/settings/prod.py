@@ -128,6 +128,14 @@ if not CORS_ALLOWED_ORIGINS:
 CORS_ALLOW_CREDENTIALS = False
 
 SECURE_SSL_REDIRECT = True
+# Seule exception à la redirection HTTPS : la route interne de vérification
+# du jeton, que FastAPI appelle directement sur le réseau Docker
+# (http://backend-django:8000), sans passer par nginx ni TLS. Sans cette
+# ligne, l'appel reçoit un 301 vers https et l'authentification FastAPI
+# échoue. SecurityMiddleware retire le « / » initial du chemin avant de
+# tester ces motifs, d'où « ^api/ » et non « ^/api/ ». La route reste
+# bloquée publiquement par nginx.
+SECURE_REDIRECT_EXEMPT = [r'^api/utilisateurs/jeton/verification/$']
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True
 

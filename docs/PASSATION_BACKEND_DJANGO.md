@@ -10,7 +10,7 @@ Tous les modules métier sont implémentés, refactorisés un par un (compréhen
 
 | App | Rôle | Document |
 |---|---|---|
-| `utilisateurs` | comptes, JWT (+ Google), OTP par email, mot de passe oublié, KYC chiffré | [`MODULE_UTILISATEURS.md`](./MODULE_UTILISATEURS.md) |
+| `utilisateurs` | comptes, JWT (+ Google), OTP par email, mot de passe oublié, KYC chiffré ; route interne de vérification du jeton pour FastAPI | [`MODULE_UTILISATEURS.md`](./MODULE_UTILISATEURS.md) |
 | `vendeurs` | demandes vendeur, boutiques, suspension | [`MODULE_VENDEURS.md`](./MODULE_VENDEURS.md) |
 | `catalogue` | catégories, produits, variantes, stock, images, modération | [`MODULE_CATALOGUE.md`](./MODULE_CATALOGUE.md) |
 | `panier` | panier connecté ou anonyme | [`MODULE_PANIER.md`](./MODULE_PANIER.md) |
@@ -70,6 +70,7 @@ Vérifier en `-v 2` que chaque test affiche `ok` et non `skipped`. La suite comp
 3. **Paiement** : le montant est toujours calculé par le serveur ; une notification de fournisseur n'est crue qu'après signature et vérification de la transaction. Le fournisseur simulé est refusé au démarrage en production.
 4. **Données sensibles** : pièces KYC, photos de retour et pièces jointes ne sont servies que par leurs vues authentifiées, jamais par une URL média directe. Numéros mobile money chiffrés au repos (rotation : `rechiffrer_donnees_sensibles`).
 5. **Production** : `prod.py` refuse de démarrer sans vraie `SECRET_KEY`, clés de chiffrement, `ALLOWED_HOSTS`/`CORS` explicites et fournisseur de paiement réel. Ne jamais contourner ces garde-fous.
+6. **Authentification de FastAPI** : FastAPI ne valide pas les JWT lui-même, il appelle la route interne `GET /api/utilisateurs/jeton/verification/` (`{id, role}`, limite `service_fastapi` qui ne consomme pas la limite `user`, hors schéma OpenAPI). Il l'appelle directement sur le réseau Docker, en HTTP : c'est la seule route exemptée de la redirection HTTPS (`SECURE_REDIRECT_EXEMPT` dans `prod.py`), et `backend-django` doit figurer dans `ALLOWED_HOSTS`. Elle n'est pas destinée au frontend et doit être bloquée publiquement par nginx. Détails : [`MODULE_UTILISATEURS.md`](./MODULE_UTILISATEURS.md) § 3 bis.
 
 ## 6. Pièges rencontrés
 
@@ -84,5 +85,6 @@ Vérifier en `-v 2` que chaque test affiche `ok` et non `skipped`. La suite comp
 
 - **Dette par module** : section « Dette connue » de chaque `MODULE_*.md`.
 - **Transverse** : pas de `.env.example` dans `backend-django/` ; pas de linter Python en CI.
+- **Points ouverts pour l'étape hébergement** : bloquer publiquement `/api/utilisateurs/jeton/verification/` dans nginx (`location = … { return 404; }`) ; `infra/scripts/check_prod_env.sh` exige désormais `FASTAPI_DB_PASSWORD` (rôle PostgreSQL en lecture seule de FastAPI, pas encore créé) : le déploiement échoue tant qu'elle n'est pas définie dans `infra/.env`.
 - **Capacité** : aucune mesure de charge n'a encore été faite. La cible (environ 1 000 utilisateurs simultanés) devra être démontrée par des tests de charge (scénarios, métriques, goulots, corrections, nouvelle mesure), jamais supposée à partir du code.
 - **Collections Postman** : `vendeurs.postman_collection.json` suppose une base vierge (inscription et KYC du vendeur de test) et ne se rejoue pas telle quelle sur une base de dev déjà utilisée ; `postman_0_setup_vendeur.json` attend `base_url` en variable d'environnement.

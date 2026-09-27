@@ -420,9 +420,9 @@ class ProfilTests(TestCase):
 
     def test_profil_expose_id(self):
         """
-        F-11 : le microservice FastAPI (app/core/securite.py) a besoin de
-        l'id utilisateur pour vérifier qu'un livreur publie bien sa propre
-        position GPS. Ce champ doit rester présent et correct.
+        L'id fait partie du contrat public du profil (schema.yaml) et doit
+        rester présent et correct. FastAPI (F-11) le lit désormais sur la
+        route interne jeton/verification/ (VerificationJetonServiceTests).
         """
 
         self.client.force_authenticate(user=self.utilisateur)
@@ -2125,3 +2125,157 @@ class LimitesDeProductionTests(TestCase):
             {'email': 'limites@anitche.ci', 'code': '000000', 'nouveau_password': 'NouveauMotDePasse123!'},
         ).status_code)
         self.assertEqual(verifications, [400] * n_verif + [429])
+
+
+# =====================================================
+# ROUTE INTERNE DE VÉRIFICATION DU JETON (SERVICE FASTAPI)
+# =====================================================
+
+import json
+import os
+import subprocess
+import sys
+
+from drf_spectacular.generators import SchemaGenerator
+from rest_framework_simplejwt.tokens import RefreshToken
+
+URL_VERIFICATION_JETON = '/api/utilisateurs/jeton/verification/'
+
+
+class VerificationJetonServiceTests(TestCase):
+    """jeton/verification/ : route appelée par FastAPI pour valider le jeton
+    d'un client. Réponse minimale, limite de débit dédiée, hors schéma."""
+
+    def setUp(self):
+        cache.clear()
+        self.utilisateur = Utilisateur.objects.create_user(
+            email='fastapi@anitche.ci', password='MotDePasseSolide123!', nom='F', prenom='A',
+        )
+        self.client = APIClient()
+
+    def authentifier(self):
+        """Vrai jeton d'accès (pas force_authenticate) : c'est la validation
+        SimpleJWT (signature, révocation, compte actif) que FastAPI délègue."""
+        jeton = str(RefreshToken.for_user(self.utilisateur).access_token)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {jeton}')
+
+    def verifier_401(self, response, code=None):
+        """401 au format commun ; `code` : code machine de SimpleJWT
+        (errors.code), absent quand aucun jeton n'est fourni."""
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(response.data['success'], False)
+        self.assertEqual(response.data['errors'].get('code'), [code] if code else None)
+
+    def test_reponse_limitee_a_id_et_role(self):
+        self.utilisateur.role = Role.LIVREUR
+        self.utilisateur.save(update_fields=['role'])
+        self.authentifier()
+        response = self.client.get(URL_VERIFICATION_JETON)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json(), {'id': self.utilisateur.id, 'role': 'livreur'})
+
+    def test_sans_jeton(self):
+        self.verifier_401(self.client.get(URL_VERIFICATION_JETON))
+
+    def test_jeton_invalide(self):
+        self.client.credentials(HTTP_AUTHORIZATION='Bearer jeton-invalide')
+        self.verifier_401(self.client.get(URL_VERIFICATION_JETON), 'token_not_valid')
+
+    def test_jeton_revoque_par_changement_de_mot_de_passe(self):
+        """CHECK_REVOKE_TOKEN : un jeton émis avant le changement de mot de
+        passe est refusé, même non expiré."""
+        self.authentifier()
+        self.utilisateur.set_password('NouveauMotDePasse456!')
+        self.utilisateur.save(update_fields=['password'])
+        self.verifier_401(self.client.get(URL_VERIFICATION_JETON), 'password_changed')
+
+    def test_compte_desactive(self):
+        """Comportement constaté : 401 (SimpleJWT, CHECK_USER_IS_ACTIVE actif
+        par défaut, code « user_inactive »), et non 404 comme supposé dans le
+        rapport module 0. FastAPI le traite comme un jeton refusé."""
+        self.authentifier()
+        self.utilisateur.is_active = False
+        self.utilisateur.save(update_fields=['is_active'])
+        self.verifier_401(self.client.get(URL_VERIFICATION_JETON), 'user_inactive')
+
+    def test_limite_service_fastapi_appliquee(self):
+        self.authentifier()
+        taux = {'service_fastapi': '2/hour', 'user': '100/hour'}
+        with patch.object(SimpleRateThrottle, 'THROTTLE_RATES', taux):
+            codes = [self.client.get(URL_VERIFICATION_JETON).status_code for _ in range(2)]
+            refus = self.client.get(URL_VERIFICATION_JETON)
+        self.assertEqual(codes, [200, 200])
+        self.assertEqual(refus.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        # FastAPI relaie Retry-After au client (429, pas 401).
+        self.assertGreater(int(refus['Retry-After']), 0)
+        self.assertEqual(refus.data['status_code'], 429)
+
+    def test_ne_consomme_pas_la_limite_user(self):
+        """Les appels de FastAPI (suivi GPS) ne doivent pas épuiser la limite
+        générale du compte, ni l'inverse."""
+        self.authentifier()
+        # 'anon' : lu à l'initialisation d'AnonRateThrottle, limite par
+        # défaut de profil/.
+        taux = {'service_fastapi': '100/hour', 'user': '1/hour', 'anon': '100/hour'}
+        with patch.object(SimpleRateThrottle, 'THROTTLE_RATES', taux):
+            verifications = [self.client.get(URL_VERIFICATION_JETON).status_code for _ in range(3)]
+            profils = [self.client.get('/api/utilisateurs/profil/').status_code for _ in range(2)]
+            apres = self.client.get(URL_VERIFICATION_JETON).status_code
+        self.assertEqual(verifications, [200, 200, 200])
+        # La limite 'user' (1/h) est intacte après 3 vérifications, puis
+        # bien active : le test ne passe pas par une limite désactivée.
+        self.assertEqual(profils, [200, 429])
+        self.assertEqual(apres, 200)
+
+    def test_taux_de_production(self):
+        from apps.core.tests import taux_de_production
+
+        self.assertEqual(taux_de_production()['service_fastapi'], '600/hour')
+
+    def test_route_absente_du_schema_openapi(self):
+        schema = SchemaGenerator().get_schema(request=None, public=True)
+        self.assertIn('/api/utilisateurs/profil/', schema['paths'])
+        self.assertFalse([chemin for chemin in schema['paths'] if 'jeton' in chemin])
+
+
+class VerificationJetonProductionTests(TestCase):
+    """Réglages de production réels (prod.py, chargé dans un sous-processus :
+    il ne s'importe pas sans ses secrets). FastAPI appelle Django en HTTP sur
+    le réseau Docker : seule cette route échappe à la redirection HTTPS."""
+
+    def test_route_interne_non_redirigee_vers_https(self):
+        env = {
+            **os.environ,
+            'DJANGO_SETTINGS_MODULE': 'config.settings.prod',
+            'SECRET_KEY': 'x' * 50,
+            'FIELD_ENCRYPTION_KEYS': Fernet.generate_key().decode(),
+            'ALLOWED_HOSTS': 'anitche.com,backend-django',
+            'CORS_ALLOWED_ORIGINS': 'https://anitche.com',
+            'BACKEND_BASE_URL': 'https://api.anitche.com',
+            'PAIEMENT_FOURNISSEUR': 'cinetpay',
+            'CINETPAY_API_KEY': 'sk_live_cle',
+            'CINETPAY_API_PASSWORD': 'mdp',
+        }
+        # Sans jeton : aucune requête en base, la vue répond 401 si elle est
+        # atteinte. Une redirection répondrait 301 avant même la vue.
+        script = (
+            "import django, json\n"
+            "django.setup()\n"
+            "from django.conf import settings\n"
+            "from django.test import Client\n"
+            "client = Client(HTTP_HOST='backend-django')\n"
+            "resultat = {'redirection_active': settings.SECURE_SSL_REDIRECT}\n"
+            f"for cle, chemin in (('interne', '{URL_VERIFICATION_JETON}'), ('profil', '/api/utilisateurs/profil/')):\n"
+            "    reponse = client.get(chemin)\n"
+            "    resultat[cle] = [reponse.status_code, reponse.get('Location')]\n"
+            "print(json.dumps(resultat))\n"
+        )
+        resultat = subprocess.run(
+            [sys.executable, '-c', script], cwd=Path(settings.BASE_DIR), env=env, capture_output=True, text=True,
+        )
+        self.assertEqual(resultat.returncode, 0, resultat.stderr[-800:])
+        self.assertEqual(json.loads(resultat.stdout.strip().splitlines()[-1]), {
+            'redirection_active': True,
+            'interne': [401, None],
+            'profil': [301, 'https://backend-django/api/utilisateurs/profil/'],
+        })

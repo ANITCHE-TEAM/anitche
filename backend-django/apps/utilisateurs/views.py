@@ -161,6 +161,38 @@ class ProfilView(generics.RetrieveUpdateAPIView):
 
 
 # =====================================================
+# VÉRIFICATION DU JETON PAR LE SERVICE FASTAPI (ROUTE INTERNE)
+# =====================================================
+
+@extend_schema(exclude=True)
+class VerificationJetonServiceView(APIView):
+    """
+    Route interne, appelée par le service FastAPI (backend-fastapi) pour
+    vérifier le jeton d'accès qu'un client lui présente. FastAPI délègue
+    l'authentification à Django : la révocation (CHECK_REVOKE_TOKEN) et la
+    désactivation du compte restent gérées ici, sans secret de signature
+    partagé.
+
+    Distincte de profil/ pour deux raisons :
+    - limite de débit dédiée : throttle_classes remplace les limites par
+      défaut, donc ces appels ne consomment pas la limite 'user' du compte
+      (sinon le suivi GPS épuiserait les 300/h de l'utilisateur) ;
+    - minimisation : FastAPI ne reçoit que l'id et le rôle.
+
+    Exclue du schéma OpenAPI (route interne). En production, nginx doit la
+    bloquer publiquement ; FastAPI l'appelle directement sur le réseau
+    Docker, en HTTP (SECURE_REDIRECT_EXEMPT dans prod.py).
+    """
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'service_fastapi'
+
+    def get(self, request):
+        return Response({'id': request.user.id, 'role': request.user.role})
+
+
+# =====================================================
 # DEMANDE DE CHANGEMENT D'EMAIL / TÉLÉPHONE
 # =====================================================
 
