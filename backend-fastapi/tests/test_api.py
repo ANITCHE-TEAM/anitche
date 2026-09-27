@@ -1,31 +1,30 @@
-import pytest
-from unittest.mock import patch, AsyncMock
-from fastapi.testclient import TestClient
-from app.main import app
-from app.core.securite import utilisateur_courant
+from app.core.auth import CurrentUser, get_current_user
 
-client = TestClient(app)
+# Module 0 (socle) : plus d'application globale. Chaque test reçoit la
+# fixture `client` (tests/conftest.py) : application neuve créée par
+# create_app, avec Redis, Django et PostgreSQL simulés.
 
 
-def test_health_check():
+def test_health_check(client):
+    # Module 0 : contrat de /health changé volontairement. Il vérifie
+    # PostgreSQL et Redis, sans exposer de version. Les en-têtes de sécurité
+    # (nosniff, X-Frame-Options) sont posés par nginx, et X-Process-Time-Ms
+    # est remplacé par le journal d'accès (tests/test_core_*.py).
     response = client.get("/health")
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "healthy"
-    assert "version" in data
-    # Vérification des headers de sécurité et de latence
-    assert response.headers.get("X-Content-Type-Options") == "nosniff"
-    assert response.headers.get("X-Frame-Options") == "DENY"
-    assert "X-Process-Time-Ms" in response.headers
+    assert data == {"status": "ok", "checks": {"database": "ok", "redis": "ok"}}
+    assert "version" not in data
 
 
-def test_root():
+def test_root(client):
+    # Module 0 : l'en-tête nosniff n'est plus posé par FastAPI (nginx s'en
+    # charge), l'assertion correspondante est retirée.
     response = client.get("/")
     assert response.status_code == 200
     data = response.json()
     assert "documentation" in data
     assert "endpoints" in data
-    assert response.headers.get("X-Content-Type-Options") == "nosniff"
 
 
 
@@ -33,7 +32,7 @@ def test_root():
 # 1. Tests Moteur de Recherche
 # ==========================================
 
-def test_recherche_produits_catalogue_complet():
+def test_recherche_produits_catalogue_complet(client):
     response = client.get("/recherche/produits")
     assert response.status_code == 200
     data = response.json()
@@ -43,7 +42,7 @@ def test_recherche_produits_catalogue_complet():
     assert len(data["facettes"]["categories"]) > 0
 
 
-def test_recherche_produits_filtre_mot_cle():
+def test_recherche_produits_filtre_mot_cle(client):
     response = client.get("/recherche/produits?q=baoule")
     assert response.status_code == 200
     data = response.json()
@@ -53,7 +52,7 @@ def test_recherche_produits_filtre_mot_cle():
         assert "baoulé" in texte or "baoule" in texte
 
 
-def test_recherche_produits_filtre_prix_et_tri():
+def test_recherche_produits_filtre_prix_et_tri(client):
     response = client.get("/recherche/produits?prix_max=20000&tri=prix_asc")
     assert response.status_code == 200
     data = response.json()
@@ -62,7 +61,7 @@ def test_recherche_produits_filtre_prix_et_tri():
     assert prix_list == sorted(prix_list)
 
 
-def test_recherche_suggestions_autocompletion():
+def test_recherche_suggestions_autocompletion(client):
     response = client.get("/recherche/suggestions?q=wax")
     assert response.status_code == 200
     data = response.json()
@@ -75,7 +74,7 @@ def test_recherche_suggestions_autocompletion():
 # 2. Tests Conseiller Shopping IA
 # ==========================================
 
-def test_ia_conseil_mariage_ceremonie():
+def test_ia_conseil_mariage_ceremonie(client):
     payload = {
         "messages": [
             {"role": "user", "contenu": "Je cherche une tenue d'apparat pour un mariage traditionnel à Yamoussoukro."}
@@ -93,7 +92,7 @@ def test_ia_conseil_mariage_ceremonie():
     assert any("baoulé" in n or "baoule" in n for n in noms)
 
 
-def test_ia_recommandations_personnalisees():
+def test_ia_recommandations_personnalisees(client):
     payload = {
         "categories_preferees": ["Artisanat & Déco", "Bijoux & Parures"],
         "budget_max": 40000.0,
@@ -109,7 +108,7 @@ def test_ia_recommandations_personnalisees():
 # 3. Tests Scan & Certification QR
 # ==========================================
 
-def test_scan_qr_code_direct_valide():
+def test_scan_qr_code_direct_valide(client):
     payload = {"qr_data": "PAS-2026-TIASSALE01"}
     response = client.post("/qr/scan", json=payload)
     assert response.status_code == 200
@@ -121,7 +120,7 @@ def test_scan_qr_code_direct_valide():
     assert data["nb_scans"] >= 13
 
 
-def test_scan_qr_url_complete():
+def test_scan_qr_url_complete(client):
     payload = {"qr_data": "https://anitche.ci/qr/verifier/PAS-2026-BASSAM02"}
     response = client.post("/qr/scan", json=payload)
     assert response.status_code == 200
@@ -131,7 +130,7 @@ def test_scan_qr_url_complete():
     assert data["boutique_nom"] == "Maroquinerie Bassam"
 
 
-def test_scan_qr_code_invalide():
+def test_scan_qr_code_invalide(client):
     payload = {"qr_data": "QR-INVALIDE-RANDOM"}
     response = client.post("/qr/scan", json=payload)
     assert response.status_code == 200
@@ -139,7 +138,7 @@ def test_scan_qr_code_invalide():
     assert data["valide"] is False
 
 
-def test_consulter_passeport_get():
+def test_consulter_passeport_get(client):
     response = client.get("/qr/passeport/PAS-2026-MASQUE03")
     assert response.status_code == 200
     data = response.json()
@@ -151,7 +150,7 @@ def test_consulter_passeport_get():
 # 4. Tests Suivi GPS & Télémétrie Livreur
 # ==========================================
 
-def test_mise_a_jour_position_gps_et_consultation():
+def test_mise_a_jour_position_gps_et_consultation(client):
     # F-11 : ces routes sont désormais authentifiées (voir
     # test_f11_auth_gps.py pour les cas d'accès refusé) ; on simule ici un
     # livreur légitime autorisé sur la livraison pour vérifier que le flux
@@ -166,29 +165,24 @@ def test_mise_a_jour_position_gps_et_consultation():
         "cap_degres": 120.0,
     }
 
-    app.dependency_overrides[utilisateur_courant] = lambda: {
-        "id": 42, "role": "livreur", "_token": "faketoken",
-    }
-    try:
-        with patch(
-            "app.routeurs.suivi_temps_reel.verifier_acces_livraison",
-            new=AsyncMock(return_value=None),
-        ):
-            # 1. Envoi de la position par le livreur
-            response_post = client.post("/livraison/position", json=payload)
-            assert response_post.status_code == 200
-            data_post = response_post.json()
-            assert data_post["livraison_id"] == livraison_id
-            assert data_post["statut"] == "en_route"
-            assert data_post["distance_restante_km"] > 0
-            assert data_post["temps_estime_minutes"] > 0
+    # Module 0 : dépendance renommée (get_current_user, qui renvoie un
+    # CurrentUser) ; verifier_acces_livraison est retirée du socle (refaite
+    # au module 1), il n'y a donc plus rien à simuler pour elle.
+    client.app.dependency_overrides[get_current_user] = lambda: CurrentUser(id=42, role="livreur")
 
-            # 2. Consultation de la position par le client
-            response_get = client.get(f"/livraison/position/{livraison_id}")
-            assert response_get.status_code == 200
-            data_get = response_get.json()
-            assert data_get["latitude"] == 5.3350
-            assert data_get["longitude"] == -4.0020
-            assert data_get["livreur_id"] == 42
-    finally:
-        app.dependency_overrides.clear()
+    # 1. Envoi de la position par le livreur
+    response_post = client.post("/livraison/position", json=payload)
+    assert response_post.status_code == 200
+    data_post = response_post.json()
+    assert data_post["livraison_id"] == livraison_id
+    assert data_post["statut"] == "en_route"
+    assert data_post["distance_restante_km"] > 0
+    assert data_post["temps_estime_minutes"] > 0
+
+    # 2. Consultation de la position par le client
+    response_get = client.get(f"/livraison/position/{livraison_id}")
+    assert response_get.status_code == 200
+    data_get = response_get.json()
+    assert data_get["latitude"] == 5.3350
+    assert data_get["longitude"] == -4.0020
+    assert data_get["livreur_id"] == 42

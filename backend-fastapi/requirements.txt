@@ -1,8 +1,11 @@
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-pydantic==2.10.4
-pydantic-settings==2.7.0
-python-multipart==0.0.20
+# Dépendances de l'application uniquement (image Docker de prod).
+# Outils de test : requirements-dev.txt.
+fastapi==0.141.1
+# Dépendance de fastapi, épinglée pour des builds reproductibles.
+starlette==1.7.0
+uvicorn[standard]==0.54.0
+pydantic==2.13.5
+pydantic-settings==2.15.0
 httpx==0.28.1
-pytest==8.3.4
-pytest-asyncio==0.25.0
+asyncpg==0.31.0
+redis==8.1.0

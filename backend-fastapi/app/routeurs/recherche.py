@@ -1,7 +1,8 @@
 from typing import Optional
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from app.modeles.recherche import ReponseRecherche, ReponseSuggestions
 from app.services.recherche_service import ServiceRecherche
+from app.core.rate_limit import rate_limit
 
 router = APIRouter(prefix="/recherche", tags=["Recherche & Suggestions"])
 
@@ -10,6 +11,7 @@ router = APIRouter(prefix="/recherche", tags=["Recherche & Suggestions"])
     "/produits",
     response_model=ReponseRecherche,
     summary="Recherche multi-critères et filtrage rapide du catalogue",
+    dependencies=[Depends(rate_limit("search"))],
 )
 def rechercher_produits(
     q: Optional[str] = Query(None, description="Termes de recherche (nom, description, artisanat)"),
@@ -38,6 +40,7 @@ def rechercher_produits(
     "/suggestions",
     response_model=ReponseSuggestions,
     summary="Suggestions instantanées d'autocomplétion pendant la frappe",
+    dependencies=[Depends(rate_limit("suggestions"))],
 )
 def obtenir_suggestions(
     q: str = Query(..., min_length=2, description="Début du mot tapé par l'utilisateur"),

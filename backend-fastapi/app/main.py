@@ -1,104 +1,115 @@
-import time
-import logging
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.base import BaseHTTPMiddleware
-from app.core.config import settings
-from app.routeurs import recherche, conseiller_ia, scan_qr, suivi_temps_reel
+"""Fabrique de l'application FastAPI.
 
-# Configuration du logging
+Lancement : `uvicorn --factory app.main:create_app` (voir le Dockerfile).
+Aucune application n'est créée à l'import : chaque test construit la
+sienne avec ses réglages et ses ressources.
+"""
+import asyncio
+import logging
+
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from app.core.access_log import AccessLogMiddleware
+from app.core.errors import ERROR_RESPONSES, install_error_handlers
+from app.core.resources import Resources, build_lifespan
+from app.core.settings import Settings, get_settings
+from app.routeurs import conseiller_ia, recherche, scan_qr, suivi_temps_reel
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("anitche.fastapi")
 
-app = FastAPI(
-    title=settings.app_name,
-    version=settings.app_version,
-    description="Microservice haute performance ANITCHE : Recherche plein texte & facettes, Conseiller Shopping IA, Vérification passeports QR et Suivi GPS temps réel (WebSockets).",
-    docs_url="/docs",
-    redoc_url="/redoc",
-)
+HEALTH_CHECK_TIMEOUT = 1.0
 
 
-# 1. Middleware de Sécurité (Headers HTTP)
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        return response
+async def _check(name: str, probe) -> str:
+    try:
+        async with asyncio.timeout(HEALTH_CHECK_TIMEOUT):
+            await probe()
+    except Exception as exc:  # toute panne rend le service non prêt
+        logger.warning("Healthcheck %s en échec : %s", name, type(exc).__name__)
+        return "error"
+    return "ok"
 
 
-# 2. Middleware de Télémétrie & Latence
-class ProcessTimeMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        start_time = time.time()
-        response = await call_next(request)
-        process_time = time.time() - start_time
-        response.headers["X-Process-Time-Ms"] = str(round(process_time * 1000, 2))
-        return response
-
-
-# Ajout des Middlewares
-app.add_middleware(SecurityHeadersMiddleware)
-app.add_middleware(ProcessTimeMiddleware)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.allowed_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-# 3. Gestionnaire global d'exceptions
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Exception non gérée sur {request.method} {request.url.path}: {str(exc)}", exc_info=True)
+async def health(request: Request) -> JSONResponse:
+    """État de PostgreSQL et de Redis, sans version ni détail technique.
+    200 si tout répond, 503 sinon (healthcheck Docker, nginx)."""
+    state = request.app.state
+    checks = {
+        "database": await _check("database", lambda: state.db.fetchval("SELECT 1")),
+        "redis": await _check("redis", state.redis.ping),
+    }
+    healthy = all(value == "ok" for value in checks.values())
     return JSONResponse(
-        status_code=500,
-        content={
-            "success": False,
-            "status_code": 500,
-            "detail": "Une erreur interne est survenue sur le service rapide ANITCHE.",
-        },
+        {"status": "ok" if healthy else "error", "checks": checks},
+        status_code=200 if healthy else 503,
     )
 
 
-# Inclusion des routeurs
-app.include_router(recherche.router)
-app.include_router(conseiller_ia.router)
-app.include_router(scan_qr.router)
-app.include_router(suivi_temps_reel.router)
+def create_app(settings: Settings | None = None, *, resources: Resources | None = None) -> FastAPI:
+    settings = settings or get_settings()
 
+    app = FastAPI(
+        title=settings.app_name,
+        version=settings.app_version,
+        description=(
+            "Microservice haute performance ANITCHE : recherche, conseiller shopping IA, "
+            "vérification des passeports QR et suivi GPS temps réel (WebSockets)."
+        ),
+        debug=settings.debug,
+        docs_url="/docs" if settings.docs_enabled else None,
+        redoc_url="/redoc" if settings.docs_enabled else None,
+        openapi_url="/openapi.json" if settings.docs_enabled else None,
+        root_path=settings.root_path,
+        responses=ERROR_RESPONSES,
+        lifespan=build_lifespan(settings, resources),
+    )
+    app.state.settings = settings
 
-@app.get("/health", tags=["Système"])
-async def health_check():
-    """Healthcheck endpoint pour le monitoring et orchestration Docker."""
-    return {
-        "status": "healthy",
-        "app": settings.app_name,
-        "version": settings.app_version,
-    }
+    install_error_handlers(app)
 
+    # Authentification par en-tête Authorization, sans cookie : pas de
+    # credentials cross-origin (comme CORS_ALLOW_CREDENTIALS = False côté
+    # Django). Retry-After exposé pour que le frontend le lise en dev.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_allowed_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+        expose_headers=["Retry-After"],
+        max_age=600,
+    )
+    app.add_middleware(AccessLogMiddleware)
 
-@app.get("/", tags=["Système"])
-async def root():
-    """Page d'accueil de l'API FastAPI."""
-    return {
-        "message": "Bienvenue sur l'API FastAPI d'ANITCHE",
-        "documentation": "/docs",
-        "endpoints": {
-            "recherche": "/recherche/produits",
-            "suggestions": "/recherche/suggestions",
-            "ia_conseil": "/ia/conseil",
-            "qr_scan": "/qr/scan",
-            "suivi_gps": "/livraison/position/{livraison_id}",
-            "websocket_suivi": "/livraison/ws/{livraison_id}",
-        },
-    }
+    app.include_router(recherche.router)
+    app.include_router(conseiller_ia.router)
+    app.include_router(scan_qr.router)
+    app.include_router(suivi_temps_reel.router)
+
+    app.add_api_route("/health", health, methods=["GET"], tags=["Système"], summary="État du service")
+
+    @app.get("/", tags=["Système"])
+    async def root():
+        """Page d'accueil de l'API FastAPI."""
+        content = {
+            "message": "Bienvenue sur l'API FastAPI d'ANITCHE",
+            "endpoints": {
+                "recherche": "/recherche/produits",
+                "suggestions": "/recherche/suggestions",
+                "ia_conseil": "/ia/conseil",
+                "qr_scan": "/qr/scan",
+                "suivi_gps": "/livraison/position/{livraison_id}",
+                "websocket_suivi": "/livraison/ws/{livraison_id}",
+            },
+        }
+        if settings.docs_enabled:
+            content["documentation"] = "/docs"
+        return content
+
+    return app

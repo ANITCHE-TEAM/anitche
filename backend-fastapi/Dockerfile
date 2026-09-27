@@ -5,16 +5,23 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
-
+# Aucun paquet système : toutes les dépendances (asyncpg compris) ont des
+# wheels pour Python 3.12. Image plus petite, moins de surface d'attaque.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Utilisateur sans privilèges : le code appartient à root, en lecture seule
+# pour l'application.
+RUN useradd --system --no-create-home app
+
 COPY . .
+
+USER app
 
 EXPOSE 8001
 
-# --reload est retiré en prod via la commande définie dans docker-compose.prod.yml
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001", "--reload"]
+# Pas de --reload ici (ajouté uniquement par le compose de dev).
+# --no-proxy-headers : l'IP du client est lue par app/core/network.py
+# (TRUSTED_PROXY_COUNT), une seule règle, testée.
+# --no-access-log : journal d'accès sans chaîne de requête (app/core/access_log.py).
+CMD ["uvicorn", "--factory", "app.main:create_app", "--host", "0.0.0.0", "--port", "8001", "--no-proxy-headers", "--no-access-log"]

@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from app.modeles.conseiller_ia import (
     DemandeConseilIA,
     ReponseConseilIA,
@@ -6,6 +6,10 @@ from app.modeles.conseiller_ia import (
     ReponseRecommandations,
 )
 from app.services.ia_service import ServiceConseillerIA
+from app.core.rate_limit import rate_limit
+
+# Routes encore publiques : limite par IP en attendant l'authentification
+# du module 4 (limite par utilisateur).
 
 router = APIRouter(prefix="/ia", tags=["Conseiller Shopping IA"])
 
@@ -14,6 +18,7 @@ router = APIRouter(prefix="/ia", tags=["Conseiller Shopping IA"])
     "/conseil",
     response_model=ReponseConseilIA,
     summary="Obtenir des conseils de style et suggestions de produits par l'IA",
+    dependencies=[Depends(rate_limit("ai_advice"))],
 )
 def conseiller_shopping(demande: DemandeConseilIA):
     """Analyse la requête de l'utilisateur et génère des recommandations expertes en mode, artisanat et culture ivoirienne."""
@@ -24,6 +29,7 @@ def conseiller_shopping(demande: DemandeConseilIA):
     "/recommandations",
     response_model=ReponseRecommandations,
     summary="Recommandations personnalisées selon les préférences",
+    dependencies=[Depends(rate_limit("ai_advice"))],
 )
 def obtenir_recommandations(demande: DemandeRecommandations):
     """Génère une sélection sur-mesure d'articles selon le budget et les catégories sélectionnées."""
