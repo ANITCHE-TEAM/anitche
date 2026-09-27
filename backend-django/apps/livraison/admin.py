@@ -5,7 +5,7 @@ from apps.utilisateurs.models import Role, Utilisateur
 from apps.vendeurs.permissions import ROLES_ADMINISTRATION
 
 from . import services
-from .models import ContestationLivraison, Livraison, LivraisonHistorique
+from .models import ContestationLivraison, Livraison, LivraisonHistorique, TarifLivraison
 
 
 class LivraisonHistoriqueInline(admin.TabularInline):
@@ -106,4 +106,25 @@ class ContestationLivraisonAdmin(admin.ModelAdmin):
         return False
 
     def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(TarifLivraison)
+class TarifLivraisonAdmin(admin.ModelAdmin):
+    """Consultation ; les tarifs se modifient par l'API d'administration
+    (validations, journal de sécurité), comme les barèmes de frais vendeur."""
+    list_display = ["zone", "commune", "montant", "est_actif", "date_mise_a_jour"]
+    list_filter = ["zone", "est_actif"]
+    readonly_fields = [
+        "id", "zone", "commune", "commune_normalisee", "montant", "est_actif", "modifie_par",
+        "date_creation", "date_mise_a_jour",
+    ]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
         return False

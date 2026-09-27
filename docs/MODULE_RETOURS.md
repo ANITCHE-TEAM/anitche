@@ -28,7 +28,7 @@ admin.py        Django admin en lecture seule sur statut, montant, quantités, p
 
 ## 3. Modèles
 
-- **`DemandeRetour`** : `numero_retour` (`RET-<année>-<8 hex>`), `commande`, `client`, `boutique`, `motif`, `type_resolution` (seul `remboursement` est accepté à la création), `statut`, `description`, `montant_remboursement` (figé à la création), `reponse_vendeur`, dates (`date_traitement`, `date_cloture`).
+- **`DemandeRetour`** : `numero_retour` (`RET-<année>-<8 hex>`), `commande`, `client`, `boutique`, `motif`, `type_resolution` (seul `remboursement` est accepté à la création), `statut`, `description`, `montant_remboursement` (figé à la création), `frais_livraison_rembourses` (part des frais de livraison comprise dans ce montant, § 6), `reponse_vendeur`, dates (`date_traitement`, `date_cloture`).
 - **`RetourItem`** : ligne de commande retournée et quantité (retour partiel possible).
 - **`PhotoRetour`** : preuve du client, fichier renommé en UUID (`retours/preuves/<uuid>.<ext>`).
 
@@ -60,11 +60,13 @@ admin.py        Django admin en lecture seule sur statut, montant, quantités, p
 | GET | `<uuid>/photos/<photo_uuid>/` | client, vendeur de la boutique, administration | Le fichier (servi par Django après contrôle d'accès). **404** hors périmètre, **401** sans jeton |
 | GET | `vendeur/liste/` | vendeur (sa boutique), administration (tout) | Paginée |
 
-Représentation d'une demande : `id`, `numero_retour`, `commande`, `client`, `client_email`, `boutique`, `boutique_nom`, `motif(_display)`, `type_resolution(_display)`, `statut(_display)`, `description`, `montant_remboursement`, `reponse_vendeur`, `articles` (`id`, `commande_item`, `nom_produit`, `prix_unitaire`, `quantite`), `photos` (`id`, **`image` = URL de téléchargement authentifiée**, `date_ajout`), dates.
+Représentation d'une demande : `id`, `numero_retour`, `commande`, `client`, `client_email`, `boutique`, `boutique_nom`, `motif(_display)`, `type_resolution(_display)`, `statut(_display)`, `description`, `montant_remboursement`, `frais_livraison_rembourses`, `reponse_vendeur`, `articles` (`id`, `commande_item`, `nom_produit`, `prix_unitaire`, `quantite`), `photos` (`id`, **`image` = URL de téléchargement authentifiée**, `date_ajout`), dates.
 
 ## 6. Montant remboursé
 
-`montant_remboursement` = prix des articles retournés × (montant payé de la commande ÷ montant avant remise), **arrondi au franc inférieur**. Le client récupère ce qu'il a réellement payé : la remise d'un coupon (supportée par ANITCHE) est déduite au prorata. La somme des retours partiels d'une commande ne dépasse jamais son montant payé.
+`montant_remboursement` = prix des articles retournés × (montant payé pour les articles de la commande, frais de livraison exclus ÷ montant avant remise), **arrondi au franc inférieur**, + les frais de livraison rendus. Le client récupère ce qu'il a réellement payé : la remise d'un coupon (supportée par ANITCHE) est déduite au prorata. La somme des retours partiels d'une commande ne dépasse jamais ce qu'elle a payé.
+
+**Frais de livraison** ([`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md) § 9) : rendus **en totalité**, une seule fois par commande, pour un motif imputable au vendeur (`article_manquant`, `produit_defectueux`, `non_conforme`) ; jamais pour `changement_avis`, `mauvaise_taille` ou `autre`, ni pour une livraison offerte (le client n'a rien payé). Une demande rejetée ou annulée ne compte pas. Le calcul se fait sous le verrou de la commande : deux demandes simultanées ne les incluent pas toutes les deux. Au remboursement, ils sont facturés au vendeur par un `AjustementVendeur` (`frais_livraison_retour`), déduit de ses prochains reversements.
 
 La part retirée au vendeur ne change pas (`paiements.reversements.part_vendeur_retournee`) : prix des articles moins leur commission, le frais fixe restant à ANITCHE. La remise étant supportée par ANITCHE, le vendeur ne perd que ce qu'il aurait touché.
 
@@ -115,6 +117,7 @@ Vérifié et correct dès le diagnostic : IDOR sur la liste et le détail, valid
 ## 11. Migrations
 
 - **retours 0003** : statut `annule` ; `PhotoRetour.image` renommée en UUID (`CheminUploadUUID`). Les fichiers existants gardent leur nom.
+- **retours 0004** : `frais_livraison_rembourses` (0 pour l'existant).
 
 En dev : `docker exec anitche-backend python manage.py migrate`.
 
@@ -128,7 +131,7 @@ Postman : `postman_retours.json` (hors dépôt, nouvelle : aucune collection ret
 
 ## 13. Dette connue
 
-- **Frais de retour** (qui paie le renvoi du colis) : non modélisé ; à trancher avec les frais de livraison (décision produit en attente, [`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md) § 9).
+- **Frais de retour** (qui paie le renvoi du colis) : toujours non modélisé. Les frais de livraison **payés à l'aller** sont traités (§ 6, [`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md) § 9).
 - **Arbitrage** : aucun statut « litige » ; un désaccord passe par un ticket support lié à la commande (module support).
 - **Échange et avoir** : valeurs conservées en base pour l'historique, non proposées. À concevoir si le besoin apparaît (réservation de stock, bon d'achat).
 - **Colis reçu abîmé par le client** : la boutique peut réceptionner avec `"restock": false` ; le remboursement reste dû, l'administration peut ensuite trancher hors application.

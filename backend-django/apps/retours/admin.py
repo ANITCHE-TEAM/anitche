@@ -25,6 +25,7 @@ class DemandeRetourAdmin(admin.ModelAdmin):
         "type_resolution",
         "statut",
         "montant_remboursement",
+        "frais_livraison_rembourses",
         "date_creation",
     )
     list_filter = ("statut", "motif", "type_resolution", "date_creation")
@@ -35,7 +36,7 @@ class DemandeRetourAdmin(admin.ModelAdmin):
     # sans déclencher le remboursement réel).
     readonly_fields = (
         "id", "numero_retour", "date_creation", "date_traitement", "date_cloture", "date_mise_a_jour",
-        "statut", "montant_remboursement",
+        "statut", "montant_remboursement", "frais_livraison_rembourses",
     )
     inlines = [RetourItemInline, PhotoRetourInline]
     ordering = ("-date_creation",)

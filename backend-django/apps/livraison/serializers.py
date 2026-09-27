@@ -16,7 +16,7 @@ from rest_framework import serializers
 
 from apps.commandes.serializers import adresse_du_groupe
 
-from .models import ContestationLivraison, Livraison, LivraisonHistorique
+from .models import ContestationLivraison, Livraison, LivraisonHistorique, TarifLivraison, normaliser_commune
 from .services import CODE_ESSAIS_MAX, STATUTS_TERMINES, fin_du_delai_de_contestation, role_acteur
 
 CHAMPS_COMMUNS = [
@@ -243,3 +243,56 @@ class LivraisonAReassignerSerializer(serializers.ModelSerializer):
         fields = ["id", "numero_commande", "status"]
         read_only_fields = fields
 
+
+
+# =====================================================================
+# TARIFS DE LIVRAISON
+# =====================================================================
+
+class TarifLivraisonSerializer(serializers.ModelSerializer):
+    """Administration. La zone et la commune d'un tarif ne changent plus
+    après sa création (on crée un autre tarif) ; le tarif par défaut d'une
+    zone ne se désactive pas : sans lui, plus aucune commande possible.
+
+    Créer un tarif de commune dans la zone « abidjan » ajoute la commune au
+    district : les adresses de cette commune passent en zone Abidjan. Une
+    commune désactivée reste dans sa zone et prend le tarif par défaut."""
+
+    class Meta:
+        model = TarifLivraison
+        fields = ["id", "zone", "commune", "montant", "est_actif", "modifie_par", "date_creation", "date_mise_a_jour"]
+        read_only_fields = ["id", "modifie_par", "date_creation", "date_mise_a_jour"]
+        # Les validateurs générés depuis les contraintes conditionnelles
+        # ignorent leur condition (« zone unique » tout court) : validate()
+        # applique les vraies règles, la base les garantit.
+        validators = []
+        extra_kwargs = {"zone": {"validators": []}}
+
+    def validate(self, attrs):
+        instance = self.instance
+        if instance is not None:
+            for champ in ("zone", "commune"):
+                if champ in attrs and attrs[champ].strip() != getattr(instance, champ):
+                    raise serializers.ValidationError(
+                        {champ: "Non modifiable : créez un nouveau tarif (et désactivez celui-ci si besoin)."}
+                    )
+        zone = attrs.get("zone", getattr(instance, "zone", None))
+        commune_normalisee = normaliser_commune(attrs.get("commune", getattr(instance, "commune", "")))
+        if attrs.get("est_actif") is False and not commune_normalisee:
+            raise serializers.ValidationError(
+                {"est_actif": "Le tarif par défaut d'une zone ne peut pas être désactivé : modifiez son montant."}
+            )
+        # Une commune n'a qu'un tarif, toutes zones confondues : sa zone
+        # (déduite par le serveur) ne peut pas être ambiguë.
+        doublon = TarifLivraison.objects.filter(commune_normalisee=commune_normalisee)
+        if not commune_normalisee:
+            doublon = doublon.filter(zone=zone)
+        if instance is not None:
+            doublon = doublon.exclude(pk=instance.pk)
+        existant = doublon.first()
+        if existant is not None:
+            raise serializers.ValidationError({"commune": (
+                f"Un tarif existe déjà pour cette commune (zone {existant.get_zone_display()})."
+                if commune_normalisee else "Cette zone a déjà un tarif par défaut."
+            )})
+        return attrs

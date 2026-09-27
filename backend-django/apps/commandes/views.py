@@ -1,4 +1,3 @@
-from decimal import ROUND_DOWN, Decimal
 import logging
 
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -20,13 +19,22 @@ from .serializers import (
     CommandeVendeurSerializer,
     GroupeCommandeSerializer,
     CommandeItemSerializer,
+    SimulerFraisSerializer,
 )
-from .services import TransitionImpossible, annuler_commande, est_payee, passer_en_preparation
+from .services import (
+    CheckoutRefuse,
+    TransitionImpossible,
+    annuler_commande,
+    calculer_checkout,
+    est_payee,
+    passer_en_preparation,
+    trouver_coupon,
+)
 from apps.catalogue.models import Stock
 from apps.panier.models import Panier
 from apps.panier.services import get_or_create_panier
-from apps.fidelite.models import CouponReduction
 from apps.fidelite.services import consommer_coupon
+from apps.livraison.frais import TarifIntrouvable
 from apps.notifications.services import alerter_stock_bas
 from apps.paiements.frais import BaremeIntrouvable, bareme_en_vigueur, calculer_frais_ligne
 from apps.utilisateurs.permissions import EmailVerifie
@@ -74,97 +82,27 @@ class ValiderPanierView(APIView):
             # elle relit alors un panier vide et échoue proprement en 400.
             panier = Panier.objects.select_for_update().get(pk=panier.pk)
 
-            # F-10 : verrouille la ligne du coupon (s'il y en a un) en même
-            # temps que le panier. Sans ce verrou, une double soumission
-            # pourrait faire lire "est_utilise=False" par les deux requêtes
-            # avant qu'aucune ne l'ait encore posé à True — le même coupon
-            # serait alors appliqué deux fois (double dépense, comme pour les
-            # points de fidélité, voir CompteFidelite.debiter_points).
-            coupon_code_saisi = str(request.data.get("coupon_code", "")).strip()
-            coupon = None
-            if coupon_code_saisi:
-                coupon = CouponReduction.objects.select_for_update().filter(
-                    code__iexact=coupon_code_saisi
-                ).first()
-                if coupon is None:
-                    raise ValidationError(
-                        {"coupon_code": f"Le code promo '{coupon_code_saisi}' n'existe pas."}
-                    )
-
-            items = list(panier.items.avec_details())
-
-            if not items:
-                raise ValidationError("Le panier est vide.")
-
-            # Une variante retirée de la vente, un produit désactivé, ou une
-            # boutique suspendue (KYC révoqué, boutique désactivée, vendeur
-            # banni) entre l'ajout au panier et le paiement ne doivent jamais
-            # pouvoir être commandés. Produit.est_achetable est le point
-            # d'entrée unique documenté pour cette règle (voir
-            # Boutique.est_publiable) : PanierItem.est_disponible l'applique
-            # (avec variante.est_active), la même règle que l'API panier (F-13).
-            # Toutes les lignes concernées sont listées, pas seulement la
-            # première, pour que le client les retire en une fois.
-            items_non_achetables = [item for item in items if not item.est_disponible]
-            if items_non_achetables:
-                libelles = ", ".join(
-                    f"{item.variante.produit.nom} ({item.variante.nom})"
-                    for item in items_non_achetables
-                )
-                raise ValidationError(
-                    f"Ces articles ne sont plus disponibles à la vente : {libelles}. "
-                    "Retirez-les du panier pour valider la commande."
-                )
-
-            # 1. Regroupe les articles par boutique
-            items_par_boutique = {}
-            for item in items:
-                boutique = item.variante.produit.boutique
-                items_par_boutique.setdefault(boutique, []).append(item)
-
-            montants_par_boutique = {
-                boutique: sum(
-                    (item.prix_unitaire * item.quantite for item in boutique_items),
-                    Decimal("0.00"),
-                )
-                for boutique, boutique_items in items_par_boutique.items()
-            }
-            montant_total_panier = sum(montants_par_boutique.values(), Decimal("0.00"))
-
-            # F-10 : un coupon s'applique au panier entier, qui peut couvrir
-            # plusieurs boutiques. On calcule ici la remise globale puis on la
-            # répartit au prorata du montant de chaque boutique, plutôt que
-            # de la porter en entier par une seule commande arbitraire.
-            remises_par_boutique = {boutique: Decimal("0.00") for boutique in items_par_boutique}
-            if coupon is not None:
-                valide, message = coupon.est_valide_pour(request.user, montant_total_panier)
-                if not valide:
-                    raise ValidationError({"coupon_code": message})
-
-                montant_remise_total = coupon.calculer_remise(montant_total_panier)
-
-                # Parts en francs entiers (FCFA) : arrondies au franc
-                # inférieur, le dernier lot absorbe le reste pour que la
-                # somme des parts égale exactement la remise du panier.
-                boutiques = list(items_par_boutique.keys())
-                remise_cumulee = Decimal("0")
-                for index, boutique in enumerate(boutiques):
-                    if index == len(boutiques) - 1:
-                        part = montant_remise_total - remise_cumulee
-                    else:
-                        part = (
-                            montant_remise_total * montants_par_boutique[boutique] / montant_total_panier
-                        ).quantize(Decimal("1"), rounding=ROUND_DOWN)
-                        remise_cumulee += part
-                    remises_par_boutique[boutique] = part
+            # F-10 : le coupon (s'il y en a un) est verrouillé en même temps
+            # que le panier : une double soumission ne peut pas l'appliquer
+            # deux fois (voir CompteFidelite.debiter_points).
+            try:
+                coupon = trouver_coupon(request.data.get("coupon_code"), verrouiller=True)
+                # Montants par boutique (remise répartie, frais de livraison
+                # par commande) : même calcul que la simulation.
+                checkout = calculer_checkout(list(panier.items.avec_details()), adresse, request.user, coupon)
+            except CheckoutRefuse as refus:
+                raise ValidationError(refus.detail)
+            except TarifIntrouvable:
+                logger_securite.error("Validation de panier impossible : aucun tarif de livraison en vigueur.")
+                raise ServiceIndisponible()
 
             # 2. Verrouille les lignes de stock concernées pour toute la durée
             # de la transaction : aucune autre commande ne peut décrémenter
             # ces mêmes variantes tant que celle-ci n'est pas terminée.
-            variante_ids = [item.variante_id for item in items]
+            items = [item for lot in checkout.lots for item in lot.items]
             stocks_verrouilles = {
                 s.variante_id: s
-                for s in Stock.objects.select_for_update().filter(variante_id__in=variante_ids)
+                for s in Stock.objects.select_for_update().filter(variante_id__in=[item.variante_id for item in items])
             }
 
             for item in items:
@@ -177,6 +115,7 @@ class ValiderPanierView(APIView):
 
             groupe = GroupeCommande.objects.create(
                 client=request.user,
+                livraison_zone=checkout.zone,
                 livraison_commune=adresse["commune"],
                 livraison_quartier=adresse["quartier"],
                 livraison_point_de_repere=adresse["point_de_repere"],
@@ -184,28 +123,29 @@ class ValiderPanierView(APIView):
             )
             commandes_creees = []
 
-            for boutique, boutique_items in items_par_boutique.items():
-                montant_boutique = montants_par_boutique[boutique]
-                remise_boutique = remises_par_boutique[boutique]
+            for lot in checkout.lots:
                 # Frais vendeur en vigueur (offre de la boutique, sinon
                 # plateforme), figés dans chaque article. Calculés sur le prix
                 # avant remise : le coupon est supporté par ANITCHE.
                 try:
-                    bareme = bareme_en_vigueur(boutique)
+                    bareme = bareme_en_vigueur(lot.boutique)
                 except BaremeIntrouvable:
                     logger_securite.error("Validation de panier impossible : aucun barème de frais en vigueur.")
                     raise ServiceIndisponible()
 
                 commande = Commande.objects.create(
                     groupe=groupe,
-                    boutique=boutique,
+                    boutique=lot.boutique,
                     client=request.user,
-                    montant_total=montant_boutique - remise_boutique,
+                    montant_total=lot.montant_total,
                     coupon_code=coupon.code if coupon is not None else "",
-                    montant_remise=remise_boutique,
+                    montant_remise=lot.remise,
+                    frais_livraison=lot.frais_livraison,
+                    livraison_offerte=lot.livraison_offerte,
+                    frais_livraison_vendeur=lot.frais_livraison_vendeur,
                 )
 
-                for item in boutique_items:
+                for item in lot.items:
                     CommandeItem.objects.create(
                         commande=commande,
                         variante=item.variante,
@@ -240,12 +180,60 @@ class ValiderPanierView(APIView):
 
         logger_securite.info(
             "Commande(s) créée(s) : groupe_id=%s, client_id=%s, nb_commandes=%s, montant_total=%s",
-            groupe.id, request.user.id, len(commandes_creees),
-            sum((c.montant_total for c in commandes_creees), Decimal("0.00")),
+            groupe.id, request.user.id, len(commandes_creees), checkout.total_a_payer,
         )
 
         serializer = CommandeSerializer(commandes_creees, many=True)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class SimulerFraisView(APIView):
+    """Montants du checkout AVANT validation : par commande (une par
+    boutique), articles, remise, frais de livraison (ou livraison offerte)
+    et total, puis les totaux à payer. Aucune écriture, aucune réservation
+    de stock : le montant réel est recalculé (identique) à la validation.
+
+    Limite dédiée : sans elle, la simulation permettrait d'essayer des codes
+    promo sans passer par la limite de la validation.
+    """
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'commande_simulation'
+
+    def post(self, request):
+        entree = SimulerFraisSerializer(data=request.data)
+        entree.is_valid(raise_exception=True)
+        panier = get_or_create_panier(request)
+        try:
+            coupon = trouver_coupon(entree.validated_data.get("coupon_code"))
+            checkout = calculer_checkout(
+                list(panier.items.avec_details()), entree.validated_data["adresse_livraison"], request.user, coupon,
+            )
+        except CheckoutRefuse as refus:
+            raise ValidationError(refus.detail)
+        except TarifIntrouvable:
+            logger_securite.error("Simulation du checkout impossible : aucun tarif de livraison en vigueur.")
+            raise ServiceIndisponible()
+
+        return Response({
+            "zone": checkout.zone,
+            "commandes": [
+                {
+                    "boutique": lot.boutique.pk,
+                    "boutique_nom": lot.boutique.nom,
+                    "montant_articles": int(lot.montant_articles),
+                    "remise": int(lot.remise),
+                    "frais_livraison": int(lot.frais_livraison),
+                    "livraison_offerte": lot.livraison_offerte,
+                    "montant_total": int(lot.montant_total),
+                }
+                for lot in checkout.lots
+            ],
+            "total_articles": int(checkout.total_articles),
+            "total_remise": int(checkout.total_remise),
+            "total_frais_livraison": int(checkout.total_frais_livraison),
+            "total_a_payer": int(checkout.total_a_payer),
+        })
 
 
 class GroupeCommandeListView(generics.ListAPIView):

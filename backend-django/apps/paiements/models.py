@@ -270,9 +270,11 @@ class Reversement(models.Model):
     """Somme due au vendeur pour une commande, versée après livraison
     confirmée et délai de rétractation (REVERSEMENT_DELAI_RETRACTATION_JOURS).
 
-    montant_net = brut − commission − frais fixes − retours ; le montant
-    réellement versé ajoute les ajustements négatifs imputés (retours
-    survenus après un versement précédent).
+    montant_net = brut − commission − frais fixes − retours − livraison
+    offerte ; le montant réellement versé ajoute les ajustements négatifs
+    imputés (retours survenus après un versement précédent, reste d'une
+    livraison offerte, frais de livraison remboursés pour un retour
+    imputable au vendeur).
     """
 
     class Statut(models.TextChoices):
@@ -299,6 +301,10 @@ class Reversement(models.Model):
     # (prix des articles retournés moins leur commission, rendue au vendeur ;
     # le frais fixe reste acquis à ANITCHE).
     montant_retours = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    # Livraison offerte par la boutique : son tarif (Commande.
+    # frais_livraison_vendeur) est déduit ici, plafonné au net ; le reste
+    # devient un AjustementVendeur à la livraison (apps.paiements.reversements).
+    montant_livraison = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     montant_net = models.DecimalField(max_digits=12, decimal_places=2)
     # Ajustements négatifs imputés (≤ 0) et montant effectivement versé.
     montant_ajustements = models.DecimalField(max_digits=12, decimal_places=2, default=0)
@@ -337,7 +343,9 @@ class Reversement(models.Model):
 
     def recalculer_net(self):
         self.montant_net = max(
-            self.montant_brut - self.montant_commission - self.montant_frais_fixes - self.montant_retours, 0,
+            self.montant_brut - self.montant_commission - self.montant_frais_fixes - self.montant_retours
+            - self.montant_livraison,
+            0,
         )
 
     def __str__(self):
@@ -345,13 +353,25 @@ class Reversement(models.Model):
 
 
 class AjustementVendeur(models.Model):
-    """Montant négatif dû par une boutique (retour remboursé après le
-    versement de la commande), déduit du prochain reversement."""
+    """Montant négatif dû par une boutique, déduit du prochain reversement."""
+
+    class Nature(models.TextChoices):
+        # Retour remboursé après le versement de la commande (lié au retour).
+        RETOUR = "retour", "Retour remboursé après versement"
+        # Livraison offerte dont le tarif dépasse le net de la commande.
+        LIVRAISON_OFFERTE = "livraison_offerte", "Livraison offerte (reste non couvert)"
+        # Frais de livraison rendus au client pour un retour imputable au
+        # vendeur (article manquant, défectueux, non conforme).
+        FRAIS_LIVRAISON_RETOUR = "frais_livraison_retour", "Frais de livraison remboursés (retour)"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     boutique = models.ForeignKey("vendeurs.Boutique", on_delete=models.PROTECT, related_name="ajustements")
     montant = models.DecimalField(max_digits=12, decimal_places=2, help_text="Négatif, en FCFA.")
     motif = models.CharField(max_length=255)
+    nature = models.CharField(max_length=30, choices=Nature.choices, default=Nature.RETOUR)
+    commande = models.ForeignKey(
+        "commandes.Commande", on_delete=models.PROTECT, null=True, blank=True, related_name="ajustements_vendeur",
+    )
     retour = models.OneToOneField(
         "retours.DemandeRetour", on_delete=models.PROTECT, null=True, blank=True, related_name="ajustement_vendeur",
     )
@@ -364,6 +384,13 @@ class AjustementVendeur(models.Model):
         ordering = ["date_creation"]
         constraints = [
             models.CheckConstraint(condition=Q(montant__lt=0), name="ajustement_vendeur_negatif"),
+            # Livraison offerte et frais de livraison d'un retour : au plus
+            # un ajustement de chaque nature par commande.
+            models.UniqueConstraint(
+                fields=["commande", "nature"],
+                condition=~Q(nature="retour"),
+                name="ajustement_vendeur_unique_par_commande",
+            ),
         ]
 
     def __str__(self):

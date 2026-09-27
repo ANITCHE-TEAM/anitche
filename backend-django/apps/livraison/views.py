@@ -1,7 +1,9 @@
+import logging
+
 from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -10,7 +12,8 @@ from apps.utilisateurs.models import Role, Utilisateur
 from apps.vendeurs.permissions import ROLES_ADMINISTRATION, EstAdministrateur, EstVendeurValide
 
 from . import services
-from .models import ContestationLivraison, Livraison, LivraisonHistorique
+from .frais import grille_publique
+from .models import ContestationLivraison, Livraison, LivraisonHistorique, TarifLivraison
 from .permissions import EstLivreurOuAdministrateur
 from .serializers import (
     AbandonnerLivraisonSerializer,
@@ -28,7 +31,10 @@ from .serializers import (
     LivreurSerializer,
     NommerLivreurSerializer,
     ResoudreContestationSerializer,
+    TarifLivraisonSerializer,
 )
+
+logger_securite = logging.getLogger("securite")
 
 
 def _base():
@@ -276,3 +282,39 @@ class RetirerLivreurView(APIView):
                             "role": utilisateur.role},
             "livraisons_a_reassigner": LivraisonAReassignerSerializer(a_reassigner, many=True).data,
         }, status=status.HTTP_200_OK)
+
+
+# =====================================================================
+# TARIFS DE LIVRAISON
+# =====================================================================
+
+class TarifLivraisonPublicListView(APIView):
+    """Menu déroulant du checkout : communes (celles du district d'Abidjan et
+    les villes qui ont un tarif propre) avec le tarif appliqué à chacune, et
+    le tarif des autres villes."""
+    permission_classes = [AllowAny]
+    throttle_scope = "catalogue_public"
+
+    def get(self, request):
+        return Response(grille_publique())
+
+
+class TarifLivraisonListCreateView(generics.ListCreateAPIView):
+    permission_classes = [IsAuthenticated, EstAdministrateur]
+    serializer_class = TarifLivraisonSerializer
+    queryset = TarifLivraison.objects.all()
+
+    def perform_create(self, serializer):
+        tarif = serializer.save(modifie_par=self.request.user)
+        logger_securite.info("Tarif de livraison %s créé par admin_id=%s : %s", tarif.pk, self.request.user.id, tarif)
+
+
+class TarifLivraisonDetailView(generics.RetrieveUpdateAPIView):
+    """Modification d'un tarif : les commandes passées gardent le leur."""
+    permission_classes = [IsAuthenticated, EstAdministrateur]
+    serializer_class = TarifLivraisonSerializer
+    queryset = TarifLivraison.objects.all()
+
+    def perform_update(self, serializer):
+        tarif = serializer.save(modifie_par=self.request.user)
+        logger_securite.info("Tarif de livraison %s modifié par admin_id=%s : %s", tarif.pk, self.request.user.id, tarif)

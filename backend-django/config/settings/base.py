@@ -164,6 +164,11 @@ REST_FRAMEWORK = {
         'kyc': '5/hour',
         'boutique_creation': '10/hour',
         'commande_validation': '20/hour',
+        # Simulation du checkout (frais de livraison, total à payer) : le
+        # client la relance à chaque changement d'adresse ou de coupon. Elle
+        # accepte un code promo : limite dédiée, sinon elle servirait à
+        # essayer des codes hors de la limite de la validation.
+        'commande_simulation': '120/hour',
         # Fidélité (A04:2025 / A07:2025) : sans limite dédiée, ces deux
         # endpoints ne dépendaient que du taux générique 'user' (300/heure).
         # coupon_verification borne le bourrinage de codes au hasard sur

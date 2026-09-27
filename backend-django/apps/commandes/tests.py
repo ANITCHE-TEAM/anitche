@@ -20,6 +20,11 @@ ADRESSE_LIVRAISON = {
     "telephone": "0700000001",
 }
 
+# Tarif d'une commune du district d'Abidjan (Cocody) créé par migration
+# (livraison 0004 / 0005) : ajouté au montant de chaque commande (une
+# commande = un colis = des frais).
+FRAIS_ABIDJAN = Decimal("1500")
+
 class ValiderPanierTestCase(APITestCase):
 
     def setUp(self):
@@ -75,7 +80,7 @@ class ValiderPanierTestCase(APITestCase):
         response = self.client.post(self.url, {"adresse_livraison": ADRESSE_LIVRAISON}, format="json")
 
         commande = Commande.objects.get(boutique=self.boutique1)
-        self.assertEqual(commande.montant_total, Decimal("3000.00"))
+        self.assertEqual(commande.montant_total, Decimal("3000.00") + FRAIS_ABIDJAN)
 
     def test_commande_item_snapshot_correct(self):
         self._ajouter_au_panier(self.variante1, 2)
@@ -289,7 +294,8 @@ class ValiderPanierCouponTestCase(APITestCase):
         commande = Commande.objects.get(boutique=self.boutique1)
         self.assertEqual(commande.coupon_code, "FID-TESTCODE")
         self.assertEqual(commande.montant_remise, Decimal("200.00"))  # 10% de 2000
-        self.assertEqual(commande.montant_total, Decimal("1800.00"))
+        # La remise ne porte que sur les articles, jamais sur les frais de livraison.
+        self.assertEqual(commande.montant_total, Decimal("1800.00") + FRAIS_ABIDJAN)
 
         coupon.refresh_from_db()
         self.assertTrue(coupon.est_utilise)
@@ -390,7 +396,8 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.catalogue.models import Stock
-from apps.livraison.models import Livraison
+from apps.livraison.models import Livraison, TarifLivraison
+from apps.livraison.tests import recreer_tarifs_initiaux
 from apps.notifications.models import Notification
 from apps.paiements.models import BaremeFrais, Paiement
 from apps.paiements.services import valider_paiement
@@ -500,8 +507,8 @@ class MontantsTests(DonneesCycleDeVie, APITestCase):
         r = self.commander((self.variante1, 2), (self.variante2, 1), montant_total="1", prix_unitaire="1")
         self.assertEqual(r.status_code, 201)
         commandes = {c.boutique_id: c for c in Commande.objects.all()}
-        self.assertEqual(commandes[self.boutique1.pk].montant_total, Decimal("2010"))
-        self.assertEqual(commandes[self.boutique2.pk].montant_total, Decimal("1500"))
+        self.assertEqual(commandes[self.boutique1.pk].montant_total, Decimal("2010") + FRAIS_ABIDJAN)
+        self.assertEqual(commandes[self.boutique2.pk].montant_total, Decimal("1500") + FRAIS_ABIDJAN)
         VarianteProduit.objects.filter(pk=self.variante2.pk).update(prix=Decimal("9000"), prix_promo=None)
         self.assertEqual(CommandeItem.objects.get(variante=self.variante2).prix_unitaire, Decimal("1500"))
 
@@ -510,7 +517,7 @@ class MontantsTests(DonneesCycleDeVie, APITestCase):
         CouponReduction.objects.create(code="DIX", type_reduction="pourcentage", valeur=Decimal("10"))
         self.assertEqual(self.commander((self.variante1, 1), coupon_code="DIX").status_code, 201)
         commande = Commande.objects.get()
-        self.assertEqual((commande.montant_remise, commande.montant_total), (Decimal("100"), Decimal("905")))
+        self.assertEqual((commande.montant_remise, commande.montant_total), (Decimal("100"), Decimal("905") + FRAIS_ABIDJAN))
 
     def test_remise_repartie_en_francs_entiers_entre_boutiques(self):
         CouponReduction.objects.create(code="SEPT", type_reduction="pourcentage", valeur=Decimal("7"))
@@ -548,7 +555,8 @@ class AnnulationClientTests(DonneesCycleDeVie, APITestCase):
         paiement.refresh_from_db()
         self.assertEqual(paiement.statut, Paiement.Statut.VALIDE)  # encaissé ; le remboursement est à part
         remboursement = paiement.remboursements.get()
-        self.assertEqual((remboursement.montant, remboursement.statut), (Decimal("3015"), "a_traiter"))
+        # Annulation : le client récupère tout ce qu'il a payé, frais de livraison compris.
+        self.assertEqual((remboursement.montant, remboursement.statut), (Decimal("3015") + FRAIS_ABIDJAN, "a_traiter"))
         self.assertTrue(Notification.objects.filter(destinataire=self.admin, titre="Remboursement à traiter").exists())
 
     def test_plus_annulable_par_le_client_une_fois_en_preparation(self):
@@ -733,7 +741,7 @@ class BoutiqueIndisponibleAuPaiementTests(DonneesCycleDeVie, APITestCase):
         self.assertEqual(self.client.post("/api/paiements/initier/", corps, format="json").status_code, 400)
         r = self.client.post("/api/paiements/initier/", corps, format="json")
         self.assertEqual(r.status_code, 201)
-        self.assertEqual(Decimal(r.data["montant"]), Decimal("1500"))
+        self.assertEqual(Decimal(r.data["montant"]), Decimal("1500") + FRAIS_ABIDJAN)
 
 
 class AnnulationAdministrationTests(DonneesCycleDeVie, APITestCase):
@@ -798,6 +806,8 @@ class ConcurrenceCommandesTests(DonneesCycleDeVie, TransactionTestCase):
         # Un TransactionTestCase précédent vide la base, y compris le barème
         # de frais par défaut créé par migration.
         BaremeFrais.objects.get_or_create(boutique=None, defaults={"taux_commission": 12, "frais_fixe_article": 200})
+        # Idem pour les tarifs de livraison (défauts et communes du district).
+        recreer_tarifs_initiaux()
         self.creer_donnees()
 
     def en_parallele(self, action, fois=2):
@@ -839,3 +849,191 @@ class ConcurrenceCommandesTests(DonneesCycleDeVie, TransactionTestCase):
         codes = self.en_parallele(self.appel(f"/api/commandes/{commande.pk}/annuler/"))
         self.assertEqual(codes, [200, 409])
         self.assertEqual(self.stock(self.variante1), 10)
+
+
+# =====================================================================
+# FRAIS DE LIVRAISON (docs/MODULE_LIVRAISON.md, « Frais de livraison »)
+# =====================================================================
+
+URL_SIMULER = "/api/commandes/simuler-frais/"
+
+
+class FraisDeLivraisonCheckoutTests(DonneesCycleDeVie, APITestCase):
+    """Tarifs de la migration : communes du district d'Abidjan et défaut
+    d'Abidjan 1 500, hors Abidjan 3 000. Port-Bouët passe à 1 000 ici."""
+
+    def setUp(self):
+        self.creer_donnees()
+        TarifLivraison.objects.filter(commune="Port-Bouët").update(montant=1000)
+
+    def adresse(self, **champs):
+        return {**ADRESSE_LIVRAISON, **champs}
+
+    def par_boutique(self):
+        return {c.boutique_id: c for c in Commande.objects.all()}
+
+    def commande_pour(self, **adresse):
+        PanierItem.objects.all().delete()
+        Commande.objects.all().delete()
+        r = self.commander((self.variante1, 1), adresse_livraison=self.adresse(**adresse))
+        self.assertEqual(r.status_code, 201, r.data)
+        return Commande.objects.select_related("groupe").get()
+
+    def test_une_commande_par_boutique_et_des_frais_par_commande(self):
+        r = self.commander((self.variante1, 2), (self.variante2, 1))
+        self.assertEqual(r.status_code, 201, r.data)
+        commandes = self.par_boutique()
+        self.assertEqual(commandes[self.boutique1.pk].montant_total, Decimal("2010") + FRAIS_ABIDJAN)
+        self.assertEqual(commandes[self.boutique2.pk].montant_total, Decimal("1500") + FRAIS_ABIDJAN)
+        for commande in commandes.values():
+            self.assertEqual((commande.frais_livraison, commande.livraison_offerte, commande.frais_livraison_vendeur),
+                             (FRAIS_ABIDJAN, False, Decimal("0")))
+            self.assertEqual(commande.montant_hors_livraison, commande.montant_total - FRAIS_ABIDJAN)
+        self.assertEqual(GroupeCommande.objects.get().livraison_zone, "abidjan")
+        # Réponse client : frais visibles, part du vendeur jamais exposée.
+        self.assertEqual(r.data[0]["frais_livraison"], "1500.00")
+        self.assertNotIn("frais_livraison_vendeur", r.data[0])
+
+    def test_commune_d_abidjan_ecrite_de_plusieurs_facons(self):
+        for commune in ("Port-Bouët", "  port bouet ", "PORT-BOUET", "Port Bouët", "port-bouët"):
+            with self.subTest(commune):
+                commande = self.commande_pour(commune=commune)
+                self.assertEqual((commande.groupe.livraison_zone, commande.frais_livraison),
+                                 ("abidjan", Decimal("1000")))
+        for commune in ("Attécoubé", "attecoube", "YOPOUGON", "Songon"):
+            with self.subTest(commune):
+                self.assertEqual(self.commande_pour(commune=commune).groupe.livraison_zone, "abidjan")
+
+    def test_ville_hors_abidjan_declaree_en_zone_abidjan(self):
+        # La zone envoyée par le client est ignorée : Bouaké paie le tarif
+        # hors Abidjan, jamais celui d'Abidjan.
+        commande = self.commande_pour(zone="abidjan", commune="Bouaké")
+        self.assertEqual((commande.groupe.livraison_zone, commande.frais_livraison), ("hors_abidjan", Decimal("3000")))
+        # Et une commune du district déclarée « hors Abidjan » reste à Abidjan.
+        commande = self.commande_pour(zone="hors_abidjan", commune="Cocody")
+        self.assertEqual((commande.groupe.livraison_zone, commande.frais_livraison), ("abidjan", FRAIS_ABIDJAN))
+
+    def test_ville_hors_abidjan_avec_tarif_propre(self):
+        TarifLivraison.objects.create(zone="hors_abidjan", commune="Bouaké", montant=2500)
+        commande = self.commande_pour(commune="bouake")
+        self.assertEqual((commande.groupe.livraison_zone, commande.frais_livraison), ("hors_abidjan", Decimal("2500")))
+
+    def test_tarif_de_commune_inactif_retombe_sur_le_defaut_de_sa_zone(self):
+        TarifLivraison.objects.filter(commune="Port-Bouët").update(est_actif=False)
+        TarifLivraison.objects.filter(zone="abidjan", commune="").update(montant=1200)
+        # Toujours une commune du district : défaut d'Abidjan, pas hors Abidjan.
+        commande = self.commande_pour(commune="Port-Bouët")
+        self.assertEqual((commande.groupe.livraison_zone, commande.frais_livraison), ("abidjan", Decimal("1200")))
+
+    def test_montants_envoyes_par_le_client_ignores(self):
+        r = self.commander((self.variante1, 1), frais_livraison="0", livraison_offerte=True, montant_total="1")
+        self.assertEqual(r.status_code, 201)
+        commande = Commande.objects.get()
+        self.assertEqual((commande.frais_livraison, commande.livraison_offerte, commande.montant_total),
+                         (FRAIS_ABIDJAN, False, Decimal("1005") + FRAIS_ABIDJAN))
+
+    def test_sans_tarif_503_et_rien_n_est_cree(self):
+        TarifLivraison.objects.all().delete()
+        r = self.commander((self.variante1, 2))
+        self.assertEqual(r.status_code, 503)
+        self.assertFalse(Commande.objects.exists())
+        self.assertEqual(self.stock(self.variante1), 10)
+        self.assertEqual(PanierItem.objects.count(), 1)
+
+    def test_livraison_offerte_par_la_boutique(self):
+        Boutique.objects.filter(pk=self.boutique1.pk).update(livraison_offerte=True)
+        self.commander((self.variante1, 1), (self.variante2, 1))
+        commandes = self.par_boutique()
+        offerte = commandes[self.boutique1.pk]
+        self.assertEqual((offerte.frais_livraison, offerte.livraison_offerte, offerte.frais_livraison_vendeur,
+                          offerte.montant_total), (Decimal("0"), True, FRAIS_ABIDJAN, Decimal("1005")))
+        payante = commandes[self.boutique2.pk]
+        self.assertEqual((payante.frais_livraison, payante.livraison_offerte), (FRAIS_ABIDJAN, False))
+        # Le client voit « livraison offerte », jamais ce qu'elle coûte au vendeur.
+        self.en_tant_que(self.client_user)
+        detail = self.client.get(f"/api/commandes/{offerte.pk}/").data
+        self.assertEqual((detail["frais_livraison"], detail["livraison_offerte"]), ("0.00", True))
+        self.assertNotIn("frais_livraison_vendeur", detail)
+        # Le vendeur, lui, voit ce qui sera déduit de son reversement.
+        self.en_tant_que(self.vendeur1)
+        detail = self.client.get(f"/api/commandes/vendeur/{offerte.pk}/").data
+        self.assertEqual(detail["frais_livraison_vendeur"], "1500.00")
+
+    def test_frais_figes_dans_la_commande(self):
+        self.commander((self.variante1, 1))
+        TarifLivraison.objects.filter(zone="abidjan").update(montant=9000)
+        Boutique.objects.filter(pk=self.boutique1.pk).update(livraison_offerte=True)
+        commande = Commande.objects.get()
+        self.assertEqual((commande.frais_livraison, commande.livraison_offerte, commande.montant_total),
+                         (FRAIS_ABIDJAN, False, Decimal("1005") + FRAIS_ABIDJAN))
+
+    def test_le_coupon_ne_reduit_jamais_les_frais(self):
+        CouponReduction.objects.create(code="TOUT", type_reduction="montant_fixe", valeur=Decimal("50000"))
+        self.commander((self.variante1, 1), coupon_code="TOUT")
+        commande = Commande.objects.get()
+        # Remise plafonnée aux articles : les frais restent dus.
+        self.assertEqual((commande.montant_remise, commande.montant_total), (Decimal("1005"), FRAIS_ABIDJAN))
+
+
+class SimulationDuCheckoutTests(DonneesCycleDeVie, APITestCase):
+    def setUp(self):
+        self.creer_donnees()
+        panier, _ = Panier.objects.get_or_create(utilisateur=self.client_user)
+        PanierItem.objects.create(panier=panier, variante=self.variante1, quantite=2)
+        PanierItem.objects.create(panier=panier, variante=self.variante2, quantite=1)
+        self.en_tant_que(self.client_user)
+
+    def simuler(self, **corps):
+        return self.client.post(URL_SIMULER, {"adresse_livraison": ADRESSE_LIVRAISON, **corps}, format="json")
+
+    def test_memes_montants_que_la_validation(self):
+        CouponReduction.objects.create(code="SEPT", type_reduction="pourcentage", valeur=Decimal("7"))
+        Boutique.objects.filter(pk=self.boutique2.pk).update(livraison_offerte=True)
+        simulation = self.simuler(coupon_code="SEPT")
+        self.assertEqual(simulation.status_code, 200, simulation.data)
+        self.assertEqual(simulation.data["zone"], "abidjan")
+        # 7 % de 3510 = 245.70 → 245 ; frais : boutique 1 seulement.
+        self.assertEqual((simulation.data["total_articles"], simulation.data["total_remise"],
+                          simulation.data["total_frais_livraison"], simulation.data["total_a_payer"]),
+                         (3510, 245, 1500, 3510 - 245 + 1500))
+
+        r = self.client.post(URL_VALIDER, {"adresse_livraison": ADRESSE_LIVRAISON, "coupon_code": "SEPT"},
+                             format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        commandes = {c.boutique_id: c for c in Commande.objects.all()}
+        for ligne in simulation.data["commandes"]:
+            commande = commandes[ligne["boutique"]]
+            self.assertEqual(
+                (ligne["remise"], ligne["frais_livraison"], ligne["livraison_offerte"], ligne["montant_total"]),
+                (int(commande.montant_remise), int(commande.frais_livraison), commande.livraison_offerte,
+                 int(commande.montant_total)),
+            )
+        self.assertEqual(simulation.data["total_a_payer"], int(sum(c.montant_total for c in commandes.values())))
+
+    def test_aucune_ecriture(self):
+        coupon = CouponReduction.objects.create(code="DIX", type_reduction="pourcentage", valeur=Decimal("10"))
+        self.assertEqual(self.simuler(coupon_code="DIX").status_code, 200)
+        coupon.refresh_from_db()
+        self.assertFalse(coupon.est_utilise)
+        self.assertFalse(Commande.objects.exists())
+        self.assertEqual((self.stock(self.variante1), PanierItem.objects.count()), (10, 2))
+
+    def test_part_du_vendeur_jamais_exposee(self):
+        Boutique.objects.filter(pk=self.boutique1.pk).update(livraison_offerte=True)
+        self.assertNotIn("frais_livraison_vendeur", str(self.simuler().data))
+
+    def test_refus(self):
+        self.assertEqual(self.simuler(coupon_code="INCONNU").status_code, 400)
+        self.assertEqual(self.client.post(URL_SIMULER, {}, format="json").status_code, 400)
+        TarifLivraison.objects.all().delete()
+        self.assertEqual(self.simuler().status_code, 503)
+        PanierItem.objects.all().delete()
+        recreer_tarifs_initiaux()
+        self.assertEqual(self.simuler().status_code, 400)  # panier vide
+        self.client.force_authenticate(None)
+        self.assertEqual(self.simuler().status_code, 401)
+
+    def test_limite_dediee(self):
+        from .views import SimulerFraisView
+
+        self.assertEqual(SimulerFraisView.throttle_scope, "commande_simulation")

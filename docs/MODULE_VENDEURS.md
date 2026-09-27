@@ -41,7 +41,7 @@ Point d'entrée unique des transitions : `apps/vendeurs/services.py`. L'API et l
 
 `Boutique` — une par compte (`OneToOneField` vers `AUTH_USER_MODEL`, `related_name='boutique'`).
 
-- Champs : `nom` (unique), `nom_normalise` (unique, calculé), `slug` (auto, unique), `description`, `logo`, `banniere`, `telephone_contact`, `email_contact`, `adresse`, `ville`, `est_active`, `est_suspendue`, dates.
+- Champs : `nom` (unique), `nom_normalise` (unique, calculé), `slug` (auto, unique), `description`, `logo`, `banniere`, `telephone_contact`, `email_contact`, `adresse`, `ville`, `est_active`, `est_suspendue`, `livraison_offerte`, dates.
 - `est_active` : fermeture volontaire, décidée par le vendeur (modifiable via `ma-boutique/`).
 - `est_suspendue` : suspension décidée par l'administration. Le vendeur la voit mais ne peut pas la lever, et sa boutique est **gelée** tant qu'elle dure (voir § 4).
 - `nom_normalise` : forme de comparaison du nom (casse, accents, espaces et ponctuation ignorés : « Chez Awa », « chez-awa », « CHÉZ AWA ! » → `chezawa`). Recalculée à chaque `save()`, jamais saisie. Sert à refuser les noms quasi identiques (usurpation d'une boutique existante). Règles, communes à l'API et au django-admin (`verifier_nom_boutique_disponible`) :
@@ -66,7 +66,7 @@ Point d'entrée unique des transitions : `apps/vendeurs/services.py`. L'API et l
 |---|---|---|
 | POST | `ma-boutique/` | Crée la boutique (une seule par compte → 400 sinon) |
 | GET | `ma-boutique/` | Sa boutique (404 si aucune) |
-| PATCH / PUT | `ma-boutique/` | Mise à jour, y compris fermeture / réouverture (`est_active`). `proprietaire`, `slug` et `est_suspendue` non modifiables (ignorés). **403** si la boutique est suspendue |
+| PATCH / PUT | `ma-boutique/` | Mise à jour, y compris fermeture / réouverture (`est_active`) et **livraison offerte** (`livraison_offerte` : le client ne paie pas la livraison, son tarif est déduit du reversement du vendeur, [`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md) § 9 ; figée dans chaque commande au checkout, affichée dans la fiche publique). `proprietaire`, `slug` et `est_suspendue` non modifiables (ignorés). **403** si la boutique est suspendue |
 
 - Un compte dont le KYC n'est pas (ou plus) validé reçoit **403** sur toutes ces routes, lecture comprise (`EstVendeurValide`) — y compris s'il possède déjà une boutique.
 - **Boutique suspendue = gelée côté vendeur** (`BoutiqueNonSuspendue`) : `GET` reste possible (le vendeur voit `est_suspendue: true`), toute écriture renvoie **403** avec un message explicite — contenu comme fermeture/réouverture (`est_active`). L'écriture redevient possible dès la levée de la suspension.

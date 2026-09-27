@@ -427,8 +427,10 @@ def traiter_paiements_apres_annulation(commande):
 
 
 def rembourser_retour(demande_retour):
-    """Retour remboursé : remboursement à traiter pour le client, et part du
-    vendeur réduite (avant versement) ou ajustement négatif (après)."""
+    """Retour remboursé : remboursement à traiter pour le client (articles,
+    et frais de livraison si le motif est imputable au vendeur), part du
+    vendeur réduite (avant versement) ou ajustement négatif (après), et
+    frais de livraison remboursés facturés au vendeur (ajustement)."""
     commande = demande_retour.commande
     paiement = paiement_valide_de(commande)
     if paiement is None:
@@ -443,4 +445,5 @@ def rembourser_retour(demande_retour):
     # vendeur (montant_retours n'est pas idempotent à lui seul).
     if cree:
         reversements.appliquer_retour_rembourse(demande_retour)
+        reversements.facturer_frais_livraison_retour(demande_retour)
     return remboursement

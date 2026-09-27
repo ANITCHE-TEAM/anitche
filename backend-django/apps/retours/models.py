@@ -70,6 +70,11 @@ class DemandeRetour(models.Model):
         blank=True,
         help_text="Montant total à rembourser calculé sur la base des articles retournés",
     )
+    # Part des frais de livraison comprise dans montant_remboursement : la
+    # totalité des frais payés, une fois par commande, pour un motif
+    # imputable au vendeur (apps.retours.services.MOTIFS_FRAIS_REMBOURSES).
+    # Supportée par le vendeur (AjustementVendeur au remboursement).
+    frais_livraison_rembourses = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
     reponse_vendeur = models.TextField(blank=True, help_text="Commentaire ou motif de décision fourni par le vendeur/staff")
 

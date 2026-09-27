@@ -33,6 +33,14 @@ logger_securite = logging.getLogger("securite")
 
 Statut = DemandeRetour.Statut
 
+#: Motifs imputables au vendeur : les frais de livraison sont rendus au
+#: client et supportés par le vendeur (AjustementVendeur).
+MOTIFS_FRAIS_REMBOURSES = (
+    DemandeRetour.Motif.ARTICLE_MANQUANT,
+    DemandeRetour.Motif.PRODUIT_DEFECTUEUX,
+    DemandeRetour.Motif.NON_CONFORME,
+)
+
 #: Photos justificatives par demande, et statuts où le client peut en ajouter.
 PHOTOS_MAX = 5
 STATUTS_PHOTOS_OUVERTS = (Statut.DEMANDE, Statut.APPROUVE, Statut.EN_TRANSIT)
@@ -107,16 +115,37 @@ def verifier_eligibilite(commande, maintenant=None):
 def montant_a_rembourser(commande, lignes):
     """Ce que le client a réellement payé pour les articles retournés : leur
     prix, moins leur part de la remise du coupon (au prorata du montant de
-    la commande), arrondi au franc inférieur.
+    la commande hors frais de livraison), arrondi au franc inférieur.
 
     `lignes` : [(CommandeItem, quantité retournée)]. La somme des
-    remboursements partiels d'une commande ne dépasse jamais son montant payé.
+    remboursements partiels d'une commande ne dépasse jamais ce qu'elle a
+    payé pour ses articles. Les frais de livraison sont traités à part
+    (frais_livraison_a_rembourser).
     """
     brut_commande = sum((a.prix_unitaire * a.quantite for a in commande.article.all()), Decimal("0"))
     brut_retour = sum((article.prix_unitaire * quantite for article, quantite in lignes), Decimal("0"))
     if brut_commande <= 0:
         return Decimal("0")
-    return (brut_retour * commande.montant_total / brut_commande).quantize(Decimal("1"), rounding=ROUND_DOWN)
+    return (brut_retour * commande.montant_hors_livraison / brut_commande).quantize(
+        Decimal("1"), rounding=ROUND_DOWN,
+    )
+
+
+def frais_livraison_a_rembourser(commande, motif):
+    """Frais de livraison payés par le client, rendus en entier pour un motif
+    imputable au vendeur (jamais pour un changement d'avis, une mauvaise
+    taille ou un autre motif), une seule fois par commande : pas si une
+    autre demande en cours ou aboutie les couvre déjà.
+
+    À appeler sous le verrou de la commande (verrouiller_commande_du_client) :
+    deux demandes simultanées ne les incluent pas toutes les deux.
+    """
+    if motif not in MOTIFS_FRAIS_REMBOURSES or commande.frais_livraison <= 0:
+        return Decimal("0")
+    deja_couverts = DemandeRetour.objects.filter(
+        commande=commande, frais_livraison_rembourses__gt=0,
+    ).exclude(statut__in=(Statut.REJETE, Statut.ANNULE)).exists()
+    return Decimal("0") if deja_couverts else commande.frais_livraison
 
 
 # =====================================================================
@@ -142,6 +171,7 @@ def creer_demande(client, donnees):
         type_resolution=donnees["type_resolution"],
         description=donnees["description"],
         montant_remboursement=donnees["_montant_remboursement"],
+        frais_livraison_rembourses=donnees["_frais_livraison_rembourses"],
         statut=Statut.DEMANDE,
     )
     RetourItem.objects.bulk_create([

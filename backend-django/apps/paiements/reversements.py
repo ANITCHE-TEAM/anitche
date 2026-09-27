@@ -10,6 +10,10 @@ livraison confirmée et délai de rétractation, frais déduits.
     en_cours             → disponible        transfert échoué
     tout sauf verse      → annule            commande annulée
 
+Frais de livraison : jamais dans le reversement (ils reviennent à ANITCHE).
+Livraison offerte par la boutique : son tarif est déduit du net, plafonné
+au net ; le reste devient un ajustement négatif une fois la commande livrée.
+
 Canal : mobile money uniquement, sur le numéro du dossier KYC du vendeur.
 """
 
@@ -54,11 +58,14 @@ class ErreurVersement(Exception):
 
 def creer_reversement(commande):
     """À la confirmation de la commande (paiement validé) : montants repris
-    des frais figés dans chaque article au checkout."""
+    des frais figés dans chaque article au checkout, et de la livraison
+    offerte figée dans la commande (plafonnée au net)."""
     totaux = commande.article.aggregate(
         commission=Sum("montant_commission"), frais=Sum("montant_frais_fixes"),
     )
     brut = sum((article.prix_unitaire * article.quantite for article in commande.article.all()), Decimal("0"))
+    net_articles = brut - (totaux["commission"] or 0) - (totaux["frais"] or 0)
+    livraison = min(commande.frais_livraison_vendeur, net_articles)
     reversement, _ = Reversement.objects.get_or_create(
         commande=commande,
         defaults={
@@ -66,10 +73,29 @@ def creer_reversement(commande):
             "montant_brut": brut,
             "montant_commission": totaux["commission"] or 0,
             "montant_frais_fixes": totaux["frais"] or 0,
-            "montant_net": brut - (totaux["commission"] or 0) - (totaux["frais"] or 0),
+            "montant_livraison": livraison,
+            "montant_net": net_articles - livraison,
         },
     )
     return reversement
+
+
+def _reste_livraison_offerte(reversement):
+    """Commande livrée avec livraison offerte dont le tarif dépasse le net :
+    le reste est dû par le vendeur, déduit de ses prochains reversements."""
+    commande = reversement.commande
+    reste = commande.frais_livraison_vendeur - reversement.montant_livraison
+    if reste <= 0:
+        return
+    AjustementVendeur.objects.get_or_create(
+        commande=commande,
+        nature=AjustementVendeur.Nature.LIVRAISON_OFFERTE,
+        defaults={
+            "boutique_id": reversement.boutique_id,
+            "montant": -reste,
+            "motif": f"Livraison offerte de la commande {commande.numero_commande} : reste non couvert par la vente",
+        },
+    )
 
 
 def _verrouiller(commande):
@@ -87,6 +113,9 @@ def ouvrir_retractation(commande, moment=None):
         reversement.date_disponibilite = moment + timedelta(days=settings.REVERSEMENT_DELAI_RETRACTATION_JOURS)
         reversement.statut = Statut.SUSPENDU if retour_ouvert(commande) else Statut.EN_RETRACTATION
         reversement.save(update_fields=["date_livraison", "date_disponibilite", "statut", "date_mise_a_jour"])
+        # Après la livraison seulement : une commande annulée avant ne coûte
+        # rien au vendeur (le reversement est annulé, rien n'est dû).
+        _reste_livraison_offerte(reversement)
 
 
 def annuler_reversement(commande):
@@ -96,6 +125,18 @@ def annuler_reversement(commande):
             return
         reversement.statut = Statut.ANNULE
         reversement.save(update_fields=["statut", "date_mise_a_jour"])
+        # Contestation « non reçu » fondée : la livraison offerte n'est plus
+        # due par le vendeur, tant que son reste n'a pas déjà été déduit.
+        supprimes, _ = AjustementVendeur.objects.filter(
+            commande=commande, nature=AjustementVendeur.Nature.LIVRAISON_OFFERTE, reversement_impute__isnull=True,
+        ).delete()
+        if not supprimes and AjustementVendeur.objects.filter(
+            commande=commande, nature=AjustementVendeur.Nature.LIVRAISON_OFFERTE,
+        ).exists():
+            logger_securite.warning(
+                "Reversement %s annulé : reste de livraison offerte déjà déduit d'un versement (à régulariser).",
+                reversement.reference,
+            )
 
 
 def rendre_disponibles(maintenant=None):
@@ -158,6 +199,27 @@ def part_vendeur_retournee(demande_retour):
         )
         total += article.prix_unitaire * ligne.quantite - commission
     return total
+
+
+def facturer_frais_livraison_retour(demande_retour):
+    """Frais de livraison rendus au client pour un retour imputable au
+    vendeur (article manquant, défectueux, non conforme) : supportés par le
+    vendeur, par un ajustement négatif (une fois par commande)."""
+    frais = demande_retour.frais_livraison_rembourses
+    if frais <= 0:
+        return None
+    commande = demande_retour.commande
+    ajustement, _ = AjustementVendeur.objects.get_or_create(
+        commande=commande,
+        nature=AjustementVendeur.Nature.FRAIS_LIVRAISON_RETOUR,
+        defaults={
+            "boutique_id": commande.boutique_id,
+            "montant": -frais,
+            "motif": f"Frais de livraison remboursés au client : retour {demande_retour.numero_retour} "
+                     f"({demande_retour.get_motif_display()}, commande {commande.numero_commande})",
+        },
+    )
+    return ajustement
 
 
 def appliquer_retour_rembourse(demande_retour):

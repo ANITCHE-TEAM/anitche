@@ -1,3 +1,4 @@
+import importlib
 import threading
 import time
 from datetime import timedelta
@@ -23,9 +24,25 @@ from apps.utilisateurs.models import Role, StatutKYC, Utilisateur
 from apps.vendeurs.models import Boutique
 
 from . import services
-from .models import ContestationLivraison, Livraison, LivraisonHistorique
+from .frais import TarifIntrouvable, frais_de_la_commande, tarif_applicable
+from .models import ContestationLivraison, Livraison, LivraisonHistorique, TarifLivraison, normaliser_commune
 
 Statut = Livraison.Status
+
+
+def recreer_tarifs_initiaux():
+    """Tarifs créés par migration (défauts de zone, communes du district
+    d'Abidjan), effacés par le vidage de base d'un TransactionTestCase."""
+    tarifs = importlib.import_module("apps.livraison.migrations.0004_tarifs_de_livraison").TARIFS_INITIAUX
+    communes = importlib.import_module(
+        "apps.livraison.migrations.0005_communes_du_district_d_abidjan").COMMUNES_DISTRICT_ABIDJAN
+    for zone, montant in tarifs.items():
+        TarifLivraison.objects.get_or_create(zone=zone, commune_normalisee="", defaults={"montant": montant})
+    for commune in communes:
+        TarifLivraison.objects.get_or_create(
+            commune_normalisee=normaliser_commune(commune),
+            defaults={"zone": "abidjan", "commune": commune, "montant": tarifs["abidjan"]},
+        )
 
 
 class DonneesLivraison:
@@ -46,7 +63,7 @@ class DonneesLivraison:
         self.autre_boutique = Boutique.objects.create(proprietaire=self.autre_vendeur, nom="Autre", est_active=True)
 
         self.groupe = GroupeCommande.objects.create(
-            client=self.client_user, livraison_commune="Cocody", livraison_quartier="Angré",
+            client=self.client_user, livraison_zone="abidjan", livraison_commune="Cocody", livraison_quartier="Angré",
             livraison_point_de_repere="Face pharmacie", livraison_telephone="0700000000",
         )
         # En préparation : la livraison peut être expédiée (l'expédition et
@@ -712,7 +729,7 @@ class IsolationEtSuiviTests(DonneesLivraison, APITestCase):
         donnees = self.detail(self.client_user).data
         self.assertEqual(donnees["livreur"], {"prenom": "User", "telephone": None})
         self.assertEqual(donnees["date_livraison_estimee"], demain.isoformat())
-        self.assertEqual(donnees["adresse"], {"commune": "Cocody", "quartier": "Angré",
+        self.assertEqual(donnees["adresse"], {"zone": "abidjan", "commune": "Cocody", "quartier": "Angré",
                                               "point_de_repere": "Face pharmacie", "telephone": "0700000000"})
         self.mettre_en_cours()
         self.assertEqual(self.detail(self.client_user).data["livreur"]["telephone"], "0102030405")
@@ -847,3 +864,148 @@ class ConcurrenceTests(DonneesLivraison, TransactionTestCase):
             self.assertEqual(self.commande.status, "expediee")
             self.assertEqual(self.reversement().statut, Reversement.Statut.EN_ATTENTE_LIVRAISON)
         self.assertEqual(self.livraison.historique.count(), 1)
+
+
+# =====================================================================
+# TARIFS DE LIVRAISON
+# =====================================================================
+
+class TarifsDeLivraisonTests(APITestCase):
+    """Tarifs de la migration : Abidjan 1 500 et hors Abidjan 3 000 par défaut."""
+
+    URL_PUBLIQUE = "/api/livraison/tarifs/"
+    URL_ADMIN = "/api/livraison/admin/tarifs/"
+
+    def setUp(self):
+        creer = Utilisateur.objects.create_user
+        self.admin = creer(email="admin@tarif.ci", password="x", nom="A", prenom="D", role=Role.ADMIN)
+        self.client_user = creer(email="client@tarif.ci", password="x", nom="C", prenom="L", email_verifie=True)
+        self.vendeur = creer(email="vendeur@tarif.ci", password="x", nom="V", prenom="E", role=Role.VENDEUR,
+                             statut_kyc=StatutKYC.VALIDE)
+        self.livreur = creer(email="livreur@tarif.ci", password="x", nom="L", prenom="I", role=Role.LIVREUR)
+        self.defaut_abidjan = TarifLivraison.objects.get(zone="abidjan", commune="")
+
+    def api(self, utilisateur=None):
+        api = APIClient()
+        if utilisateur is not None:
+            api.force_authenticate(utilisateur)
+        return api
+
+    def test_normalisation_des_communes(self):
+        self.assertEqual(normaliser_commune("Port-Bouët"), normaliser_commune("  port bouet "))
+        self.assertEqual(normaliser_commune("Yopougon"), "yopougon")
+        self.assertEqual(normaliser_commune(""), "")
+
+    def test_communes_du_district_creees_par_migration(self):
+        communes = set(TarifLivraison.objects.filter(zone="abidjan").exclude(commune="").values_list("commune", flat=True))
+        self.assertEqual(communes, {
+            "Abobo", "Adjamé", "Attécoubé", "Cocody", "Koumassi", "Marcory", "Plateau", "Port-Bouët",
+            "Treichville", "Yopougon", "Anyama", "Bingerville", "Songon",
+        })
+
+    def test_zone_deduite_de_la_commune(self):
+        for commune in ("Cocody", "COCODY", "port bouet", "Port-Bouët", " adjame ", "Attecoubé"):
+            with self.subTest(commune):
+                self.assertEqual(tarif_applicable(commune).zone, "abidjan")
+        for commune in ("Bouaké", "Grand-Bassam", "Abidjan", "", "Riviera"):
+            with self.subTest(commune):
+                self.assertEqual(tarif_applicable(commune).zone, "hors_abidjan")
+
+    def test_tarif_applicable(self):
+        TarifLivraison.objects.filter(commune="Cocody").update(montant=1000)
+        TarifLivraison.objects.create(zone="hors_abidjan", commune="Bouaké", montant=2500)
+        self.assertEqual(tarif_applicable("COCODY").tarif.montant, 1000)
+        self.assertEqual(tarif_applicable("Abobo").tarif.montant, 1500)
+        self.assertEqual(tarif_applicable("bouake").tarif.montant, 2500)
+        self.assertEqual(tarif_applicable("Korhogo").tarif.montant, 3000)
+        # Commune désactivée : reste dans sa zone, tarif par défaut de la zone.
+        TarifLivraison.objects.filter(commune="Cocody").update(est_actif=False)
+        self.assertEqual((tarif_applicable("Cocody").zone, tarif_applicable("Cocody").tarif.montant), ("abidjan", 1500))
+        TarifLivraison.objects.filter(zone="hors_abidjan", commune="").delete()
+        with self.assertRaises(TarifIntrouvable):
+            tarif_applicable("Korhogo")
+
+    def test_livraison_offerte_frais_au_vendeur(self):
+        boutique = Boutique(proprietaire=self.vendeur, nom="B", livraison_offerte=True)
+        self.assertEqual(frais_de_la_commande(boutique, self.defaut_abidjan), {
+            "frais_livraison": Decimal("0"), "livraison_offerte": True, "frais_livraison_vendeur": Decimal("1500"),
+        })
+
+    def test_grille_publique_pour_le_menu_deroulant(self):
+        TarifLivraison.objects.filter(commune="Cocody").update(montant=1000)
+        TarifLivraison.objects.filter(commune="Abobo").update(est_actif=False)
+        TarifLivraison.objects.create(zone="hors_abidjan", commune="Bouaké", montant=2500)
+        TarifLivraison.objects.create(zone="hors_abidjan", commune="Korhogo", montant=2800, est_actif=False)
+        with self.assertNumQueries(1):
+            r = self.api().get(self.URL_PUBLIQUE)
+        self.assertEqual(r.status_code, 200)
+        communes = {ligne["commune"]: ligne for ligne in r.data["communes"]}
+        self.assertEqual(len(communes), 14)  # 13 communes du district + Bouaké
+        self.assertEqual(communes["Cocody"], {"commune": "Cocody", "zone": "abidjan", "montant": 1000})
+        self.assertEqual(communes["Abobo"]["montant"], 1500)  # désactivée : tarif par défaut d'Abidjan
+        self.assertEqual(communes["Bouaké"], {"commune": "Bouaké", "zone": "hors_abidjan", "montant": 2500})
+        self.assertNotIn("Korhogo", communes)  # inactive : couverte par « autres villes »
+        self.assertEqual(r.data["autres_villes"], {"zone": "hors_abidjan", "montant": 3000})
+
+    def test_administration_reservee_aux_administrateurs(self):
+        url_detail = f"{self.URL_ADMIN}{self.defaut_abidjan.pk}/"
+        self.assertEqual(self.api().get(self.URL_ADMIN).status_code, 401)
+        for utilisateur in (self.client_user, self.vendeur, self.livreur):
+            with self.subTest(utilisateur.role):
+                api = self.api(utilisateur)
+                self.assertEqual(api.get(self.URL_ADMIN).status_code, 403)
+                self.assertEqual(api.post(self.URL_ADMIN, {"zone": "abidjan", "commune": "Cocody",
+                                                           "montant": 1}).status_code, 403)
+                self.assertEqual(api.patch(url_detail, {"montant": 1}).status_code, 403)
+        self.defaut_abidjan.refresh_from_db()
+        self.assertEqual((self.defaut_abidjan.montant, TarifLivraison.objects.count()), (1500, 15))
+
+    def test_creation_et_modification_tracees(self):
+        api = self.api(self.admin)
+        r = api.post(self.URL_ADMIN, {"zone": "hors_abidjan", "commune": " Grand-Bassam ", "montant": 2000})
+        self.assertEqual(r.status_code, 201, r.data)
+        tarif = TarifLivraison.objects.get(pk=r.data["id"])
+        self.assertEqual((tarif.commune, tarif.commune_normalisee, tarif.modifie_par),
+                         ("Grand-Bassam", "grandbassam", self.admin))
+        r = api.patch(f"{self.URL_ADMIN}{self.defaut_abidjan.pk}/", {"montant": 2000})
+        self.assertEqual((r.status_code, r.data["montant"]), (200, 2000))
+        r = api.patch(f"{self.URL_ADMIN}{tarif.pk}/", {"est_actif": False})
+        self.assertEqual((r.status_code, r.data["est_actif"]), (200, False))
+
+    def test_validations(self):
+        api = self.api(self.admin)
+        url_defaut = f"{self.URL_ADMIN}{self.defaut_abidjan.pk}/"
+        cas = {
+            "doublon de commune (casse, accents)": api.post(self.URL_ADMIN, {"zone": "abidjan", "commune": "port bouet",
+                                                                              "montant": 1200}),
+            # Une commune du district ne peut pas recevoir un tarif « hors
+            # Abidjan » : sa zone deviendrait ambiguë.
+            "commune du district dans l'autre zone": api.post(self.URL_ADMIN, {"zone": "hors_abidjan",
+                                                                                "commune": "COCODY", "montant": 1}),
+            "second tarif par défaut": api.post(self.URL_ADMIN, {"zone": "abidjan", "commune": "", "montant": 900}),
+            "montant négatif": api.post(self.URL_ADMIN, {"zone": "hors_abidjan", "commune": "Man", "montant": -5}),
+            "zone inconnue": api.post(self.URL_ADMIN, {"zone": "lune", "commune": "Man", "montant": 1000}),
+            "zone non modifiable": api.patch(url_defaut, {"zone": "hors_abidjan"}),
+            "commune non modifiable": api.patch(url_defaut, {"commune": "Plateau"}),
+            "défaut non désactivable": api.patch(url_defaut, {"est_actif": False}),
+        }
+        for libelle, reponse in cas.items():
+            with self.subTest(libelle):
+                self.assertEqual(reponse.status_code, 400, reponse.data)
+        self.defaut_abidjan.refresh_from_db()
+        self.assertEqual((self.defaut_abidjan.zone, self.defaut_abidjan.commune, self.defaut_abidjan.est_actif),
+                         ("abidjan", "", True))
+        self.assertEqual(TarifLivraison.objects.count(), 15)
+
+    def test_zone_unique_par_commune_en_base(self):
+        from django.db import IntegrityError, transaction
+
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            TarifLivraison.objects.create(zone="hors_abidjan", commune="Port Bouet", montant=1)
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            TarifLivraison.objects.create(zone="abidjan", commune="", montant=1)
+
+    def test_pas_de_suppression_par_l_api(self):
+        r = self.api(self.admin).delete(f"{self.URL_ADMIN}{self.defaut_abidjan.pk}/")
+        self.assertEqual(r.status_code, 405)
+        self.assertTrue(TarifLivraison.objects.filter(pk=self.defaut_abidjan.pk).exists())

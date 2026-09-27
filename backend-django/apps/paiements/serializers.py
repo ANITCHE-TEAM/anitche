@@ -125,7 +125,8 @@ class ReversementVendeurSerializer(serializers.ModelSerializer):
         model = Reversement
         fields = [
             "id", "reference", "commande", "numero_commande", "statut", "statut_display",
-            "montant_brut", "montant_commission", "montant_frais_fixes", "montant_retours", "montant_net",
+            "montant_brut", "montant_commission", "montant_frais_fixes", "montant_retours", "montant_livraison",
+            "montant_net",
             "montant_ajustements", "montant_a_verser", "lignes",
             "date_livraison", "date_disponibilite", "date_versement", "canal", "reference_externe",
         ]

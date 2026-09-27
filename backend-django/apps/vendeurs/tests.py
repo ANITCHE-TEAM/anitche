@@ -459,6 +459,23 @@ class MaBoutiqueAPITests(TestCase):
         self.assertEqual(reponse.status_code, status.HTTP_200_OK)
         self.assertEqual(reponse.data['description'], "Pagnes et accessoires")
 
+    def test_livraison_offerte_choisie_par_le_proprietaire(self):
+        """Option de la boutique : le client ne paie pas la livraison, son
+        tarif est déduit du reversement du vendeur (apps.livraison.frais)."""
+        from .serializers import BoutiquePubliqueSerializer
+
+        vendeur = creer_vendeur_valide()
+        Boutique.objects.create(proprietaire=vendeur, nom="Chez Awa")
+        self.client.force_authenticate(user=vendeur)
+
+        reponse = self.client.patch(URL_MA_BOUTIQUE, {'livraison_offerte': True}, format='json')
+
+        self.assertEqual((reponse.status_code, reponse.data['livraison_offerte']), (status.HTTP_200_OK, True))
+        boutique = Boutique.objects.get()
+        self.assertTrue(boutique.livraison_offerte)
+        # Affichée aux clients (« livraison offerte »).
+        self.assertTrue(BoutiquePubliqueSerializer(boutique).data['livraison_offerte'])
+
     def test_un_vendeur_ne_voit_que_sa_boutique(self):
         Boutique.objects.create(proprietaire=creer_vendeur_valide('autre@anitche.ci'), nom="Autre")
         self.client.force_authenticate(user=creer_vendeur_valide('sans@anitche.ci'))

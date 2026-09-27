@@ -36,7 +36,7 @@ try:
                     destinataire=vendeur,
                     titre=f"Nouvelle commande à préparer ({c.numero_commande})",
                     message=(
-                        f"La commande {c.numero_commande} pour un montant de {c.montant_total} FCFA "
+                        f"La commande {c.numero_commande} ({int(c.montant_hors_livraison)} FCFA d'articles) "
                         f"a été payée. Vous pouvez débuter sa préparation."
                     ),
                     type_notification=Notification.TypeNotification.COMMANDE,

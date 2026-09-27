@@ -22,8 +22,10 @@ from rest_framework.throttling import AnonRateThrottle, SimpleRateThrottle
 from apps.catalogue.models import Produit, Stock, VarianteProduit
 from apps.commandes.models import Commande, CommandeItem
 from apps.commandes.services import annuler_commande, est_payee, expirer_commandes_impayees, synchroniser_depuis_livraison
-from apps.fidelite.models import CompteFidelite, CouponReduction
-from apps.livraison.models import Livraison
+from apps.fidelite.models import CompteFidelite, CouponReduction, GainFidelite
+from apps.fidelite.services import crediter_gains_echus
+from apps.livraison.models import Livraison, TarifLivraison
+from apps.livraison.tests import recreer_tarifs_initiaux
 from apps.notifications.models import Notification
 from apps.panier.models import Panier, PanierItem
 from apps.retours.models import DemandeRetour, RetourItem
@@ -41,6 +43,8 @@ from .services import valider_paiement
 URL_INITIER = "/api/paiements/initier/"
 URL_VALIDER_PANIER = "/api/commandes/valider-panier/"
 ADRESSE = {"commune": "Cocody", "quartier": "Angré", "point_de_repere": "Pharmacie", "telephone": "0700000001"}
+# Tarif de Cocody (district d'Abidjan, migrations livraison 0004 / 0005), payé par commande.
+FRAIS_ABIDJAN = Decimal("1500")
 EN_TETE = "HTTP_" + EN_TETE_SIGNATURE.upper().replace("-", "_")
 
 
@@ -136,7 +140,7 @@ class InitiationTests(Donnees, APITestCase):
     def test_paiement_commande_montant_calcule_par_le_serveur(self):
         r = self.initier(commande_id=str(self.commande_a.pk), montant="1")
         self.assertEqual(r.status_code, 201)
-        self.assertEqual(Decimal(r.data["montant"]), Decimal("5000"))
+        self.assertEqual(Decimal(r.data["montant"]), Decimal("5000") + FRAIS_ABIDJAN)
         paiement = Paiement.objects.get(pk=r.data["id"])
         self.assertEqual((paiement.fournisseur, paiement.statut), ("simule", Paiement.Statut.EN_ATTENTE))
         self.assertEqual(list(paiement.commandes.all()), [self.commande_a])
@@ -145,7 +149,8 @@ class InitiationTests(Donnees, APITestCase):
     def test_paiement_du_groupe(self):
         r = self.initier(methode="orange_money", groupe_commande_id=str(self.groupe.pk))
         self.assertEqual(r.status_code, 201)
-        self.assertEqual(Decimal(r.data["montant"]), Decimal("15000"))
+        # Deux commandes (deux boutiques) : deux colis, deux fois les frais.
+        self.assertEqual(Decimal(r.data["montant"]), Decimal("15000") + 2 * FRAIS_ABIDJAN)
         self.assertEqual(set(r.data["commandes"]), {self.commande_a.pk, self.commande_b.pk})
 
     def test_moyens_acceptes(self):
@@ -383,7 +388,7 @@ class RemboursementTests(Donnees, APITestCase):
         self.assertEqual(paiement.statut, Paiement.Statut.VALIDE)
         self.assertEqual(self.commande_a.status, Commande.Status.ANNULEE)  # jamais réactivée
         remboursement = Remboursement.objects.get()
-        self.assertEqual((remboursement.motif, remboursement.montant), ("commande_annulee", Decimal("5000")))
+        self.assertEqual((remboursement.motif, remboursement.montant), ("commande_annulee", Decimal("5000") + FRAIS_ABIDJAN))
         self.assertFalse(Livraison.objects.filter(commande=self.commande_a).exists())
         self.assertFalse(CompteFidelite.objects.filter(utilisateur=self.client1, solde_points__gt=0).exists())
         self.assertTrue(Notification.objects.filter(destinataire=self.admin, titre="Remboursement à traiter").exists())
@@ -419,7 +424,7 @@ class RemboursementTests(Donnees, APITestCase):
         self.commande_b.refresh_from_db()
         self.assertEqual(self.commande_b.status, Commande.Status.CONFIRMEE)
         remboursement = Remboursement.objects.get()
-        self.assertEqual((remboursement.commande, remboursement.montant), (self.commande_a, Decimal("5000")))
+        self.assertEqual((remboursement.commande, remboursement.montant), (self.commande_a, Decimal("5000") + FRAIS_ABIDJAN))
         self.assertEqual(Reversement.objects.get(commande=self.commande_a).statut, Reversement.Statut.ANNULE)
         # Signalée deux fois, l'annulation ne crée rien de plus.
         from .services import traiter_paiements_apres_annulation
@@ -450,6 +455,8 @@ class ConcurrenceTests(Donnees, TransactionTestCase):
         # Un TransactionTestCase précédent vide la base, y compris le barème
         # de frais par défaut créé par migration.
         BaremeFrais.objects.get_or_create(boutique=None, defaults={"taux_commission": 12, "frais_fixe_article": 200})
+        # Idem pour les tarifs de livraison (défauts et communes du district).
+        recreer_tarifs_initiaux()
         self.creer_donnees()
         (self.commande,) = self.commander((self.variante1, 3))
 
@@ -530,7 +537,8 @@ class FraisTests(Donnees, APITestCase):
     def test_coupon_supporte_par_anitche(self):
         CouponReduction.objects.create(code="DIX", type_reduction="pourcentage", valeur=Decimal("10"))
         (commande,) = self.commander((self.variante1, 1), coupon_code="DIX")
-        self.assertEqual(commande.montant_total, Decimal("4500"))
+        # La remise ne porte que sur les articles : les frais de livraison restent dus.
+        self.assertEqual(commande.montant_total, Decimal("4500") + FRAIS_ABIDJAN)
         article = commande.article.get()
         self.assertEqual((article.montant_commission, article.montant_net_vendeur), (Decimal("600"), Decimal("4200")))
 
@@ -778,7 +786,7 @@ class CinetPayTests(Donnees, APITestCase):
         self.assertEqual(url, "https://api.cinetpay.net/v1/payment")
         self.assertEqual(entetes["Authorization"], "Bearer jwt")
         self.assertEqual((corps["amount"], corps["currency"], corps["payment_method"], corps["merchant_transaction_id"]),
-                         (15000, "XOF", "OM_CI", paiement.reference))
+                         (15000 + FRAIS_ABIDJAN, "XOF", "OM_CI", paiement.reference))
         self.assertEqual(corps["notify_url"], "https://api.anitche.test/api/paiements/webhook/cinetpay/")
         self.assertNotIn(b"jeton-secret", self.api(self.client1).get(f"/api/paiements/{paiement.pk}/").content)
 
@@ -902,3 +910,177 @@ class ConfigurationProductionTests(APITestCase):
                 resultat = self.importer_prod(**variables)
                 self.assertNotEqual(resultat.returncode, 0)
                 self.assertIn("ImproperlyConfigured", resultat.stderr)
+
+
+# =====================================================================
+# FRAIS DE LIVRAISON : REVERSEMENTS, RETOURS, POINTS
+# =====================================================================
+
+class FraisDeLivraisonFinancesTests(Donnees, APITestCase):
+    """Produit A : 5 000 FCFA, barème 12 % + 200 par article ; tarif
+    Abidjan : 1 500. Deux articles : brut 10 000, net vendeur 8 400."""
+
+    def setUp(self):
+        self.creer_donnees()
+
+    def commande_payee(self, quantite=2):
+        (commande,) = self.commander((self.variante1, quantite))
+        self.notifier_succes(self.payer(commande))
+        return commande, Reversement.objects.get(commande=commande)
+
+    def livrer(self, commande):
+        Commande.objects.filter(pk=commande.pk).update(status=Commande.Status.EXPEDIEE)
+        synchroniser_depuis_livraison(commande, "livree")
+        Livraison.objects.filter(commande=commande).update(status=Livraison.Status.LIVREE, date_livraison=timezone.now())
+
+    def demander_retour(self, commande, motif="produit_defectueux", quantite=1):
+        r = self.api(self.client1).post("/api/retours/", {
+            "commande_id": str(commande.pk), "motif": motif, "type_resolution": "remboursement",
+            "description": "Article abîmé à l'ouverture du colis",
+            "articles": [{"commande_item_id": str(commande.article.get().pk), "quantite": quantite}],
+        }, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        return DemandeRetour.objects.get(pk=r.data["id"])
+
+    def rembourser(self, demande):
+        DemandeRetour.objects.filter(pk=demande.pk).update(statut=DemandeRetour.Statut.RECEPTIONNE)
+        r = self.api(self.vendeur1).patch(f"/api/retours/{demande.pk}/traiter/", {"action": "rembourser"},
+                                          format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+
+    def offrir_la_livraison(self, tarif=None):
+        Boutique.objects.filter(pk=self.boutique1.pk).update(livraison_offerte=True)
+        if tarif is not None:
+            TarifLivraison.objects.filter(zone="abidjan").update(montant=tarif)
+
+    # --- Reversements ---
+
+    def test_frais_payes_par_le_client_jamais_reverses_au_vendeur(self):
+        commande, reversement = self.commande_payee()
+        self.assertEqual(Paiement.objects.get().montant, Decimal("10000") + FRAIS_ABIDJAN)
+        self.assertEqual((reversement.montant_livraison, reversement.montant_net), (Decimal("0"), Decimal("8400")))
+
+    def test_livraison_offerte_deduite_du_reversement(self):
+        self.offrir_la_livraison()
+        commande, reversement = self.commande_payee()
+        self.assertEqual(Paiement.objects.get().montant, Decimal("10000"))
+        self.assertEqual((reversement.montant_livraison, reversement.montant_net), (FRAIS_ABIDJAN, Decimal("6900")))
+        self.livrer(commande)
+        self.assertFalse(AjustementVendeur.objects.exists())  # couverte par la vente
+        ligne = self.api(self.vendeur1).get("/api/paiements/vendeur/reversements/").data["results"][0]
+        self.assertEqual((ligne["montant_livraison"], ligne["montant_net"]), ("1500.00", "6900.00"))
+
+    def test_livraison_offerte_superieure_au_net_reste_du_apres_livraison(self):
+        self.offrir_la_livraison(tarif=9000)
+        commande, reversement = self.commande_payee()
+        # Plafonnée au net (8 400) : jamais de reversement négatif.
+        self.assertEqual((reversement.montant_livraison, reversement.montant_net), (Decimal("8400"), Decimal("0")))
+        self.assertFalse(AjustementVendeur.objects.exists())  # rien de dû avant la livraison
+        self.livrer(commande)
+        reversements.ouvrir_retractation(commande)  # rejoué : idempotent
+        ajustement = AjustementVendeur.objects.get()
+        self.assertEqual((ajustement.nature, ajustement.montant, ajustement.commande, ajustement.boutique),
+                         (AjustementVendeur.Nature.LIVRAISON_OFFERTE, Decimal("-600"), commande, self.boutique1))
+
+    def test_livraison_offerte_annulee_avant_livraison_rien_n_est_du(self):
+        self.offrir_la_livraison(tarif=9000)
+        commande, reversement = self.commande_payee()
+        annuler_commande(commande, Commande.MotifAnnulation.CLIENT)
+        reversement.refresh_from_db()
+        self.assertEqual(reversement.statut, Reversement.Statut.ANNULE)
+        self.assertFalse(AjustementVendeur.objects.exists())
+
+    def test_contestation_fondee_efface_le_reste_non_encore_deduit(self):
+        self.offrir_la_livraison(tarif=9000)
+        commande, _ = self.commande_payee()
+        self.livrer(commande)
+        self.assertTrue(AjustementVendeur.objects.exists())
+        reversements.annuler_reversement(commande)  # colis déclaré non reçu, contestation fondée
+        self.assertFalse(AjustementVendeur.objects.exists())
+
+    # --- Retours ---
+
+    def test_retour_imputable_au_vendeur_rend_les_frais_une_fois(self):
+        commande, reversement = self.commande_payee()
+        self.livrer(commande)
+        premiere = self.demander_retour(commande)
+        self.assertEqual((premiere.frais_livraison_rembourses, premiere.montant_remboursement),
+                         (FRAIS_ABIDJAN, Decimal("5000") + FRAIS_ABIDJAN))
+        seconde = self.demander_retour(commande, motif="non_conforme")
+        self.assertEqual((seconde.frais_livraison_rembourses, seconde.montant_remboursement),
+                         (Decimal("0"), Decimal("5000")))
+
+        self.rembourser(premiere)
+        self.assertEqual(Remboursement.objects.get(retour=premiere).montant, Decimal("6500"))
+        reversement.refresh_from_db()
+        # Part du vendeur réduite des seuls articles (5 000 − 600 de commission rendue).
+        self.assertEqual(reversement.montant_retours, Decimal("4400"))
+        ajustement = AjustementVendeur.objects.get(nature=AjustementVendeur.Nature.FRAIS_LIVRAISON_RETOUR)
+        self.assertEqual((ajustement.montant, ajustement.commande, ajustement.boutique),
+                         (-FRAIS_ABIDJAN, commande, self.boutique1))
+        reversements.facturer_frais_livraison_retour(premiere)  # rejoué : idempotent
+        self.assertEqual(AjustementVendeur.objects.count(), 1)
+        self.assertEqual(self.api(self.client1).get(f"/api/retours/{premiere.pk}/").data["frais_livraison_rembourses"],
+                         "1500.00")
+
+    def test_changement_d_avis_ou_mauvaise_taille_sans_frais(self):
+        commande, _ = self.commande_payee()
+        self.livrer(commande)
+        for motif in ("changement_avis", "mauvaise_taille", "autre"):
+            with self.subTest(motif):
+                demande = self.demander_retour(commande, motif=motif)
+                self.assertEqual((demande.frais_livraison_rembourses, demande.montant_remboursement),
+                                 (Decimal("0"), Decimal("5000")))
+                demande.delete()
+
+    def test_frais_rendus_si_la_premiere_demande_a_ete_rejetee(self):
+        commande, _ = self.commande_payee()
+        self.livrer(commande)
+        premiere = self.demander_retour(commande)
+        DemandeRetour.objects.filter(pk=premiere.pk).update(statut=DemandeRetour.Statut.REJETE)
+        self.assertEqual(self.demander_retour(commande).frais_livraison_rembourses, FRAIS_ABIDJAN)
+
+    def test_livraison_offerte_rien_a_rendre(self):
+        self.offrir_la_livraison()
+        commande, _ = self.commande_payee()
+        self.livrer(commande)
+        demande = self.demander_retour(commande)
+        self.assertEqual((demande.frais_livraison_rembourses, demande.montant_remboursement),
+                         (Decimal("0"), Decimal("5000")))
+
+    # --- Points de fidélité ---
+
+    def test_points_jamais_sur_les_frais(self):
+        commande, _ = self.commande_payee(quantite=1)  # 5 000 + 1 500 payés
+        self.livrer(commande)
+        self.assertEqual(GainFidelite.objects.get(commande=commande).points, 5)
+
+    def test_retour_avec_frais_points_recalcules_sur_les_articles(self):
+        commande, _ = self.commande_payee()  # 10 000 d'articles → 10 points en attente
+        self.livrer(commande)
+        self.rembourser(self.demander_retour(commande))  # 5 000 d'articles + 1 500 de frais rendus
+        # Reste 5 000 d'articles payés → 5 points (les frais rendus ne
+        # comptent pas comme des articles remboursés : 10 000 − 6 500 → 3).
+        self.assertEqual(GainFidelite.objects.get(commande=commande).points, 5)
+
+    def test_retour_sans_frais_points_recalcules_hors_livraison(self):
+        commande, _ = self.commande_payee()
+        self.livrer(commande)
+        self.rembourser(self.demander_retour(commande, motif="changement_avis"))
+        # 10 000 − 5 000 → 5 points (et non 11 500 − 5 000 → 6 : les frais
+        # payés n'ont jamais rapporté de points).
+        self.assertEqual(GainFidelite.objects.get(commande=commande).points, 5)
+
+    @override_settings(RETOUR_DELAI_JOURS=30)
+    def test_points_deja_credites_reprise_sur_les_articles_seulement(self):
+        commande, _ = self.commande_payee()
+        self.livrer(commande)
+        gain = GainFidelite.objects.get(commande=commande)
+        GainFidelite.objects.filter(pk=gain.pk).update(date_disponibilite=timezone.now() - timedelta(minutes=1))
+        crediter_gains_echus()
+        compte = CompteFidelite.objects.get(utilisateur=self.client1)
+        self.assertEqual(compte.solde_points, 10)
+        self.rembourser(self.demander_retour(commande))
+        compte.refresh_from_db()
+        # 5 points repris pour 5 000 d'articles (6 si les frais comptaient).
+        self.assertEqual(compte.solde_points, 5)

@@ -322,6 +322,45 @@ class RetoursConcurrenceTestCase(TransactionTestCase):
         self.assertEqual(total_retourne, 1)
 
 
+    @skipUnless(connection.vendor == "postgresql", "Concurrence réelle : PostgreSQL uniquement")
+    def test_deux_demandes_concurrentes_frais_de_livraison_rendus_une_seule_fois(self):
+        """Deux demandes simultanées (motif imputable au vendeur) sur deux
+        exemplaires d'une même commande : les frais de livraison ne sont
+        inclus que dans l'une (verrou de la commande)."""
+        from concurrent.futures import ThreadPoolExecutor
+        import django.db
+
+        commande = Commande.objects.create(
+            boutique=self.item1.commande.boutique, client=self.client1, montant_total=Decimal("41500.00"),
+            frais_livraison=Decimal("1500.00"), status=Commande.Status.LIVREE,
+        )
+        item = CommandeItem.objects.create(
+            commande=commande, variante=self.item1.variante, nom_produit="Robe Baoulé",
+            prix_unitaire=Decimal("20000.00"), quantite=2,
+        )
+        Livraison.objects.create(commande=commande, status=Livraison.Status.LIVREE, date_livraison=timezone.now())
+        payload = {
+            "commande_id": str(commande.id), "motif": "produit_defectueux",
+            "description": "Couture déchirée à la réception du colis.",
+            "articles": [{"commande_item_id": str(item.id), "quantite": 1}],
+        }
+
+        def appel():
+            django.db.close_old_connections()
+            try:
+                client = APIClient()
+                client.force_authenticate(user=self.client1)
+                return client.post(reverse("retours:retour-liste-creer"), payload, format="json").status_code
+            finally:
+                django.db.connection.close()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            statuts = list(executor.map(lambda _: appel(), range(2)))
+
+        self.assertEqual(statuts, [status.HTTP_201_CREATED] * 2)
+        frais = sorted(DemandeRetour.objects.filter(commande=commande).values_list("frais_livraison_rembourses", flat=True))
+        self.assertEqual(frais, [Decimal("0"), Decimal("1500")])
+
 class RetoursAdminTestCase(APITestCase):
     """La quantité d'un article retourné et la photo justificative ne
     doivent jamais être modifiables depuis l'admin Django après coup :

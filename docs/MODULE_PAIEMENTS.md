@@ -59,7 +59,7 @@ Réponse d'un paiement (client) : `id`, `reference`, `client`, `client_email`, `
 
 | Méthode | Chemin | Rôle |
 |---|---|---|
-| GET | `vendeur/reversements/` | Paginé, filtre `?statut=`. Par commande : `numero_commande`, `statut`, `montant_brut`, `montant_commission`, `montant_frais_fixes`, `montant_retours`, `montant_net`, `montant_ajustements`, `montant_a_verser`, `lignes` (article, quantité, prix, taux, frais fixe unitaire, commission, frais fixes, net), `date_livraison`, `date_disponibilite` (« quand »), `date_versement`, `canal`, `reference_externe` |
+| GET | `vendeur/reversements/` | Paginé, filtre `?statut=`. Par commande : `numero_commande`, `statut`, `montant_brut`, `montant_commission`, `montant_frais_fixes`, `montant_retours`, `montant_livraison`, `montant_net`, `montant_ajustements`, `montant_a_verser`, `lignes` (article, quantité, prix, taux, frais fixe unitaire, commission, frais fixes, net), `date_livraison`, `date_disponibilite` (« quand »), `date_versement`, `canal`, `reference_externe` |
 | GET | `vendeur/reversements/resume/` | `en_attente_livraison`, `en_retractation` (dont suspendus), `disponible` (dont versements en cours), `verse` (FCFA nets) et leurs `nombre_*`, `ajustements_en_attente` (≤ 0), `delai_retractation_jours` |
 
 ### Administration (`IsAuthenticated` + `EstAdministrateur` : rôle admin, jamais `is_staff` seul)
@@ -105,7 +105,7 @@ Un **`Remboursement`** par commande à rembourser : `reference` (`RMB-…`), `pa
 
 ## 7. Reversements aux vendeurs
 
-Un **`Reversement`** par commande confirmée : `reference` (`REV-…`), `boutique`, `montant_brut`, `montant_commission`, `montant_frais_fixes`, `montant_retours`, `montant_net`, `montant_ajustements` (≤ 0), `montant_a_verser`, `statut`, `date_livraison`, `date_disponibilite`, `date_versement`, `canal` (`mobile_money`), `numero_destinataire` (**chiffré**, figé au versement), `operateur`, `fournisseur`, `reference_externe`, `verse_par`.
+Un **`Reversement`** par commande confirmée : `reference` (`REV-…`), `boutique`, `montant_brut`, `montant_commission`, `montant_frais_fixes`, `montant_retours`, `montant_livraison` (livraison offerte par la boutique), `montant_net`, `montant_ajustements` (≤ 0), `montant_a_verser`, `statut`, `date_livraison`, `date_disponibilite`, `date_versement`, `canal` (`mobile_money`), `numero_destinataire` (**chiffré**, figé au versement), `operateur`, `fournisseur`, `reference_externe`, `verse_par`.
 
 | Statut | Passage |
 |---|---|
@@ -119,6 +119,8 @@ Un **`Reversement`** par commande confirmée : `reference` (`REV-…`), `boutiqu
 
 - **Retour remboursé avant versement** : `montant_retours` augmente, `montant_net` est recalculé.
 - **Retour remboursé après versement** : un **`AjustementVendeur`** négatif est créé ; il est **déduit du prochain reversement** de la boutique (du plus ancien au plus récent, tant que le montant versé reste ≥ 0 ; le reste attend le suivant).
+- **Frais de livraison** ([`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md) § 9) : payés par le client, ils reviennent à ANITCHE et n'entrent **jamais** dans le reversement. **Livraison offerte** par la boutique : `montant_net` = brut − commission − frais fixes − retours − `montant_livraison`, où `montant_livraison` = min(tarif figé, net des articles) ; si le tarif dépasse le net, le reste devient un `AjustementVendeur` à la livraison (une commande annulée avant ne coûte rien). Une contestation « non reçu » fondée efface ce reste tant qu'il n'est pas déduit d'un versement.
+- **`AjustementVendeur.nature`** : `retour` (retour remboursé après versement, lié au retour), `livraison_offerte` (reste non couvert), `frais_livraison_retour` (frais de livraison rendus au client pour un retour imputable au vendeur). Au plus un ajustement de chacune des deux dernières natures par commande (contrainte en base) : rejouer le traitement ne facture jamais deux fois.
 - **Canal : mobile money uniquement**, sur `DocumentKYC.numero_mobile_money` du vendeur (format ivoirien, converti en +225…). En conséquence, **`compte_bancaire` n'est plus collecté** (supprimé, migration utilisateurs 0009, voir `MODULE_UTILISATEURS.md`).
 - **Au lancement : versement manuel** par l'administration ; ensuite **API de transfert CinetPay** (`transferer/`), limites 100 à 1 500 000 FCFA par transfert.
 
@@ -232,6 +234,7 @@ Rien d'autre ne change : commandes, remboursements, reversements et frais ignore
 - **paiements 0004** (données) : reprise de `metadata.commandes_couvertes` dans la relation ; `a_rembourser` → validé + `Remboursement` ; paiements `espece_livraison` encore actifs → annulés ; clés internes retirées de `metadata` ; barème 12 % + 200 FCFA créé.
 - **commandes 0006** : frais figés sur `CommandeItem` (ventes passées : aucun frais, net = prix de la ligne).
 - **utilisateurs 0009** : suppression de `compte_bancaire`.
+- **paiements 0006** (frais de livraison) : `Reversement.montant_livraison` (0 pour l'existant) ; `AjustementVendeur.nature` (`retour` pour l'existant) et `commande`, contrainte « un ajustement de chaque nature par commande » (hors `retour`).
 
 Base de dev (26/09/2026) : 6 paiements, tous `annule` après migration (5 `espece_livraison`, 1 `wave`), chacun relié à sa commande ; 1 seul `compte_bancaire` en base, vide (aucune perte).
 

@@ -1,3 +1,4 @@
+import unicodedata
 import uuid
 from django.db import models
 from django.conf import settings
@@ -139,3 +140,74 @@ class ContestationLivraison(models.Model):
 
     def __str__(self):
         return f"Contestation {self.livraison_id} — {self.get_statut_display()}"
+
+
+def normaliser_commune(commune):
+    """Forme de comparaison d'une commune : insensible à la casse, aux
+    accents, aux espaces et à la ponctuation (« Port-Bouët » = « port bouet »).
+    La commune est saisie librement au checkout."""
+    decompose = unicodedata.normalize("NFKD", (commune or "").casefold())
+    return "".join(caractere for caractere in decompose if caractere.isalnum())
+
+
+class TarifLivraison(models.Model):
+    """Frais de livraison payés par le client, par zone et par commune.
+
+    Une ligne sans commune est le tarif par défaut de sa zone. Les lignes de
+    commune de la zone « abidjan » forment la liste des communes du district
+    (migration 0005) : c'est d'elles que le serveur déduit la zone d'une
+    adresse (apps.livraison.frais), le client ne la déclare jamais. Une
+    commune n'a qu'un tarif, toutes zones confondues. Réglable par
+    l'administration (API) : aucun montant n'est codé en dur. Le tarif est
+    figé dans la commande au checkout : le modifier ne change jamais une
+    commande passée. FCFA entiers.
+    """
+
+    class Zone(models.TextChoices):
+        ABIDJAN = "abidjan", "Abidjan"
+        HORS_ABIDJAN = "hors_abidjan", "Hors Abidjan"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    zone = models.CharField(max_length=20, choices=Zone.choices)
+    commune = models.CharField(max_length=100, blank=True, help_text="Vide : tarif par défaut de la zone.")
+    commune_normalisee = models.CharField(max_length=100, blank=True, editable=False)
+    montant = models.PositiveIntegerField(help_text="FCFA payés par le client pour une commande (un colis).")
+    est_actif = models.BooleanField(default=True)
+    modifie_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="tarifs_livraison_modifies",
+    )
+    date_creation = models.DateTimeField(auto_now_add=True)
+    date_mise_a_jour = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["zone", "commune_normalisee"]
+        constraints = [
+            # Une commune dans une seule zone : sa zone ne peut pas être ambiguë.
+            models.UniqueConstraint(
+                fields=["commune_normalisee"], condition=~models.Q(commune_normalisee=""),
+                name="tarif_livraison_une_zone_par_commune",
+            ),
+            models.UniqueConstraint(
+                fields=["zone"], condition=models.Q(commune_normalisee=""),
+                name="tarif_livraison_un_defaut_par_zone",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.commune = self.commune.strip()
+        self.commune_normalisee = normaliser_commune(self.commune)
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and "commune" in update_fields:
+            kwargs["update_fields"] = {*update_fields, "commune_normalisee"}
+        return super().save(*args, **kwargs)
+
+    @property
+    def est_tarif_par_defaut(self):
+        return not self.commune_normalisee
+
+    def __str__(self):
+        return f"{self.get_zone_display()} — {self.commune or 'par défaut'} : {self.montant} FCFA"

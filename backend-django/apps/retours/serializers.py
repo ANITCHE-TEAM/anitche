@@ -4,7 +4,13 @@ from django.urls import reverse
 from rest_framework.exceptions import ValidationError
 
 from .models import DemandeRetour, RetourItem, PhotoRetour
-from .services import TRANSITIONS, RetourRefuse, montant_a_rembourser, verifier_eligibilite
+from .services import (
+    TRANSITIONS,
+    RetourRefuse,
+    frais_livraison_a_rembourser,
+    montant_a_rembourser,
+    verifier_eligibilite,
+)
 from apps.commandes.models import Commande, CommandeItem
 
 
@@ -80,6 +86,7 @@ class DemandeRetourSerializer(serializers.ModelSerializer):
             "statut_display",
             "description",
             "montant_remboursement",
+            "frais_livraison_rembourses",
             "reponse_vendeur",
             "articles",
             "photos",
@@ -172,7 +179,9 @@ class CreerDemandeRetourSerializer(serializers.Serializer):
 
         attrs["_commande"] = commande
         attrs["_boutique"] = commande.boutique
-        attrs["_montant_remboursement"] = montant_a_rembourser(commande, validated_items)
+        frais = frais_livraison_a_rembourser(commande, attrs["motif"])
+        attrs["_frais_livraison_rembourses"] = frais
+        attrs["_montant_remboursement"] = montant_a_rembourser(commande, validated_items) + frais
         attrs["_validated_items"] = validated_items
 
         return attrs

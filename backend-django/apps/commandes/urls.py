@@ -1,6 +1,7 @@
 from django.urls import path
 from .views import (
     ValiderPanierView,
+    SimulerFraisView,
     GroupeCommandeListView,
     CommandeListView,
     CommandeDetailView,
@@ -16,6 +17,7 @@ app_name = "commandes"
 
 urlpatterns = [
     path("valider-panier/", ValiderPanierView.as_view(), name="valider-panier"),
+    path("simuler-frais/", SimulerFraisView.as_view(), name="simuler-frais"),
     path("groupes/", GroupeCommandeListView.as_view(), name="groupe-list"),
 
     # --- Espace vendeur ---

@@ -36,7 +36,7 @@ commande livrée ──► gain « en attente » (fin = livraison + 7 jours)
 gain crédité ──► retour remboursé après le crédit → reprise plafonnée au solde (une fois par retour)
 ```
 
-- **1 point par tranche entière de 1 000 FCFA** du montant payé de la commande (remise déduite), par commande.
+- **1 point par tranche entière de 1 000 FCFA** du montant payé pour les articles de la commande (remise déduite), par commande. **Jamais sur les frais de livraison** ([`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md) § 9) : ni au gain, ni au recalcul après un retour (les frais rendus au client ne comptent pas comme des articles remboursés), ni à la reprise de points déjà crédités.
 - Une commande annulée (client, expiration, administration, boutique indisponible, livraison échouée) n'est jamais livrée : elle **n'a jamais de gain**.
 - **Crédit** : même moment que le reversement au vendeur devenu disponible (délai écoulé, aucun retour ni contestation ouverts), tâche `fidelite-crediter-points-echus` à la minute 15 de chaque heure (celle des reversements tourne à la minute 10).
 - **Idempotence** : un gain par commande (`OneToOne`), une transaction par (compte, type, référence) en base (gain : numéro de commande ; reprise : numéro de retour ; conversion : code du coupon). Le crédit se fait sous verrou du gain.

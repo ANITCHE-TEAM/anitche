@@ -114,9 +114,39 @@ La commande et la livraison restent « livrées » : la contestation fondée est
 - **Suspension** : `is_active=False` (Django admin) coupe tout accès, le jeton est refusé (401).
 - **Django admin** : le champ `livreur` ne propose que les livreurs actifs, applique la même règle (jamais le propriétaire), et l'assignation passe par le service (historique, journal). Seul le rôle admin peut modifier une fiche ; le statut n'y est jamais éditable.
 
-## 9. Frais de livraison — décision produit en attente
+## 9. Frais de livraison
 
-**Existant : aucun.** `montant_total` = produits − remise ; les seuls « frais » du code sont ceux du vendeur (commission). Seul `VarianteProduit.poids_kg` est prévu pour un calcul futur. Options présentées : forfait client par commune ou zone figé au checkout (modèle Jumia CI), frais absorbés par ANITCHE, frais à la charge du vendeur (déduits du reversement), formule mixte. **Étape séparée, après ce module** : elle touche `panier`, `commandes` et `paiements` (le montant payé).
+Mis en place en septembre 2026 (avant : aucun frais, `montant_total` = articles − remise). Code : `apps/livraison/frais.py` (tarif applicable, frais d'une commande), `apps/commandes/services.calculer_checkout` (seul calcul des montants du checkout), `apps/paiements/reversements.py` (livraison offerte), `apps/retours/services.frais_livraison_a_rembourser`.
+
+### Règles
+
+1. **Forfait par commune, payé par le client et figé au checkout ; la zone est déduite par le serveur, jamais déclarée par le client.** `TarifLivraison` : `zone` (`abidjan`, `hors_abidjan`), `commune` (vide = tarif par défaut de la zone), `montant` (FCFA entiers), `est_actif`. Les tarifs de commune de la zone `abidjan` forment la **liste des communes du district** (migration 0005, administrable) : Abobo, Adjamé, Attécoubé, Cocody, Koumassi, Marcory, Plateau, Port-Bouët, Treichville, Yopougon, Anyama, Bingerville, Songon. **Commune reconnue → zone `abidjan` ; toute autre → `hors_abidjan`**, figée dans `GroupeCommande.livraison_zone`. Tarif : celui de la commune s'il est actif, sinon le tarif par défaut de sa zone (une commune du district désactivée reste à Abidjan). Une ville hors Abidjan peut aussi avoir un tarif propre (ex. Grand-Bassam). La commune est comparée sans casse, accents, espaces ni ponctuation (« Port-Bouët » = « PORT BOUET » = « port-bouet ») ; **une commune n'a qu'un tarif, toutes zones confondues** (contrainte en base), pour qu'aucune zone ne soit ambiguë. Un champ `zone` envoyé au checkout est **ignoré**. Le poids n'est pas utilisé au lancement.
+2. **Une commande = un colis = des frais.** Un checkout de plusieurs boutiques paie des frais pour chaque commande.
+3. **Les frais reviennent à ANITCHE.** Ils ne sont jamais reversés au vendeur et ne portent aucune commission. Le coupon ne les réduit jamais (remise sur les articles seulement). Ils ne rapportent aucun point de fidélité.
+4. **Livraison offerte**, une option de la boutique (`Boutique.livraison_offerte`, réglée par le vendeur dans `ma-boutique/`) : le client ne paie rien, et le tarif est déduit du reversement du vendeur, **plafonné au net** de la commande. Si le tarif dépasse le net, le reste devient un `AjustementVendeur` (nature `livraison_offerte`) **une fois la commande livrée** : une commande annulée avant la livraison ne coûte rien au vendeur.
+5. **Retours** : pour un motif imputable au vendeur (article manquant, produit défectueux, non conforme), les frais payés sont rendus **en totalité, une fois par commande**, inclus dans `montant_remboursement` et facturés au vendeur (`AjustementVendeur`, nature `frais_livraison_retour`). Ils ne sont jamais rendus pour un changement d'avis, une mauvaise taille ou un autre motif. Une demande rejetée ou annulée ne compte pas : une demande suivante peut les inclure.
+
+**Annulation avant livraison, abandon, contestation « non reçu » fondée** : le remboursement porte sur tout `montant_total`, frais compris (inchangé). Une contestation fondée efface aussi le reste de livraison offerte **non encore déduit** d'un versement.
+
+| Commande | `frais_livraison` (payé par le client) | `livraison_offerte` | `frais_livraison_vendeur` (jamais montré au client) | Reversement |
+|---|---|---|---|---|
+| Livraison payée | tarif | `false` | 0 | inchangé (`montant_livraison` = 0) |
+| Livraison offerte | 0 | `true` | tarif | `montant_livraison` = min(tarif, net des articles), déduit du net |
+
+`Commande.montant_total` = articles − remise + `frais_livraison` : c'est le montant payé en ligne. `Commande.montant_hors_livraison` (propriété) sert de base aux points de fidélité et aux remboursements d'articles. Tout est figé dans la commande : modifier un tarif ou l'option de la boutique ne change jamais une commande passée.
+
+**Tarifs initiaux (migrations 0004 et 0005), provisoires** : Abidjan 1 500 (défaut et chacune des 13 communes), hors Abidjan 3 000 FCFA, à ajuster par l'équipe via l'API. Sans tarif par défaut actif pour la zone, la validation et la simulation répondent **503** (erreur de configuration journalisée) ; c'est pourquoi le tarif par défaut d'une zone ne peut pas être désactivé.
+
+### Endpoints
+
+| Méthode | Chemin | Accès | Détail |
+|---|---|---|---|
+| GET | `/api/livraison/tarifs/` | public (limite `catalogue_public`) | Menu déroulant du checkout, une requête SQL : `communes` (`commune`, `zone`, `montant` réellement appliqué : les 13 communes du district, et les villes hors Abidjan qui ont un tarif actif) et `autres_villes` (`zone` `hors_abidjan`, `montant` par défaut ; `null` sans tarif). Ex. : `{"communes": [{"commune": "Cocody", "zone": "abidjan", "montant": 1500}, …], "autres_villes": {"zone": "hors_abidjan", "montant": 3000}}` |
+| GET, POST | `/api/livraison/admin/tarifs/` | `EstAdministrateur` | Liste paginée ; création (`zone`, `commune`, `montant`, `est_actif?`). Un tarif de commune en zone `abidjan` **ajoute la commune au district** |
+| GET, PATCH | `/api/livraison/admin/tarifs/<uuid>/` | `EstAdministrateur` | Modification du `montant` et de `est_actif`. **400** : zone ou commune modifiée (créer un autre tarif), tarif par défaut désactivé, commune qui a déjà un tarif (quelle que soit sa zone), second tarif par défaut d'une zone, montant négatif. Pas de suppression (**405**) : on désactive |
+| POST | `/api/commandes/simuler-frais/` | client authentifié (limite `commande_simulation` 120/h) | Montants du checkout avant validation, voir [`MODULE_COMMANDES.md`](./MODULE_COMMANDES.md) § 3 |
+
+Création et modification des tarifs sont tracées (`modifie_par`, journal `securite`). Le Django admin les montre en lecture seule, comme les barèmes de frais vendeur.
 
 ## 10. Impact frontend
 
@@ -132,6 +162,7 @@ La commande et la livraison restent « livrées » : la contestation fondée est
 10. **Back-office** : liste des livreurs, nomination et retrait (avec les livraisons à réassigner), assignation avec date estimée, nouvelle tentative (`PATCH statut/` → `en_cours` sur une livraison échouée), abandon, contestations ouvertes (`?contestation=ouverte`) et décision.
 11. **Administration** : ne plus proposer de transitions libres (400 / 403, § 4).
 12. **Erreurs à prévoir** : **429** au-delà de 120 changements de statut par heure et par compte, ou de 10 contestations par heure.
+13. **Frais de livraison (§ 9).** Checkout : **ne plus demander la zone** (champ ignoré par le serveur). Menu déroulant des communes construit depuis `GET /api/livraison/tarifs/` (`communes`, avec le tarif de chacune), plus une entrée « Autre ville (hors Abidjan) » avec saisie libre de la ville au tarif `autres_villes`. Pour Abidjan, **toujours passer par le menu** : une saisie libre (« Riviera », « Le Plateau », « Abidjan ») n'est pas reconnue et part au tarif hors Abidjan. Afficher les montants et la `zone` déduite renvoyés par `POST /api/commandes/simuler-frais/` avant le paiement (frais par commande, « livraison offerte »). `adresse` contient `zone` (déduite). Back-office : écran des tarifs (`admin/tarifs/`), où l'ajout d'un tarif de commune en zone Abidjan étend le district.
 
 ## 11. Sécurité — failles corrigées (diagnostic de septembre 2026)
 
@@ -169,6 +200,7 @@ Vérifié et correct dès le diagnostic : `is_staff` sans rôle admin n'a aucun 
 - **livraison 0003** (données) : fiches des commandes déjà annulées (hors livrées) → `annulee`, avec une ligne d'historique `systeme`.
 - **commandes 0007** : motif `livraison_echouee`.
 - **paiements 0005** : motif de remboursement `livraison_non_recue`.
+- **Frais de livraison (§ 9)** : **livraison 0004** (`TarifLivraison` + tarifs initiaux provisoires), **commandes 0008** (`Commande.frais_livraison`, `livraison_offerte`, `frais_livraison_vendeur` ; `GroupeCommande.livraison_zone`), **vendeurs 0005** (`Boutique.livraison_offerte`), **livraison 0005** (communes du district d'Abidjan, une zone par commune, un défaut par zone), **retours 0004** (`DemandeRetour.frais_livraison_rembourses`), **paiements 0006** (`Reversement.montant_livraison` ; `AjustementVendeur.nature` et `commande`, un ajustement de chaque nature par commande). Les commandes existantes gardent 0 de frais et une zone vide.
 
 En dev : `docker exec anitche-backend python manage.py migrate`, puis **redémarrer le worker Celery** (`docker restart infra-celery-worker-1`) pour qu'il connaisse la tâche d'envoi du code.
 
@@ -185,11 +217,21 @@ docker exec -e DJANGO_SETTINGS_MODULE=config.settings.ci -e DB_NAME=anitche_test
 
 Suite complète : **578 tests, OK, aucun « skipped »** (26/09/2026).
 
+**Frais de livraison (§ 9)** — 41 tests : `livraison.TarifsDeLivraisonTests` (normalisation des communes, communes du district créées par migration, zone déduite de la commune, tarif applicable, commune désactivée restée à Abidjan, une zone par commune en base, livraison offerte, grille publique, administration réservée, traçabilité, validations, pas de suppression), `commandes.FraisDeLivraisonCheckoutTests` (frais par commande, commune d'Abidjan écrite de plusieurs façons → abidjan, ville hors Abidjan déclarée « abidjan » → tarif hors Abidjan et l'inverse, ville hors Abidjan avec tarif propre, tarif inactif, montants du client ignorés, 503 sans tarif, livraison offerte, frais figés, coupon sans effet sur les frais), `commandes.SimulationDuCheckoutTests` (mêmes montants que la validation, aucune écriture, part du vendeur jamais exposée, refus, limite dédiée), `paiements.FraisDeLivraisonFinancesTests` (frais hors reversement, livraison offerte déduite et plafonnée, reste dû après livraison seulement, annulation, contestation fondée, frais rendus pour un retour imputable au vendeur une fois par commande et facturés au vendeur, motifs sans frais, points de fidélité hors frais), `retours.RetoursConcurrenceTestCase` (deux demandes simultanées : frais rendus une seule fois, PostgreSQL), `vendeurs.MaBoutiqueAPITests` (option du vendeur). Tests existants adaptés : adresses sans zone, montants attendus frais compris (`FRAIS_ABIDJAN`), tarifs recréés dans les `TransactionTestCase` (`livraison.tests.recreer_tarifs_initiaux`, comme le barème). Suite complète : **728 tests, OK, aucun « skipped »** (27/09/2026).
+
+Postman : dossier **10. Frais de livraison** de `postman_livraison.json` (grille publique, administration des tarifs et refus, simulation, frais figés après changement de tarif, livraison offerte jusqu'au reversement, remises en état) ; plus de `zone` dans les checkouts des collections (et un scénario « zone abidjan déclarée pour une ville de l'intérieur → tarif hors Abidjan »), montants attendus frais compris (`postman_paiements.json`, `postman_retours.json`).
+
 Postman : `postman_livraison.json` (hors dépôt, reconstruite ; l'ancienne est archivée dans `postman_archives/`). Mise en place automatique (vendeur, produit, clients, livreur, codes via Mailpit). Parcours nominal : commande payée → préparation → nomination et assignation → expédiée → en cours → **code lu dans Mailpit, comparé à celui de l'app** → livrée. Scénarios de sécurité : IDOR, historique 404, sans code, faux code, régression par l'administration, masquage, vue vendeur, contestation, échec, nouvelle tentative, abandon et remboursement, annulation, retrait du livreur. `admin_password` à renseigner.
 
 ## 15. Dette connue
 
-- **Frais de livraison** : décision produit en attente (§ 9).
+- ~~**Frais de livraison**~~ : traités (§ 9). Restent :
+  - ~~**Zone déclarée par le client**~~ : corrigé, la zone est déduite de la commune par le serveur (liste des communes du district).
+  - **Commune saisie librement** : une commune d'Abidjan mal nommée (« Le Plateau », un quartier comme « Riviera », « Abidjan ») n'est pas reconnue et paie le tarif hors Abidjan. Le risque est pour le client, pas pour ANITCHE ; le menu déroulant du front l'évite. Des alias (quartier → commune) seraient l'étape suivante si des erreurs apparaissent.
+  - **Brofodoumé** : sous-préfecture du district d'Abidjan, mais pas commune ; hors de la liste (tarif hors Abidjan), à ajouter par l'administration si ANITCHE y livre au tarif d'Abidjan.
+  - **Poids et volume** ignorés (forfait par colis) ; `VarianteProduit.poids_kg` reste disponible pour un tarif au poids.
+  - **Frais de renvoi du colis** lors d'un retour : toujours non modélisés ([`MODULE_RETOURS.md`](./MODULE_RETOURS.md)).
+  - **Reste de livraison offerte déjà déduit d'un versement, puis contestation fondée** : pas d'avoir automatique au vendeur ; journalisé (`securite`) pour une régularisation manuelle.
 - **SMS du code** : email seulement au lancement (Mailpit en dev) ; brancher un fournisseur SMS (client sans email consulté).
 - **KYC livreur** : aucun dossier d'identité pour les livreurs, nommés par l'administration ; à prévoir avant de faire appel à des livreurs indépendants.
 - **Changement de rôle par le Django admin des utilisateurs** : le champ `role` y reste libre (module `utilisateurs`). Un vendeur passé livreur par ce biais ne peut toujours pas livrer sa propre commande (contrôle à chaque transition), mais la règle « jamais un vendeur » n'est garantie que par l'API de nomination.
@@ -225,6 +267,19 @@ Postman : `postman_livraison.json` (hors dépôt, reconstruite ; l'ancienne est 
 
 - Une seule source de vérité : une commande annulée ne peut plus avoir de livraison active, et une livraison déjà partie **bloque** l'annulation au lieu d'être oubliée.
 - Même transaction, donc pas d'état intermédiaire visible, et verrou pris sur la fiche avant la commande, dans le même ordre que les transitions de livraison.
+
+### Pourquoi un forfait par zone et commune, figé dans la commande
+
+- C'est le modèle le plus lisible pour le client (option « forfait par commune ou zone, type Jumia CI » de l'étude initiale) : un prix connu avant de payer, qui dépend de l'endroit où il se fait livrer. Le poids demanderait des données produit fiables que les vendeurs ne renseignent pas encore.
+- La zone n'est jamais demandée au client : déclarée, elle permettait de payer le tarif d'Abidjan pour une livraison à l'intérieur. Le serveur la déduit d'une liste fermée (les communes du district) ; tout ce qui n'y est pas est hors Abidjan, le cas le plus cher : aucune erreur de saisie ne fait payer moins. La liste vit dans `TarifLivraison` (pas de modèle de plus) : ajouter une commune au district, c'est lui créer un tarif en zone Abidjan.
+- Champ `zone` envoyé : **ignoré** plutôt que refusé. C'est le plus simple, les anciens appels continuent de fonctionner, et la zone réellement appliquée est renvoyée par la simulation.
+- Figer le tarif dans la commande garantit que le montant payé, remboursé ou reversé ne change jamais quand l'équipe ajuste la grille.
+- Un seul calcul (`calculer_checkout`) sert à la simulation et à la validation : le client ne voit jamais un montant différent de celui qu'il paie.
+
+### Pourquoi plafonner la livraison offerte au net, et le reste seulement après la livraison
+
+- Un reversement négatif n'a pas de sens (on ne « verse » pas une dette). Le reste est traité comme les retours après versement : un ajustement déduit des prochains reversements de la boutique.
+- Tant que la commande n'est pas livrée, rien n'est dû : une annulation ne doit pas coûter au vendeur une livraison qui n'a pas eu lieu.
 
 ### Pourquoi masquer les coordonnées du client une fois la livraison terminée
 

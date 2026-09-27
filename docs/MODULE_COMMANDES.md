@@ -25,8 +25,8 @@ Aucun appel frontend à ce jour.
 
 ## 2. Modèle
 
-- **`GroupeCommande`** : un checkout (une commande par boutique du panier) et **l'adresse de livraison** : `livraison_commune`, `livraison_quartier`, `livraison_point_de_repere`, `livraison_telephone` (téléphone choisi par le client pour cette livraison, visible par le vendeur et le livreur ; jamais celui du profil).
-- **`Commande`** : une boutique, un client, `numero_commande` (`CMD-<année>-<8 hex>`, nouvel essai en cas de collision, format inchangé), `status`, `motif_annulation` (`client`, `expiration`, `administration`, `boutique_indisponible`), `montant_total`, `coupon_code`, `montant_remise`.
+- **`GroupeCommande`** : un checkout (une commande par boutique du panier) et **l'adresse de livraison** : `livraison_zone` (zone tarifaire, vide pour les groupes antérieurs aux frais de livraison), `livraison_commune`, `livraison_quartier`, `livraison_point_de_repere`, `livraison_telephone` (téléphone choisi par le client pour cette livraison, visible par le vendeur et le livreur ; jamais celui du profil).
+- **`Commande`** : une boutique, un client, `numero_commande` (`CMD-<année>-<8 hex>`, nouvel essai en cas de collision, format inchangé), `status`, `motif_annulation` (`client`, `expiration`, `administration`, `boutique_indisponible`), `montant_total` (articles − remise + frais de livraison : le montant payé), `coupon_code`, `montant_remise`, **frais de livraison figés** : `frais_livraison`, `livraison_offerte`, `frais_livraison_vendeur` (jamais exposé au client), voir [`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md) § 9.
   - `client` et `boutique` en **PROTECT** : un historique de vente ne disparaît jamais avec un compte ou une boutique.
 - **`CommandeItem`** : `nom_produit`, `prix_unitaire`, `quantite` figés au checkout ; `variante` en PROTECT. **Frais vendeur figés** au checkout (migration 0006) : `taux_commission`, `frais_fixe_unitaire`, `montant_commission`, `montant_frais_fixes`, `montant_net_vendeur` — jamais exposés au client.
 
@@ -36,7 +36,8 @@ Aucun appel frontend à ce jour.
 
 | Méthode | URL | Description |
 |---|---|---|
-| POST | `valider-panier/` | + `EmailVerifie`, limite `commande_validation` 20/h par compte. Corps : `adresse_livraison` **obligatoire** (§ 3 bis), `coupon_code?`. Crée une commande par boutique, réserve le stock, vide le panier. **201**, liste des commandes créées |
+| POST | `valider-panier/` | + `EmailVerifie`, limite `commande_validation` 20/h par compte. Corps : `adresse_livraison` **obligatoire** (§ 3 bis), `coupon_code?`. Crée une commande par boutique (frais de livraison compris), réserve le stock, vide le panier. **201**, liste des commandes créées (avec `frais_livraison`, `livraison_offerte`). **503** sans tarif de livraison ou barème en vigueur |
+| POST | `simuler-frais/` | Limite `commande_simulation` 120/h par compte (elle accepte un code promo : sans limite dédiée, elle servirait à essayer des codes). Même corps que `valider-panier/`. **Aucune écriture** (ni stock, ni coupon). **200** : `zone` (déduite de la commune), `commandes` (par boutique : `boutique`, `boutique_nom`, `montant_articles`, `remise`, `frais_livraison`, `livraison_offerte`, `montant_total`), `total_articles`, `total_remise`, `total_frais_livraison`, `total_a_payer` (FCFA entiers). **400** : panier vide, article indisponible, coupon non valable, adresse invalide. **503** : aucun tarif. Même calcul que la validation (`services.calculer_checkout`) |
 | GET | `groupes/` | Groupes du client, avec `adresse_livraison` |
 | GET | `` | Liste paginée des commandes du client |
 | GET | `<uuid>/` | Détail **avec `articles` et `adresse_livraison`** |
@@ -54,7 +55,7 @@ Aucun appel frontend à ce jour.
 }
 ```
 
-Les quatre champs sont obligatoires (400 sinon, aucune commande créée) : `commune` ≤ 100, `quartier` ≤ 150, `point_de_repere` ≤ 500 caractères, `telephone` 8 à 15 chiffres (« + » initial accepté, espaces, points et tirets retirés). Le paiement reprend cette adresse ; plus aucune adresse par défaut.
+Les quatre champs sont obligatoires (400 sinon, aucune commande créée) : `commune` ≤ 100 (fixe le tarif de livraison ; choisie dans la liste de `GET /api/livraison/tarifs/` pour Abidjan), `quartier` ≤ 150, `point_de_repere` ≤ 500 caractères, `telephone` 8 à 15 chiffres (« + » initial accepté, espaces, points et tirets retirés). Le paiement reprend cette adresse ; plus aucune adresse par défaut. **La zone tarifaire n'est pas envoyée** : le serveur la déduit de la commune (commune du district d'Abidjan → `abidjan`, sinon `hors_abidjan`) et la fige dans le groupe ; un champ `zone` envoyé est ignoré. Les représentations d'adresse (`adresse_livraison` des commandes et groupes, `adresse` des livraisons) contiennent la `zone` déduite.
 
 ### Vendeur (`IsAuthenticated` + `EstVendeurValide` ; commandes de **sa** boutique, 404 sinon)
 
@@ -64,7 +65,7 @@ Les quatre champs sont obligatoires (400 sinon, aucune commande créée) : `comm
 | GET | `vendeur/<uuid>/` | Détail |
 | POST | `vendeur/<uuid>/preparation/` | `confirmee` → `preparation`. **409** depuis un autre statut. Boutique suspendue : **403** sauf si la commande est déjà payée |
 
-Représentation vendeur : `id`, `numero_commande`, `created_at`, `status`, `motif_annulation`, `montant_total`, `montant_remise`, `articles` (`nom_produit`, `variante`, `prix_unitaire`, `quantite`), `client` (**prénom + initiale du nom**, ex. « Awa K. »), `adresse_livraison` (commune, quartier, point de repère, téléphone de livraison). **Jamais** l'email ni le téléphone du profil du client. Une commande ne concerne qu'une boutique : un vendeur ne voit jamais les articles d'un autre vendeur.
+Représentation vendeur : `id`, `numero_commande`, `created_at`, `status`, `motif_annulation`, `montant_total`, `montant_remise`, `frais_livraison`, `livraison_offerte`, `frais_livraison_vendeur` (ce que la livraison offerte déduit de son reversement), `articles` (`nom_produit`, `variante`, `prix_unitaire`, `quantite`), `client` (**prénom + initiale du nom**, ex. « Awa K. »), `adresse_livraison` (commune, quartier, point de repère, téléphone de livraison). **Jamais** l'email ni le téléphone du profil du client. Une commande ne concerne qu'une boutique : un vendeur ne voit jamais les articles d'un autre vendeur.
 
 ### Administration (`IsAuthenticated` + `EstAdministrateur`)
 
@@ -80,6 +81,7 @@ Représentation vendeur : `id`, `numero_commande`, `created_at`, `status`, `moti
 - Le **prix est figé** dans `CommandeItem` au checkout (prix effectif, promo comprise) : une commande passée ne change jamais de prix.
 - **FCFA entiers** : la remise d'un coupon est arrondie **au franc inférieur** (le client ne paie jamais plus qu'annoncé, écart < 1 FCFA), puis répartie entre les boutiques **en francs entiers** au prorata de leur montant (la dernière absorbe le reste : la somme des parts égale exactement la remise).
 - **Frais vendeur** : à la validation du panier, le barème en vigueur de chaque boutique (offre de lancement, sinon barème de la plateforme : 12 % + 200 FCFA par article par défaut) est appliqué **ligne par ligne et figé** dans le `CommandeItem`. La commission porte sur le prix **avant remise** : un coupon est supporté par ANITCHE, jamais par le vendeur. Changer le barème ne modifie jamais une vente passée. Sans barème en vigueur, la validation répond **503** (erreur de configuration journalisée). Détail : [`MODULE_PAIEMENTS.md`](./MODULE_PAIEMENTS.md) § 5.
+- **Frais de livraison** : un tarif par commande selon la commune (zone déduite par le serveur), figé dans la commande ; payé par le client, ou offert par la boutique (déduit de son reversement). Jamais réduits par le coupon. Détail : [`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md) § 9.
 
 ## 5. Cycle de vie
 
@@ -127,6 +129,7 @@ Tout le reste est refusé (**409**) : retour arrière, saut d'étape, sortie d'u
 5. **Espace vendeur.** `GET /api/commandes/vendeur/`, `GET /api/commandes/vendeur/<id>/`, `POST /api/commandes/vendeur/<id>/preparation/` (réponses au § 3).
 6. **Statuts désormais utilisés.** `creee` (en attente de paiement, **annulée automatiquement après 30 minutes**), `confirmee`, `preparation`, `expediee`, `livree`, `annulee` (+ `motif_annulation` : `client`, `expiration`, `administration`, `boutique_indisponible`). Afficher un compte à rebours de paiement sur une commande `creee`.
 7. **Livraison.** `GET /api/livraison/…` expose `telephone_contact`. Faire passer une livraison « expédiée » avant que le vendeur ait mis la commande en préparation renvoie **409**.
+8. **Frais de livraison (changement de contrat, septembre 2026).** Ne **pas** envoyer de zone (ignorée) : proposer la commune dans un menu déroulant construit depuis `GET /api/livraison/tarifs/` (communes du district d'Abidjan et leur tarif), plus « Autre ville » en saisie libre ; la zone réellement appliquée revient dans la simulation et dans `adresse_livraison.zone`. Appeler `POST /api/commandes/simuler-frais/` à chaque changement d'adresse ou de coupon et afficher les montants par commande avant le paiement. `montant_total` inclut désormais les frais ; nouveaux champs `frais_livraison` et `livraison_offerte` (badge « Livraison offerte »).
 
 ## 10. Dette connue
 
@@ -149,6 +152,8 @@ DJANGO_SETTINGS_MODULE=config.settings.ci DB_NAME=anitche_test DB_USER=postgres 
 
 `apps/commandes/tests.py` — 53 tests (adaptés au module paiements : paiement en ligne au lieu du paiement à la livraison, `Remboursement` au lieu du statut « à rembourser » ; frais figés testés dans `apps/paiements/tests.py`, `FraisTests`). Refonte : adresse (obligatoire, complète, téléphone valide, reprise par le paiement, livraison et téléphone de contact, paiement refusé sans adresse), montants (serveur, prix figé avec promo, remise et répartition en francs entiers), annulation client (stock restitué une fois, remboursement à traiter + alerte admin, 409 après préparation, 404 pour un autre client), expiration (30 min, une seule restitution, commandes confirmées épargnées, paiement tardif : commande non réactivée, remboursement, alerte), machine à états (parcours complet, synchronisation depuis la livraison, pas de saut ni de retour arrière), espace vendeur (isolation, données minimales, accès, boutique suspendue et commandes payées, N+1), boutique indisponible au paiement (commande seule et groupe), annulation par l'administration, détail avec articles, collision de numéro, PROTECT, concurrence (double validation, double annulation).
 
+**Frais de livraison** : `FraisDeLivraisonCheckoutTests` et `SimulationDuCheckoutTests` (détail : [`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md) § 14) ; les montants attendus des tests existants incluent le tarif Abidjan de la migration (`FRAIS_ABIDJAN`).
+
 Postman : `postman_commandes.json` (hors dépôt) — connexions, remise en état (admin), préparation, parcours client (checkout avec adresse, **paiement en ligne simulé** : initiation puis notification signée du fournisseur simulé), parcours vendeur (préparation), annulation, scénarios de sécurité, nettoyage. Rejouable ; `admin_password` à renseigner. `postman_panier.json` et `postman_paiements.json` envoient désormais l'adresse au checkout.
 
 ## 12. Migrations
@@ -157,5 +162,6 @@ Postman : `postman_commandes.json` (hors dépôt) — connexions, remise en éta
 - **paiements 0002** : statut `a_rembourser` ; `adresse_livraison` sans valeur par défaut fictive.
 - **commandes 0006** : frais vendeur figés sur `CommandeItem` (ventes passées : aucun frais, net = prix de la ligne).
 - **paiements 0003 / 0004** : refonte du module paiements (voir [`MODULE_PAIEMENTS.md`](./MODULE_PAIEMENTS.md) § 13) ; les paiements « à la livraison » encore actifs passent annulés.
+- **commandes 0008** : frais de livraison figés sur `Commande` (0 pour l'existant) et `GroupeCommande.livraison_zone` (vide pour l'existant). Voir [`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md) § 13.
 
 Base de dev avant application : 2 commandes `creee` anciennes (sans adresse), 0 paiement. Elles seront annulées par la tâche d'expiration — le service `celery-beat` de dev doit être redémarré pour charger la nouvelle planification.

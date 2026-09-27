@@ -20,7 +20,12 @@ class CommandeAdmin(admin.ModelAdmin):
     # — jamais par une édition libre dans l'admin, qui contournerait tout
     # contrôle de paiement (même principe que F-14 sur Paiement.statut et
     # F-15 sur Livraison.status, déjà verrouillés ailleurs dans le projet).
-    readonly_fields = ("id", "numero_commande", "status", "montant_total", "created_at", "update_at")
+    # Frais de livraison figés au checkout : inclus dans le montant payé et
+    # dans le reversement (livraison offerte), jamais modifiables après coup.
+    readonly_fields = (
+        "id", "numero_commande", "status", "montant_total", "frais_livraison", "livraison_offerte",
+        "frais_livraison_vendeur", "created_at", "update_at",
+    )
     inlines = [CommandeItemInline]
 
 

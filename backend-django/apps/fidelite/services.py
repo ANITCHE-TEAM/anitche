@@ -1,6 +1,7 @@
 """Points de fidélité et coupons (docs/MODULE_FIDELITE.md).
 
-Points : 1 point par tranche de 1 000 FCFA payés, par commande.
+Points : 1 point par tranche de 1 000 FCFA payés pour les articles, par
+commande (jamais sur les frais de livraison).
 
     commande livrée ──► gain « en attente » (fin = livraison + délai de rétractation)
         │   retour remboursé pendant l'attente → points recalculés sur ce qui reste payé
@@ -59,7 +60,9 @@ def _deja_credite_au_paiement(commande):
 def ouvrir_gain(commande, moment=None):
     """Commande livrée : points « en attente » jusqu'à la fin du délai de
     rétractation. Idempotent (un gain par commande)."""
-    points = points_pour(commande.montant_total)
+    # Jamais de points sur les frais de livraison : seulement sur ce que
+    # le client a payé pour les articles (remise déduite).
+    points = points_pour(commande.montant_hors_livraison)
     if points <= 0 or GainFidelite.objects.filter(commande=commande).exists() or _deja_credite_au_paiement(commande):
         return None
     moment = moment or timezone.now()
@@ -82,12 +85,19 @@ def annuler_gain(commande, motif):
     )
 
 
+def _articles_rembourses(demande_retour):
+    """Part du remboursement d'un retour qui porte sur les articles (hors
+    frais de livraison, qui n'ont jamais rapporté de points)."""
+    return (demande_retour.montant_remboursement or Decimal("0")) - demande_retour.frais_livraison_rembourses
+
+
 def _montant_rembourse_par_retours(commande):
     from apps.retours.models import DemandeRetour
 
-    return DemandeRetour.objects.filter(
+    totaux = DemandeRetour.objects.filter(
         commande=commande, statut__in=(DemandeRetour.Statut.REMBOURSE, DemandeRetour.Statut.CLOTURE),
-    ).aggregate(total=Sum("montant_remboursement"))["total"] or Decimal("0")
+    ).aggregate(total=Sum("montant_remboursement"), frais=Sum("frais_livraison_rembourses"))
+    return (totaux["total"] or Decimal("0")) - (totaux["frais"] or Decimal("0"))
 
 
 def appliquer_retour_rembourse(demande_retour):
@@ -100,7 +110,7 @@ def appliquer_retour_rembourse(demande_retour):
         if gain is None:
             return
         if gain.statut == Statut.EN_ATTENTE:
-            restant = points_pour(commande.montant_total - _montant_rembourse_par_retours(commande))
+            restant = points_pour(commande.montant_hors_livraison - _montant_rembourse_par_retours(commande))
             if restant <= 0:
                 # Tout est remboursé : le gain est annulé (points gardés pour l'historique).
                 gain.statut = Statut.ANNULE
@@ -111,7 +121,7 @@ def appliquer_retour_rembourse(demande_retour):
             gain.save(update_fields=["points", "statut", "motif_annulation", "date_traitement"])
             return
         if gain.statut == Statut.CREDITE:
-            _reprendre_points(gain.compte, points_pour(demande_retour.montant_remboursement), demande_retour.numero_retour)
+            _reprendre_points(gain.compte, points_pour(_articles_rembourses(demande_retour)), demande_retour.numero_retour)
 
 
 def _reprendre_points(compte, points, reference):

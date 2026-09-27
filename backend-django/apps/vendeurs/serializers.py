@@ -22,7 +22,7 @@ class BoutiquePubliqueSerializer(serializers.ModelSerializer):
         model = Boutique
         fields = [
             'id', 'nom', 'slug', 'description', 'logo', 'banniere',
-            'ville', 'telephone_contact', 'email_contact', 'date_creation',
+            'ville', 'telephone_contact', 'email_contact', 'livraison_offerte', 'date_creation',
         ]
         read_only_fields = fields
 
@@ -43,7 +43,7 @@ class BoutiqueSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'nom', 'slug', 'description', 'logo', 'banniere',
             'telephone_contact', 'email_contact', 'adresse', 'ville',
-            'est_active', 'est_suspendue', 'est_publiable', 'proprietaire_email',
+            'est_active', 'est_suspendue', 'est_publiable', 'livraison_offerte', 'proprietaire_email',
             'date_creation', 'date_mise_a_jour',
         ]
         read_only_fields = [

@@ -80,6 +80,13 @@ class Boutique(models.Model):
             "et le vendeur ne peut pas la lever lui-même."
         ),
     )
+    # Option du vendeur : le client ne paie pas la livraison, son tarif est
+    # déduit du reversement du vendeur (apps.livraison.frais). Figée dans
+    # chaque commande au checkout.
+    livraison_offerte = models.BooleanField(
+        default=False,
+        help_text="Livraison offerte au client : les frais sont déduits du reversement du vendeur.",
+    )
 
     date_creation = models.DateTimeField(auto_now_add=True)
     date_mise_a_jour = models.DateTimeField(auto_now=True)

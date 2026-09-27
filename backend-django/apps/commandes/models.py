@@ -62,6 +62,9 @@ class Commande(models.Model):
         related_name="commande_client"
     )
 
+    # Ce que le client paie pour cette commande : articles − remise +
+    # frais_livraison (FCFA entiers). Somme payée en ligne, et montant
+    # remboursé quand la commande est annulée.
     montant_total = models.DecimalField(max_digits=12, decimal_places=2)
     # F-10 : trace, par commande (donc par boutique), le coupon appliqué au
     # panier et la part de remise qui lui revient. Un coupon s'applique au
@@ -71,6 +74,14 @@ class Commande(models.Model):
     # ValiderPanierView). Vide si aucun coupon n'a été utilisé.
     coupon_code = models.CharField(max_length=30, blank=True)
     montant_remise = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    # Frais de livraison figés au checkout (apps.livraison.frais) : une
+    # commande = un colis = des frais. Ils reviennent à ANITCHE, jamais au
+    # vendeur. Livraison offerte par la boutique : le client ne paie rien
+    # (frais_livraison = 0) et le tarif est déduit du reversement du vendeur
+    # (frais_livraison_vendeur, jamais exposé au client).
+    frais_livraison = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    livraison_offerte = models.BooleanField(default=False)
+    frais_livraison_vendeur = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     update_at = models.DateTimeField(auto_now=True)
 
@@ -79,6 +90,12 @@ class Commande(models.Model):
 
     def __str__(self):
         return f"Commande de {self.client.email} — {self.created_at.strftime('%d/%m/%Y')}"
+
+    @property
+    def montant_hors_livraison(self):
+        """Ce que le client paie pour les articles (remise déduite) : base
+        des points de fidélité et des remboursements de retour."""
+        return self.montant_total - self.frais_livraison
 
     def save(self, *args, **kwargs):
         if self.numero_commande:
@@ -119,6 +136,9 @@ class GroupeCommande(models.Model):
     # Choisi par le client pour cette livraison : visible par le vendeur
     # et le livreur (jamais le téléphone du profil).
     livraison_telephone = models.CharField(max_length=20, blank=True)
+    # Zone tarifaire (apps.livraison.models.TarifLivraison.Zone), vide pour
+    # les groupes créés avant les frais de livraison.
+    livraison_zone = models.CharField(max_length=20, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     @property

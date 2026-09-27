@@ -59,7 +59,8 @@ class ReversementAdmin(LectureSeuleAdmin):
 
 @admin.register(AjustementVendeur)
 class AjustementVendeurAdmin(LectureSeuleAdmin):
-    list_display = ("boutique", "montant", "motif", "reversement_impute", "date_creation")
+    list_display = ("boutique", "nature", "montant", "motif", "reversement_impute", "date_creation")
+    list_filter = ("nature",)
 
 
 @admin.register(BaremeFrais)

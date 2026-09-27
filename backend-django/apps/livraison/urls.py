@@ -13,6 +13,9 @@ from .views import (
     NommerLivreurView,
     ResoudreContestationView,
     RetirerLivreurView,
+    TarifLivraisonDetailView,
+    TarifLivraisonListCreateView,
+    TarifLivraisonPublicListView,
 )
 
 app_name = "livraison"
@@ -23,6 +26,11 @@ urlpatterns = [
     # --- Espace vendeur (lecture seule) ---
     path("vendeur/", LivraisonVendeurListView.as_view(), name="vendeur-livraison-list"),
     path("vendeur/<uuid:pk>/", LivraisonVendeurDetailView.as_view(), name="vendeur-livraison-detail"),
+
+    # --- Frais de livraison ---
+    path("tarifs/", TarifLivraisonPublicListView.as_view(), name="tarif-list"),
+    path("admin/tarifs/", TarifLivraisonListCreateView.as_view(), name="admin-tarif-list"),
+    path("admin/tarifs/<uuid:pk>/", TarifLivraisonDetailView.as_view(), name="admin-tarif-detail"),
 
     # --- Administration : livreurs ---
     path("livreurs/", LivreurListView.as_view(), name="livreur-list"),

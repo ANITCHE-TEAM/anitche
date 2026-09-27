@@ -1,6 +1,7 @@
 import re
 
 from rest_framework import serializers
+
 from .models import Commande, GroupeCommande, CommandeItem
 
 
@@ -10,7 +11,10 @@ class AdresseLivraisonSerializer(serializers.Serializer):
     Structurée pour la Côte d'Ivoire : commune, quartier et point de repère
     (les adresses postales y sont rares, le livreur se guide aux repères),
     plus un téléphone joignable pour cette livraison, choisi par le client
-    (visible par le vendeur et le livreur).
+    (visible par le vendeur et le livreur). La commune fixe le tarif de
+    livraison. La zone n'est jamais demandée au client : le serveur la
+    déduit de la commune (apps.livraison.frais) ; un champ `zone` envoyé est
+    ignoré, sinon un client paierait le tarif d'Abidjan pour l'intérieur.
     """
 
     commune = serializers.CharField(max_length=100)
@@ -29,6 +33,7 @@ def adresse_du_groupe(groupe):
     if groupe is None or not groupe.a_une_adresse:
         return None
     return {
+        "zone": groupe.livraison_zone,
         "commune": groupe.livraison_commune,
         "quartier": groupe.livraison_quartier,
         "point_de_repere": groupe.livraison_point_de_repere,
@@ -41,7 +46,8 @@ class CommandeSerializer(serializers.ModelSerializer):
         model = Commande
         fields = [
             "id", "numero_commande","groupe", "boutique", "status", "motif_annulation",
-            "client","montant_total", "coupon_code", "montant_remise", "created_at", "update_at"
+            "client","montant_total", "coupon_code", "montant_remise",
+            "frais_livraison", "livraison_offerte", "created_at", "update_at"
             ]
         read_only_fields = fields
 
@@ -103,7 +109,8 @@ class CommandeVendeurSerializer(serializers.ModelSerializer):
         model = Commande
         fields = [
             "id", "numero_commande", "created_at", "status", "motif_annulation",
-            "montant_total", "montant_remise", "articles", "client", "adresse_livraison",
+            "montant_total", "montant_remise", "frais_livraison", "livraison_offerte",
+            "frais_livraison_vendeur", "articles", "client", "adresse_livraison",
         ]
         read_only_fields = fields
 
@@ -115,3 +122,10 @@ class CommandeVendeurSerializer(serializers.ModelSerializer):
 
     def get_adresse_livraison(self, commande):
         return adresse_du_groupe(commande.groupe)
+
+
+class SimulerFraisSerializer(serializers.Serializer):
+    """Entrée de la simulation du checkout (mêmes champs que la validation)."""
+
+    adresse_livraison = AdresseLivraisonSerializer()
+    coupon_code = serializers.CharField(max_length=30, required=False, allow_blank=True)

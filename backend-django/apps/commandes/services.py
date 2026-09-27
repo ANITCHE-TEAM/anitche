@@ -19,7 +19,9 @@ pas l'appliquer deux fois (une annulation ne restitue le stock qu'une fois).
 """
 
 import logging
+from dataclasses import dataclass, field
 from datetime import timedelta
+from decimal import ROUND_DOWN, Decimal
 
 from django.conf import settings
 from django.db import transaction
@@ -61,6 +63,144 @@ SYNCHRONISATION_LIVRAISON = {
 
 class TransitionImpossible(Exception):
     """La commande n'est pas dans un statut qui permet cette transition."""
+
+
+# =====================================================================
+# MONTANTS DU CHECKOUT
+# =====================================================================
+
+class CheckoutRefuse(Exception):
+    """Panier ou coupon qui ne permet pas de commander (400). `detail` :
+    message ou dictionnaire {champ: message}, repris tel quel par la vue."""
+
+    def __init__(self, detail):
+        super().__init__(detail)
+        self.detail = detail
+
+
+@dataclass
+class LotBoutique:
+    """Une future commande : les articles d'une boutique et leurs montants."""
+
+    boutique: object
+    items: list
+    montant_articles: Decimal
+    remise: Decimal = Decimal("0")
+    frais_livraison: Decimal = Decimal("0")
+    livraison_offerte: bool = False
+    frais_livraison_vendeur: Decimal = Decimal("0")
+
+    @property
+    def montant_total(self):
+        return self.montant_articles - self.remise + self.frais_livraison
+
+
+@dataclass
+class Checkout:
+    lots: list = field(default_factory=list)
+    # Zone tarifaire déduite de la commune (figée dans GroupeCommande).
+    zone: str = ""
+
+    def _somme(self, attribut):
+        return sum((getattr(lot, attribut) for lot in self.lots), Decimal("0"))
+
+    @property
+    def total_articles(self):
+        return self._somme("montant_articles")
+
+    @property
+    def total_remise(self):
+        return self._somme("remise")
+
+    @property
+    def total_frais_livraison(self):
+        return self._somme("frais_livraison")
+
+    @property
+    def total_a_payer(self):
+        return self._somme("montant_total")
+
+
+def trouver_coupon(code, verrouiller=False):
+    """Coupon saisi (insensible à la casse), ou None sans code. Verrouillé
+    pendant la validation du panier : il ne peut être consommé qu'une fois."""
+    from apps.fidelite.models import CouponReduction
+
+    code = str(code or "").strip()
+    if not code:
+        return None
+    coupons = CouponReduction.objects.select_for_update() if verrouiller else CouponReduction.objects
+    coupon = coupons.filter(code__iexact=code).first()
+    if coupon is None:
+        raise CheckoutRefuse({"coupon_code": f"Le code promo '{code}' n'existe pas."})
+    return coupon
+
+
+def calculer_checkout(items, adresse, client, coupon=None):
+    """Montants de chaque future commande (une par boutique), calculés côté
+    serveur. Seule source de ces montants : la validation du panier les
+    enregistre, la simulation les affiche avant le paiement.
+
+    - remise du coupon : sur les articles seulement (jamais sur les frais),
+      arrondie au franc inférieur et répartie en francs entiers au prorata
+      de chaque boutique, la dernière absorbant le reste ;
+    - frais de livraison : un tarif par commande selon la commune, dont la
+      zone est déduite par le serveur (apps.livraison.frais), payés par le
+      client ou offerts par la boutique.
+
+    Lève CheckoutRefuse (panier vide, articles indisponibles, coupon non
+    valable) ou apps.livraison.frais.TarifIntrouvable (configuration).
+    """
+    from apps.livraison.frais import frais_de_la_commande, tarif_applicable
+
+    if not items:
+        raise CheckoutRefuse("Le panier est vide.")
+
+    # Une variante retirée de la vente, un produit désactivé, ou une
+    # boutique suspendue entre l'ajout au panier et le paiement ne peuvent
+    # jamais être commandés (PanierItem.est_disponible, même règle que
+    # l'API panier). Toutes les lignes concernées sont listées, pour que
+    # le client les retire en une fois.
+    items_non_achetables = [item for item in items if not item.est_disponible]
+    if items_non_achetables:
+        libelles = ", ".join(
+            f"{item.variante.produit.nom} ({item.variante.nom})" for item in items_non_achetables
+        )
+        raise CheckoutRefuse(
+            f"Ces articles ne sont plus disponibles à la vente : {libelles}. "
+            "Retirez-les du panier pour valider la commande."
+        )
+
+    lots = {}
+    for item in items:
+        boutique = item.variante.produit.boutique
+        lot = lots.setdefault(boutique, LotBoutique(boutique=boutique, items=[], montant_articles=Decimal("0.00")))
+        lot.items.append(item)
+        lot.montant_articles += item.prix_unitaire * item.quantite
+    checkout = Checkout(lots=list(lots.values()))
+
+    if coupon is not None:
+        total_articles = checkout.total_articles
+        valide, message = coupon.est_valide_pour(client, total_articles)
+        if not valide:
+            raise CheckoutRefuse({"coupon_code": message})
+        remise_totale = coupon.calculer_remise(total_articles)
+        remise_cumulee = Decimal("0")
+        for index, lot in enumerate(checkout.lots):
+            if index == len(checkout.lots) - 1:
+                lot.remise = remise_totale - remise_cumulee
+            else:
+                lot.remise = (remise_totale * lot.montant_articles / total_articles).quantize(
+                    Decimal("1"), rounding=ROUND_DOWN,
+                )
+                remise_cumulee += lot.remise
+
+    applicable = tarif_applicable(adresse["commune"])
+    checkout.zone = applicable.zone
+    for lot in checkout.lots:
+        for attribut, valeur in frais_de_la_commande(lot.boutique, applicable.tarif).items():
+            setattr(lot, attribut, valeur)
+    return checkout
 
 
 def _transitionner(commande, nouveau_statut, depuis, **champs):

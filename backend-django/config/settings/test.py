@@ -48,6 +48,7 @@ REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {
     'kyc': '100000/day',
     'boutique_creation': '100000/day',
     'commande_validation': '100000/day',
+    'commande_simulation': '100000/day',
     'coupon_verification': '100000/day',
     'fidelite_conversion': '100000/day',
     'logout': '100000/day',
