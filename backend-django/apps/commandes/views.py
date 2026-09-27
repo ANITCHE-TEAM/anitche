@@ -3,7 +3,7 @@ import logging
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.shortcuts import get_object_or_404
-from rest_framework import generics
+from rest_framework import generics, serializers
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -76,11 +76,18 @@ class ValiderPanierView(APIView):
     throttle_scope = 'commande_validation'
 
     def post(self, request):
+        # Le corps doit être un objet JSON. Un Serializer sans champ ne vérifie
+        # que cela, avec les messages de la simulation (non_field_errors) : une
+        # liste, une chaîne ou null répondaient 500 (request.data.get).
+        serializers.Serializer(data=request.data).is_valid(raise_exception=True)
+
         # Adresse de livraison obligatoire, validée avant toute écriture.
         adresse = AdresseLivraisonSerializer(data=request.data.get("adresse_livraison"))
         if request.data.get("adresse_livraison") is None:
             raise ValidationError({"adresse_livraison": "L'adresse de livraison est obligatoire."})
-        adresse.is_valid(raise_exception=True)
+        if not adresse.is_valid():
+            # Clés à points, comme la simulation : « adresse_livraison.latitude ».
+            raise ValidationError({"adresse_livraison": adresse.errors})
         adresse = adresse.validated_data
 
         panier = get_or_create_panier(request)
@@ -135,6 +142,8 @@ class ValiderPanierView(APIView):
                 livraison_quartier=adresse["quartier"],
                 livraison_point_de_repere=adresse["point_de_repere"],
                 livraison_telephone=adresse["telephone"],
+                livraison_latitude=adresse.get("latitude"),
+                livraison_longitude=adresse.get("longitude"),
             )
             commandes_creees = []
 
