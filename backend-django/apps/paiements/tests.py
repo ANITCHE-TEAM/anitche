@@ -1,3 +1,1086 @@
-from django.test import TestCase
+import json
+import os
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from datetime import timedelta
+from decimal import Decimal
+from pathlib import Path
+from unittest import mock
 
-# Create your tests here.
+from cryptography.fernet import Fernet
+from django.conf import settings
+from django.core.cache import cache
+from django.db import connection
+from django.test import TransactionTestCase, override_settings
+from django.utils import timezone
+from rest_framework.test import APIClient, APITestCase
+from rest_framework.throttling import AnonRateThrottle, SimpleRateThrottle
+
+from apps.catalogue.models import Produit, Stock, VarianteProduit
+from apps.commandes.models import Commande, CommandeItem
+from apps.commandes.services import annuler_commande, est_payee, expirer_commandes_impayees, synchroniser_depuis_livraison
+from apps.fidelite.models import CompteFidelite, CouponReduction, GainFidelite
+from apps.fidelite.services import crediter_gains_echus
+from apps.livraison.models import Livraison, TarifLivraison
+from apps.livraison.tests import recreer_tarifs_initiaux
+from apps.notifications.models import Notification
+from apps.panier.models import Panier, PanierItem
+from apps.retours.models import DemandeRetour, RetourItem
+from apps.utilisateurs.models import DocumentKYC, Role, StatutKYC, TypePieceIdentite, Utilisateur
+from apps.vendeurs.models import Boutique
+
+from . import reversements
+from .fournisseurs.base import EN_ATTENTE, ErreurFournisseur, EtatTransaction, hacher_jeton
+from .fournisseurs.cinetpay import FournisseurCinetPay
+from .fournisseurs.simule import EN_TETE_SIGNATURE, FournisseurSimule, signer
+from .frais import bareme_en_vigueur, calculer_frais_ligne
+from .models import AjustementVendeur, BaremeFrais, JournalWebhook, Paiement, Remboursement, Reversement
+from .services import valider_paiement
+
+URL_INITIER = "/api/paiements/initier/"
+URL_VALIDER_PANIER = "/api/commandes/valider-panier/"
+ADRESSE = {"commune": "Cocody", "quartier": "Angré", "point_de_repere": "Pharmacie", "telephone": "0700000001"}
+# Tarif de Cocody (district d'Abidjan, migrations livraison 0004 / 0005), payé par commande.
+FRAIS_ABIDJAN = Decimal("1500")
+EN_TETE = "HTTP_" + EN_TETE_SIGNATURE.upper().replace("-", "_")
+
+
+def url_webhook(fournisseur="simule", transfert=False):
+    return f"/api/paiements/webhook/{fournisseur}/" + ("transfert/" if transfert else "")
+
+
+class Donnees:
+    """Deux boutiques (A : 5 000 FCFA, B : 10 000 FCFA), deux clients, un
+    administrateur. Commandes créées par le vrai checkout (frais figés)."""
+
+    def creer_donnees(self):
+        cache.clear()
+        creer = Utilisateur.objects.create_user
+        self.client1 = creer(email="c1@pay.ci", password="x", nom="Konan", prenom="Aya", email_verifie=True)
+        self.client2 = creer(email="c2@pay.ci", password="x", nom="Touré", prenom="Ali", email_verifie=True)
+        self.admin = creer(email="admin@pay.ci", password="x", nom="A", prenom="D", role=Role.ADMIN)
+        self.vendeur1 = self.vendeur("v1@pay.ci", "0707070707")
+        self.vendeur2 = self.vendeur("v2@pay.ci", "0505050505")
+        self.boutique1 = Boutique.objects.create(proprietaire=self.vendeur1, nom="Pay Un")
+        self.boutique2 = Boutique.objects.create(proprietaire=self.vendeur2, nom="Pay Deux")
+        self.variante1 = self.variante(self.boutique1, "Produit A", Decimal("5000"))
+        self.variante2 = self.variante(self.boutique2, "Produit B", Decimal("10000"))
+
+    def vendeur(self, email, numero):
+        vendeur = Utilisateur.objects.create_user(
+            email=email, password="x", nom="V", prenom="End", role=Role.VENDEUR,
+            statut_kyc=StatutKYC.VALIDE, email_verifie=True,
+        )
+        DocumentKYC.objects.create(
+            utilisateur=vendeur, type_piece=TypePieceIdentite.PASSEPORT, piece_identite_recto="kyc/r.pdf",
+            selfie="kyc/s.png", numero_mobile_money=numero, adresse="Cocody",
+        )
+        return vendeur
+
+    def variante(self, boutique, nom, prix):
+        produit = Produit.objects.create(boutique=boutique, nom=nom, prix_base=prix)
+        variante = VarianteProduit.objects.create(produit=produit, nom="Standard", prix=prix)
+        Stock.objects.filter(variante=variante).update(quantite_disponible=50)
+        return variante
+
+    def commander(self, *lignes, client=None, **corps):
+        client = client or self.client1
+        panier, _ = Panier.objects.get_or_create(utilisateur=client)
+        for variante, quantite in lignes:
+            PanierItem.objects.create(panier=panier, variante=variante, quantite=quantite)
+        api = APIClient()
+        api.force_authenticate(client)
+        reponse = api.post(URL_VALIDER_PANIER, {"adresse_livraison": ADRESSE, **corps}, format="json")
+        assert reponse.status_code == 201, reponse.data
+        return [Commande.objects.get(pk=c["id"]) for c in reponse.data]
+
+    def api(self, utilisateur=None):
+        api = APIClient()
+        if utilisateur is not None:
+            api.force_authenticate(utilisateur)
+        return api
+
+    def initier(self, client=None, methode="wave", **cible):
+        return self.api(client or self.client1).post(URL_INITIER, {"methode": methode, **cible}, format="json")
+
+    def payer(self, commande=None, groupe=None, client=None, methode="wave"):
+        cible = {"commande_id": str(commande.pk)} if commande else {"groupe_commande_id": str(groupe.pk)}
+        reponse = self.initier(client, methode, **cible)
+        assert reponse.status_code == 201, reponse.data
+        return Paiement.objects.get(pk=reponse.data["id"])
+
+    def notifier(self, reference, statut="succes", montant=None, devise="XOF", evenement_id=None,
+                 fournisseur="simule", transfert=False, horodatage=None, secret=None, **autres):
+        corps = {"evenement_id": evenement_id or f"evt-{uuid.uuid4().hex}", "reference": reference,
+                 "transaction_id": "SIM-TX", "statut": statut, "devise": devise, **autres}
+        if montant is not None:
+            corps["montant"] = montant
+        brut = json.dumps(corps).encode()
+        signature = signer(brut, secret or settings.PAIEMENT_SIMULE_SECRET, horodatage)
+        return self.api().post(url_webhook(fournisseur, transfert), data=brut, content_type="application/json",
+                               **{EN_TETE: signature})
+
+    def notifier_succes(self, paiement, **kwargs):
+        return self.notifier(paiement.reference, montant=int(paiement.montant), **kwargs)
+
+
+# =====================================================================
+# INITIATION, IDOR, MONTANTS
+# =====================================================================
+
+class InitiationTests(Donnees, APITestCase):
+    def setUp(self):
+        self.creer_donnees()
+        self.commande_a, self.commande_b = self.commander((self.variante1, 1), (self.variante2, 1))
+        self.groupe = self.commande_a.groupe
+
+    def test_paiement_commande_montant_calcule_par_le_serveur(self):
+        r = self.initier(commande_id=str(self.commande_a.pk), montant="1")
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(Decimal(r.data["montant"]), Decimal("5000") + FRAIS_ABIDJAN)
+        paiement = Paiement.objects.get(pk=r.data["id"])
+        self.assertEqual((paiement.fournisseur, paiement.statut), ("simule", Paiement.Statut.EN_ATTENTE))
+        self.assertEqual(list(paiement.commandes.all()), [self.commande_a])
+        self.assertTrue(r.data["url_paiement"].endswith(paiement.reference))
+
+    def test_paiement_du_groupe(self):
+        r = self.initier(methode="orange_money", groupe_commande_id=str(self.groupe.pk))
+        self.assertEqual(r.status_code, 201)
+        # Deux commandes (deux boutiques) : deux colis, deux fois les frais.
+        self.assertEqual(Decimal(r.data["montant"]), Decimal("15000") + 2 * FRAIS_ABIDJAN)
+        self.assertEqual(set(r.data["commandes"]), {self.commande_a.pk, self.commande_b.pk})
+
+    def test_moyens_acceptes(self):
+        for methode in ("wave", "orange_money", "mtn_money", "moov_money", "carte_bancaire"):
+            with self.subTest(methode):
+                paiement = self.payer(self.commande_a, methode=methode)
+                self.api(self.client1).post(f"/api/paiements/{paiement.pk}/annuler/")
+
+    def test_paiement_a_la_livraison_refuse(self):
+        r = self.initier(methode="espece_livraison", commande_id=str(self.commande_a.pk))
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("livraison", str(r.data["errors"]["methode"]))
+        self.assertFalse(Paiement.objects.exists())
+        self.commande_a.refresh_from_db()
+        self.assertEqual(self.commande_a.status, Commande.Status.CREEE)
+
+    def test_idor_initier_la_commande_d_un_autre_client(self):
+        self.assertEqual(self.initier(self.client2, commande_id=str(self.commande_a.pk)).status_code, 400)
+        self.assertEqual(self.initier(self.client2, groupe_commande_id=str(self.groupe.pk)).status_code, 400)
+        self.assertFalse(Paiement.objects.exists())
+
+    def test_idor_consulter_ou_annuler_le_paiement_d_un_autre_client(self):
+        paiement = self.payer(self.commande_a)
+        autre = self.api(self.client2)
+        self.assertEqual(autre.get(f"/api/paiements/{paiement.pk}/").status_code, 404)
+        self.assertEqual(autre.post(f"/api/paiements/{paiement.pk}/annuler/").status_code, 404)
+        self.assertEqual(autre.get("/api/paiements/").data["count"], 0)
+
+    def test_D01_commande_payee_seule_puis_via_son_groupe_refusee(self):
+        self.payer(self.commande_a)
+        r = self.initier(groupe_commande_id=str(self.groupe.pk))
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(Paiement.objects.count(), 1)
+
+    def test_double_initiation_refusee(self):
+        self.payer(self.commande_a)
+        self.assertEqual(self.initier(commande_id=str(self.commande_a.pk)).status_code, 400)
+
+    def test_annuler_puis_relancer_avec_un_autre_moyen(self):
+        paiement = self.payer(self.commande_a)
+        r = self.api(self.client1).post(f"/api/paiements/{paiement.pk}/annuler/")
+        self.assertEqual((r.status_code, r.data["statut"]), (200, "annule"))
+        self.assertEqual(self.api(self.client1).post(f"/api/paiements/{paiement.pk}/annuler/").status_code, 409)
+        self.assertEqual(self.payer(self.commande_a, methode="mtn_money").methode, "mtn_money")
+
+    def test_commande_deja_payee_ou_annulee_refusee(self):
+        paiement = self.payer(self.commande_a)
+        self.notifier_succes(paiement)
+        self.assertEqual(self.initier(commande_id=str(self.commande_a.pk)).status_code, 400)
+        annuler_commande(self.commande_b, Commande.MotifAnnulation.CLIENT)
+        self.assertEqual(self.initier(commande_id=str(self.commande_b.pk)).status_code, 400)
+
+    def test_boutique_indisponible_refus_et_commande_annulee(self):
+        Boutique.objects.filter(pk=self.boutique1.pk).update(est_suspendue=True)
+        self.assertEqual(self.initier(commande_id=str(self.commande_a.pk)).status_code, 400)
+        self.commande_a.refresh_from_db()
+        self.assertEqual(self.commande_a.status, Commande.Status.ANNULEE)
+        self.assertFalse(Paiement.objects.exists())
+
+    def test_fournisseur_injoignable_502_puis_relance_possible(self):
+        with mock.patch.object(FournisseurSimule, "initier", side_effect=ErreurFournisseur("hors ligne")):
+            r = self.initier(commande_id=str(self.commande_a.pk))
+        self.assertEqual(r.status_code, 502)
+        self.assertEqual(Paiement.objects.get().statut, Paiement.Statut.ECHOUE)
+        self.assertEqual(self.initier(commande_id=str(self.commande_a.pk)).status_code, 201)
+
+    def test_D09_reponse_client_sans_donnees_internes(self):
+        paiement = self.payer(self.commande_a)
+        self.notifier_succes(paiement, marchand_interne="brut")
+        donnees = self.api(self.client1).get(f"/api/paiements/{paiement.pk}/").data
+        for champ in ("metadata", "transaction_id_externe", "fournisseur", "hash_jeton_notification"):
+            self.assertNotIn(champ, donnees)
+        admin = self.api(self.admin).get(f"/api/paiements/{paiement.pk}/").data
+        self.assertEqual(admin["fournisseur"], "simule")
+
+    def test_is_staff_sans_role_sans_pouvoir(self):
+        paiement = self.payer(self.commande_a)
+        staff = Utilisateur.objects.create_user(email="staff@pay.ci", password="x", nom="S", prenom="T",
+                                                is_staff=True)
+        api = self.api(staff)
+        self.assertEqual(api.get("/api/paiements/").data["count"], 0)
+        self.assertEqual(api.get(f"/api/paiements/{paiement.pk}/").status_code, 404)
+        for url in ("admin/remboursements/", "admin/reversements/", "admin/baremes/"):
+            self.assertEqual(api.get(f"/api/paiements/{url}").status_code, 403)
+
+    def test_liste_admin_sans_n_plus_1(self):
+        for _ in range(3):
+            paiement = self.payer(self.commande_a)
+            self.api(self.client1).post(f"/api/paiements/{paiement.pk}/annuler/")
+        # count + page (client joint) + commandes + remboursements, quel que soit le nombre.
+        with self.assertNumQueries(4):
+            self.assertEqual(self.api(self.admin).get("/api/paiements/").data["count"], 3)
+
+
+# =====================================================================
+# NOTIFICATIONS (WEBHOOKS)
+# =====================================================================
+
+class NotificationTests(Donnees, APITestCase):
+    def setUp(self):
+        self.creer_donnees()
+        (self.commande,) = self.commander((self.variante1, 3))
+        self.paiement = self.payer(self.commande)
+
+    def test_succes_valide_confirme_livraison_reversement_points(self):
+        r = self.notifier_succes(self.paiement)
+        self.assertEqual(r.status_code, 200)
+        self.paiement.refresh_from_db()
+        self.commande.refresh_from_db()
+        self.assertEqual(self.paiement.statut, Paiement.Statut.VALIDE)
+        self.assertEqual(self.commande.status, Commande.Status.CONFIRMEE)
+        self.assertTrue(Livraison.objects.filter(commande=self.commande).exists())
+        self.assertEqual(Reversement.objects.get(commande=self.commande).statut, Reversement.Statut.EN_ATTENTE_LIVRAISON)
+        # Aucun point au paiement : ils naissent à la livraison (apps.fidelite, F1).
+        self.assertFalse(CompteFidelite.objects.filter(utilisateur=self.client1, solde_points__gt=0).exists())
+        self.assertTrue(est_payee(self.commande))
+
+    def test_signature_manquante_invalide_ou_expiree(self):
+        corps = json.dumps({"evenement_id": "e", "reference": self.paiement.reference, "statut": "succes",
+                            "montant": 15000, "devise": "XOF"})
+        api = self.api()
+        self.assertEqual(api.post(url_webhook(), corps, content_type="application/json").status_code, 401)
+        self.assertEqual(api.post(url_webhook(), corps, content_type="application/json",
+                                  **{EN_TETE: signer(corps, "mauvais-secret")}).status_code, 401)
+        self.assertEqual(self.notifier_succes(self.paiement, horodatage=int(time.time()) - 600).status_code, 401)
+        self.paiement.refresh_from_db()
+        self.assertEqual(self.paiement.statut, Paiement.Statut.EN_ATTENTE)
+
+    def test_rejeu_du_meme_evenement_traite_une_fois(self):
+        self.assertEqual(self.notifier_succes(self.paiement, evenement_id="evt-1").status_code, 200)
+        r = self.notifier_succes(self.paiement, evenement_id="evt-1")
+        self.assertEqual((r.status_code, r.data["message"]), (200, "Événement déjà traité."))
+        self.assertEqual(JournalWebhook.objects.filter(evenement_id="evt-1").count(), 1)
+        # Aucun point au paiement : ils naissent à la livraison (apps.fidelite, F1).
+        self.assertFalse(CompteFidelite.objects.filter(utilisateur=self.client1, solde_points__gt=0).exists())
+
+    def test_D03_notification_d_un_autre_fournisseur_refusee(self):
+        Paiement.objects.filter(pk=self.paiement.pk).update(fournisseur="cinetpay")
+        self.assertEqual(self.notifier_succes(self.paiement).status_code, 404)
+        self.paiement.refresh_from_db()
+        self.assertEqual(self.paiement.statut, Paiement.Statut.EN_ATTENTE)
+        self.assertEqual(self.api().post(url_webhook("inconnu"), {}, format="json").status_code, 404)
+
+    def test_D04_devise_ou_montant_differents_refuses(self):
+        self.assertEqual(self.notifier_succes(self.paiement, devise="EUR").status_code, 400)
+        self.assertEqual(self.notifier(self.paiement.reference, montant=1).status_code, 400)
+        self.assertEqual(self.notifier(self.paiement.reference, montant=None).status_code, 401)  # montant absent
+        self.paiement.refresh_from_db()
+        self.assertEqual(self.paiement.statut, Paiement.Statut.EN_ATTENTE)
+        self.assertEqual(JournalWebhook.objects.filter(statut_traitement="erreur").count(), 2)
+
+    def test_D05_une_notification_ne_change_jamais_les_commandes_payees(self):
+        (autre,) = self.commander((self.variante1, 1), client=self.client2)
+        self.notifier(self.paiement.reference, statut="echec", commandes_couvertes=[str(autre.pk)],
+                      metadata={"commandes_couvertes": [str(autre.pk)]})
+        self.notifier_succes(self.paiement)
+        autre.refresh_from_db()
+        self.assertEqual(autre.status, Commande.Status.CREEE)
+        self.assertEqual(list(self.paiement.commandes.all()), [self.commande])
+
+    def test_D10_paiement_valide_jamais_revalide_ni_echoue(self):
+        self.notifier_succes(self.paiement)
+        self.notifier_succes(self.paiement)  # autre événement
+        self.notifier(self.paiement.reference, statut="echec")
+        self.paiement.refresh_from_db()
+        self.assertEqual(self.paiement.statut, Paiement.Statut.VALIDE)
+        # Aucun point au paiement : ils naissent à la livraison (apps.fidelite, F1).
+        self.assertFalse(CompteFidelite.objects.filter(utilisateur=self.client1, solde_points__gt=0).exists())
+        self.assertEqual(Notification.objects.filter(destinataire=self.client1, titre="Paiement confirmé").count(), 1)
+
+    def test_echec_puis_nouveau_paiement(self):
+        self.notifier(self.paiement.reference, statut="echec")
+        self.paiement.refresh_from_db()
+        self.assertEqual(self.paiement.statut, Paiement.Statut.ECHOUE)
+        self.assertEqual(self.initier(commande_id=str(self.commande.pk)).status_code, 201)
+
+    def test_verification_serveur_non_finalisee_n_agit_pas(self):
+        with mock.patch.object(FournisseurSimule, "verifier_transaction",
+                               return_value=EtatTransaction(statut=EN_ATTENTE)):
+            r = self.notifier_succes(self.paiement, evenement_id="evt-attente")
+        self.assertEqual(r.status_code, 200)
+        self.paiement.refresh_from_db()
+        self.assertEqual(self.paiement.statut, Paiement.Statut.EN_ATTENTE)
+        self.assertEqual(JournalWebhook.objects.get(evenement_id="evt-attente").statut_traitement, "ignore")
+        # La même notification, rejouée une fois la transaction finalisée, est traitée.
+        self.assertEqual(self.notifier_succes(self.paiement, evenement_id="evt-attente").status_code, 200)
+        self.paiement.refresh_from_db()
+        self.assertEqual(self.paiement.statut, Paiement.Statut.VALIDE)
+
+    def test_fournisseur_injoignable_a_la_verification_503(self):
+        with mock.patch.object(FournisseurSimule, "verifier_transaction", side_effect=ErreurFournisseur("x")):
+            self.assertEqual(self.notifier_succes(self.paiement, evenement_id="evt-503").status_code, 503)
+        self.assertEqual(self.notifier_succes(self.paiement, evenement_id="evt-503").status_code, 200)
+
+    def test_D11_notifications_non_soumises_a_la_limite_anonyme(self):
+        from apps.core.tests import taux_de_production
+
+        taux = {**taux_de_production(), "anon": "2/hour"}
+        with mock.patch.object(SimpleRateThrottle, "THROTTLE_RATES", taux), \
+                mock.patch.object(AnonRateThrottle, "THROTTLE_RATES", taux):
+            codes = [self.notifier(self.paiement.reference, statut="en_attente").status_code for _ in range(4)]
+        self.assertEqual(codes, [200] * 4)
+        self.assertEqual(taux_de_production()["webhook_paiement"], "3000/hour")
+
+    def test_D14_initiation_limitee(self):
+        from apps.core.tests import taux_de_production
+
+        taux = {**taux_de_production(), "paiements": "2/hour"}
+        cache.clear()
+        with mock.patch.object(SimpleRateThrottle, "THROTTLE_RATES", taux):
+            codes = [self.initier(commande_id=str(self.commande.pk)).status_code for _ in range(3)]
+        self.assertEqual(codes, [400, 400, 429])
+        self.assertEqual(taux_de_production()["paiements"], "20/hour")
+
+
+# =====================================================================
+# COHÉRENCE AVEC LES COMMANDES, REMBOURSEMENTS
+# =====================================================================
+
+class RemboursementTests(Donnees, APITestCase):
+    def setUp(self):
+        self.creer_donnees()
+        self.commande_a, self.commande_b = self.commander((self.variante1, 1), (self.variante2, 1))
+        self.groupe = self.commande_a.groupe
+
+    def test_paiement_recu_apres_expiration(self):
+        paiement = self.payer(self.commande_a)
+        Commande.objects.filter(pk=self.commande_a.pk).update(created_at=timezone.now() - timedelta(minutes=31))
+        expirer_commandes_impayees()
+        paiement.refresh_from_db()
+        self.assertEqual(paiement.statut, Paiement.Statut.ANNULE)
+        self.assertEqual(self.notifier_succes(paiement).status_code, 200)  # succès tardif
+        paiement.refresh_from_db()
+        self.commande_a.refresh_from_db()
+        self.assertEqual(paiement.statut, Paiement.Statut.VALIDE)
+        self.assertEqual(self.commande_a.status, Commande.Status.ANNULEE)  # jamais réactivée
+        remboursement = Remboursement.objects.get()
+        self.assertEqual((remboursement.motif, remboursement.montant), ("commande_annulee", Decimal("5000") + FRAIS_ABIDJAN))
+        self.assertFalse(Livraison.objects.filter(commande=self.commande_a).exists())
+        self.assertFalse(CompteFidelite.objects.filter(utilisateur=self.client1, solde_points__gt=0).exists())
+        self.assertTrue(Notification.objects.filter(destinataire=self.admin, titre="Remboursement à traiter").exists())
+
+    def test_D01b_second_paiement_d_une_commande_deja_payee_rembourse(self):
+        premier = self.payer(self.commande_a)
+        self.api(self.client1).post(f"/api/paiements/{premier.pk}/annuler/")
+        second = self.payer(groupe=self.groupe)
+        self.notifier_succes(second)
+        self.notifier_succes(premier)  # succès tardif du paiement abandonné
+        premier.refresh_from_db()
+        remboursement = Remboursement.objects.get(paiement=premier)
+        self.assertEqual((remboursement.motif, remboursement.commande), ("paiement_en_double", self.commande_a))
+        self.assertEqual(Livraison.objects.filter(commande=self.commande_a).count(), 1)
+
+    def test_succes_tardif_de_l_ancien_avant_le_nouveau(self):
+        premier = self.payer(self.commande_a)
+        self.api(self.client1).post(f"/api/paiements/{premier.pk}/annuler/")
+        second = self.payer(self.commande_a, methode="moov_money")
+        self.notifier_succes(premier)
+        self.notifier_succes(second)
+        self.commande_a.refresh_from_db()
+        self.assertEqual(self.commande_a.status, Commande.Status.CONFIRMEE)
+        self.assertEqual(Remboursement.objects.get().paiement, second)
+
+    def test_D08_annulation_partielle_d_un_groupe_paye(self):
+        paiement = self.payer(groupe=self.groupe)
+        self.notifier_succes(paiement)
+        annuler_commande(self.commande_a, Commande.MotifAnnulation.CLIENT)
+        paiement.refresh_from_db()
+        self.assertEqual(paiement.statut, Paiement.Statut.VALIDE)
+        self.assertTrue(est_payee(self.commande_b))
+        self.commande_b.refresh_from_db()
+        self.assertEqual(self.commande_b.status, Commande.Status.CONFIRMEE)
+        remboursement = Remboursement.objects.get()
+        self.assertEqual((remboursement.commande, remboursement.montant), (self.commande_a, Decimal("5000") + FRAIS_ABIDJAN))
+        self.assertEqual(Reversement.objects.get(commande=self.commande_a).statut, Reversement.Statut.ANNULE)
+        # Signalée deux fois, l'annulation ne crée rien de plus.
+        from .services import traiter_paiements_apres_annulation
+        traiter_paiements_apres_annulation(self.commande_a)
+        self.assertEqual(Remboursement.objects.count(), 1)
+
+    def test_traitement_admin(self):
+        paiement = self.payer(self.commande_a)
+        self.notifier_succes(paiement)
+        annuler_commande(self.commande_a, Commande.MotifAnnulation.ADMINISTRATION)
+        remboursement = Remboursement.objects.get()
+        url = f"/api/paiements/admin/remboursements/{remboursement.pk}/traiter/"
+        self.assertEqual(self.api(self.client1).post(url, {"decision": "effectue"}).status_code, 403)
+        admin = self.api(self.admin)
+        self.assertEqual(admin.get("/api/paiements/admin/remboursements/?statut=a_traiter").data["count"], 1)
+        self.assertEqual(admin.post(url, {"decision": "effectue"}).status_code, 400)  # référence obligatoire
+        self.assertEqual(admin.post(url, {"decision": "refuse"}).status_code, 400)  # motif obligatoire
+        r = admin.post(url, {"decision": "effectue", "reference_externe": "CP-RMB-1"})
+        self.assertEqual((r.status_code, r.data["statut"], r.data["traite_par"]), (200, "effectue", self.admin.pk))
+        self.assertEqual(admin.post(url, {"decision": "effectue", "reference_externe": "X"}).status_code, 409)
+        self.assertTrue(Notification.objects.filter(destinataire=self.client1, titre="Remboursement effectué").exists())
+        donnees = self.api(self.client1).get(f"/api/paiements/{paiement.pk}/").data
+        self.assertEqual(donnees["remboursements"][0]["statut"], "effectue")
+
+
+class ConcurrenceTests(Donnees, TransactionTestCase):
+    def setUp(self):
+        # Un TransactionTestCase précédent vide la base, y compris le barème
+        # de frais par défaut créé par migration.
+        BaremeFrais.objects.get_or_create(boutique=None, defaults={"taux_commission": 12, "frais_fixe_article": 200})
+        # Idem pour les tarifs de livraison (défauts et communes du district).
+        recreer_tarifs_initiaux()
+        self.creer_donnees()
+        (self.commande,) = self.commander((self.variante1, 3))
+
+    def en_parallele(self, fonction, nombre=2):
+        barriere = threading.Barrier(nombre)
+        resultats = []
+
+        def cible(indice):
+            try:
+                barriere.wait()
+                resultats.append(fonction(indice))
+            finally:
+                connection.close()
+
+        fils = [threading.Thread(target=cible, args=(i,)) for i in range(nombre)]
+        for fil in fils:
+            fil.start()
+        for fil in fils:
+            fil.join()
+        return sorted(resultats)
+
+    def test_D02_initiations_concurrentes_un_seul_paiement(self):
+        codes = self.en_parallele(lambda i: self.initier(commande_id=str(self.commande.pk)).status_code, 4)
+        self.assertEqual(codes, [201, 400, 400, 400])
+        self.assertEqual(Paiement.objects.count(), 1)
+
+    def test_D06_succes_concurrents_une_seule_validation(self):
+        paiement = self.payer(self.commande)
+        codes = self.en_parallele(lambda i: self.notifier_succes(paiement, evenement_id=f"evt-c{i}").status_code, 3)
+        self.assertEqual(codes, [200, 200, 200])
+        # Aucun point au paiement : ils naissent à la livraison (apps.fidelite, F1).
+        self.assertFalse(CompteFidelite.objects.filter(utilisateur=self.client1, solde_points__gt=0).exists())
+        self.assertEqual(Reversement.objects.count(), 1)
+        self.assertEqual(Notification.objects.filter(destinataire=self.client1, titre="Paiement confirmé").count(), 1)
+
+
+# =====================================================================
+# FRAIS VENDEUR
+# =====================================================================
+
+class FraisTests(Donnees, APITestCase):
+    def setUp(self):
+        self.creer_donnees()
+
+    def test_bareme_par_defaut_12_pourcent_et_200_fcfa(self):
+        bareme = bareme_en_vigueur(self.boutique1)
+        self.assertEqual((bareme.taux_commission, bareme.frais_fixe_article, bareme.boutique), (Decimal("12"), 200, None))
+
+    def test_calcul_arrondi_et_plafond(self):
+        bareme = BaremeFrais(taux_commission=Decimal("12"), frais_fixe_article=200)
+        frais = calculer_frais_ligne(Decimal("1005"), 2, bareme)
+        self.assertEqual(frais["montant_commission"], Decimal("241"))  # 241,2
+        self.assertEqual(frais["montant_frais_fixes"], Decimal("400"))
+        self.assertEqual(frais["montant_net_vendeur"], Decimal("1369"))
+        petit = calculer_frais_ligne(Decimal("150"), 1, bareme)
+        self.assertEqual((petit["montant_commission"], petit["montant_frais_fixes"], petit["montant_net_vendeur"]),
+                         (Decimal("18"), Decimal("132"), Decimal("0")))
+
+    def test_frais_figes_au_checkout_et_jamais_recalcules(self):
+        (commande,) = self.commander((self.variante1, 2))
+        article = commande.article.get()
+        self.assertEqual((article.taux_commission, article.frais_fixe_unitaire), (Decimal("12"), 200))
+        self.assertEqual((article.montant_commission, article.montant_frais_fixes, article.montant_net_vendeur),
+                         (Decimal("1200"), Decimal("400"), Decimal("8400")))
+        BaremeFrais.objects.update(taux_commission=Decimal("30"), frais_fixe_article=900)
+        article.refresh_from_db()
+        self.assertEqual(article.montant_commission, Decimal("1200"))
+
+    def test_offre_de_lancement_d_une_boutique(self):
+        maintenant = timezone.now()
+        BaremeFrais.objects.create(boutique=self.boutique1, taux_commission=Decimal("5"), frais_fixe_article=0,
+                                   date_debut=maintenant - timedelta(days=1), date_fin=maintenant + timedelta(days=30))
+        commande_a, commande_b = self.commander((self.variante1, 1), (self.variante2, 1))
+        self.assertEqual(commande_a.article.get().montant_commission, Decimal("250"))
+        self.assertEqual(commande_b.article.get().montant_commission, Decimal("1200"))
+        self.assertEqual(bareme_en_vigueur(self.boutique1, maintenant + timedelta(days=31)).boutique, None)
+
+    def test_coupon_supporte_par_anitche(self):
+        CouponReduction.objects.create(code="DIX", type_reduction="pourcentage", valeur=Decimal("10"))
+        (commande,) = self.commander((self.variante1, 1), coupon_code="DIX")
+        # La remise ne porte que sur les articles : les frais de livraison restent dus.
+        self.assertEqual(commande.montant_total, Decimal("4500") + FRAIS_ABIDJAN)
+        article = commande.article.get()
+        self.assertEqual((article.montant_commission, article.montant_net_vendeur), (Decimal("600"), Decimal("4200")))
+
+    def test_sans_bareme_le_checkout_est_refuse_proprement(self):
+        BaremeFrais.objects.all().delete()
+        panier, _ = Panier.objects.get_or_create(utilisateur=self.client1)
+        PanierItem.objects.create(panier=panier, variante=self.variante1, quantite=1)
+        r = self.api(self.client1).post(URL_VALIDER_PANIER, {"adresse_livraison": ADRESSE}, format="json")
+        self.assertEqual(r.status_code, 503)
+        self.assertFalse(Commande.objects.exists())
+
+    def test_frais_jamais_exposes_au_client(self):
+        (commande,) = self.commander((self.variante1, 1))
+        donnees = self.api(self.client1).get(f"/api/commandes/{commande.pk}/").data
+        self.assertNotIn("montant_commission", donnees["articles"][0])
+
+    def test_administration_des_baremes(self):
+        url = "/api/paiements/admin/baremes/"
+        self.assertEqual(self.api(self.vendeur1).post(url, {}).status_code, 403)
+        admin = self.api(self.admin)
+        r = admin.post(url, {"boutique": self.boutique1.pk, "libelle": "Lancement", "taux_commission": "8.00",
+                             "frais_fixe_article": 100}, format="json")
+        self.assertEqual((r.status_code, r.data["cree_par"]), (201, self.admin.pk))
+        self.assertEqual(admin.post(url, {"taux_commission": "120", "frais_fixe_article": 1}).status_code, 400)
+        self.assertEqual(admin.patch(f"{url}{r.data['id']}/", {"date_fin": "2000-01-01T00:00:00Z"},
+                                     format="json").status_code, 400)
+        self.assertEqual(admin.patch(f"{url}{r.data['id']}/", {"taux_commission": "9"}, format="json").status_code, 200)
+        self.assertEqual(bareme_en_vigueur(self.boutique1).taux_commission, Decimal("9"))
+
+
+# =====================================================================
+# REVERSEMENTS
+# =====================================================================
+
+class ReversementTests(Donnees, APITestCase):
+    def setUp(self):
+        self.creer_donnees()
+        (self.commande,) = self.commander((self.variante1, 2))  # 10 000 : 1 200 + 400 → net 8 400
+        self.notifier_succes(self.payer(self.commande))
+        self.reversement = Reversement.objects.get(commande=self.commande)
+
+    def livrer(self, commande=None, il_y_a_jours=0):
+        commande = commande or self.commande
+        Commande.objects.filter(pk=commande.pk).update(status=Commande.Status.EXPEDIEE)
+        synchroniser_depuis_livraison(commande, "livree")
+        # Date de remise du colis : sert au délai de retour (apps.retours).
+        Livraison.objects.filter(commande=commande).update(
+            status=Livraison.Status.LIVREE, date_livraison=timezone.now() - timedelta(days=il_y_a_jours))
+        if il_y_a_jours:
+            Reversement.objects.filter(commande=commande).update(
+                date_disponibilite=timezone.now() - timedelta(days=il_y_a_jours - 7))
+        reversements.rendre_disponibles()
+        self.reversement.refresh_from_db()
+
+    def retour(self, statut=DemandeRetour.Statut.DEMANDE, quantite=1):
+        demande = DemandeRetour.objects.create(
+            commande=self.commande, client=self.client1, boutique=self.boutique1, description="x",
+            montant_remboursement=Decimal("5000") * quantite, statut=statut,
+        )
+        RetourItem.objects.create(demande_retour=demande, commande_item=self.commande.article.get(), quantite=quantite)
+        return demande
+
+    def test_montants_et_cycle_de_vie(self):
+        self.assertEqual((self.reversement.montant_brut, self.reversement.montant_commission,
+                          self.reversement.montant_frais_fixes, self.reversement.montant_net),
+                         (Decimal("10000"), Decimal("1200"), Decimal("400"), Decimal("8400")))
+        self.livrer()
+        self.assertEqual(self.reversement.statut, Reversement.Statut.EN_RETRACTATION)
+        attendu = self.reversement.date_livraison + timedelta(days=7)
+        self.assertEqual(self.reversement.date_disponibilite, attendu)
+        self.assertEqual(reversements.rendre_disponibles(attendu - timedelta(minutes=1)), 0)
+        self.assertEqual(reversements.rendre_disponibles(attendu), 1)
+
+    @override_settings(RETOUR_DELAI_JOURS=30)
+    def test_retour_ouvert_suspend_puis_rejet_reprend(self):
+        # Délai de retour configuré plus long que la rétractation : un retour
+        # peut s'ouvrir sur un reversement déjà disponible.
+        self.livrer(il_y_a_jours=8)
+        self.assertEqual(self.reversement.statut, Reversement.Statut.DISPONIBLE)
+        api = self.api(self.client1)
+        r = api.post("/api/retours/", {"commande_id": str(self.commande.pk), "motif": "produit_defectueux",
+                                        "type_resolution": "remboursement", "description": "Article cassé à la livraison",
+                                        "articles": [{"commande_item_id": str(self.commande.article.get().pk),
+                                                      "quantite": 1}]}, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.reversement.refresh_from_db()
+        self.assertEqual(self.reversement.statut, Reversement.Statut.SUSPENDU)
+        r = self.api(self.vendeur1).patch(f"/api/retours/{r.data['id']}/traiter/",
+                                          {"action": "rejeter", "reponse": "Article intact au déballage."}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.reversement.refresh_from_db()
+        self.assertEqual(self.reversement.statut, Reversement.Statut.DISPONIBLE)
+
+    def test_retour_rembourse_avant_versement(self):
+        self.livrer()
+        demande = self.retour(statut=DemandeRetour.Statut.RECEPTIONNE)
+        reversements.suspendre_reversement(self.commande)
+        r = self.api(self.vendeur1).patch(f"/api/retours/{demande.pk}/traiter/", {"action": "rembourser"}, format="json")
+        self.assertEqual(r.status_code, 200)
+        remboursement = Remboursement.objects.get(retour=demande)
+        self.assertEqual((remboursement.motif, remboursement.statut, remboursement.montant),
+                         ("retour", "a_traiter", Decimal("5000")))
+        self.reversement.refresh_from_db()
+        # 5 000 − 600 de commission rendue ; le frais fixe (200) reste à ANITCHE.
+        self.assertEqual(self.reversement.montant_retours, Decimal("4400"))
+        self.assertEqual(self.reversement.montant_net, Decimal("4000"))
+        self.assertEqual(self.reversement.statut, Reversement.Statut.EN_RETRACTATION)
+
+    def test_retour_apres_versement_ajustement_sur_le_suivant(self):
+        self.livrer(il_y_a_jours=8)
+        admin = self.api(self.admin)
+        r = admin.post(f"/api/paiements/admin/reversements/{self.reversement.pk}/verser/", {"reference_externe": "OM-1"})
+        self.assertEqual((r.status_code, r.data["statut"], Decimal(r.data["montant_a_verser"])), (200, "verse", Decimal("8400")))
+        demande = self.retour(statut=DemandeRetour.Statut.RECEPTIONNE)
+        self.api(self.vendeur1).patch(f"/api/retours/{demande.pk}/traiter/", {"action": "rembourser"}, format="json")
+        self.assertEqual(AjustementVendeur.objects.get().montant, Decimal("-4400"))
+        self.assertEqual(self.api(self.vendeur1).get("/api/paiements/vendeur/reversements/resume/").data[
+            "ajustements_en_attente"], -4400)
+
+        (suivante,) = self.commander((self.variante1, 2))
+        self.notifier_succes(self.payer(suivante))
+        self.livrer(suivante, il_y_a_jours=8)
+        suivant = Reversement.objects.get(commande=suivante)
+        r = admin.post(f"/api/paiements/admin/reversements/{suivant.pk}/verser/", {"reference_externe": "OM-2"})
+        self.assertEqual((Decimal(r.data["montant_ajustements"]), Decimal(r.data["montant_a_verser"])),
+                         (Decimal("-4400"), Decimal("4000")))
+        self.assertEqual(AjustementVendeur.objects.get().reversement_impute, suivant)
+
+    def test_versement_manuel_reserve_admin_et_disponible(self):
+        url = f"/api/paiements/admin/reversements/{self.reversement.pk}/verser/"
+        self.assertEqual(self.api(self.vendeur1).post(url, {"reference_externe": "X"}).status_code, 403)
+        self.assertEqual(self.api(self.admin).post(url, {"reference_externe": "X"}).status_code, 409)  # pas livré
+        self.livrer(il_y_a_jours=8)
+        self.assertEqual(self.api(self.admin).post(url, {}).status_code, 409)  # référence obligatoire
+        self.assertEqual(self.api(self.admin).post(url, {"reference_externe": "OM-9"}).status_code, 200)
+        self.reversement.refresh_from_db()
+        self.assertEqual((self.reversement.numero_destinataire, self.reversement.verse_par),
+                         ("0707070707", self.admin))
+        self.assertTrue(Notification.objects.filter(destinataire=self.vendeur1, titre="Reversement effectué").exists())
+
+    def test_transfert_par_le_fournisseur(self):
+        self.livrer(il_y_a_jours=8)
+        with mock.patch.object(FournisseurSimule, "transferer", wraps=FournisseurSimule().transferer) as transferer:
+            r = self.api(self.admin).post(f"/api/paiements/admin/reversements/{self.reversement.pk}/transferer/")
+        self.assertEqual((r.status_code, r.data["statut"], r.data["operateur"]), (200, "verse", "orange_money"))
+        self.assertEqual(transferer.call_args.args[1:], ("+2250707070707", "orange_money"))
+
+    def test_transfert_echoue_reste_disponible(self):
+        self.livrer(il_y_a_jours=8)
+        with mock.patch.object(FournisseurSimule, "transferer", side_effect=ErreurFournisseur("solde")):
+            r = self.api(self.admin).post(f"/api/paiements/admin/reversements/{self.reversement.pk}/transferer/")
+        self.assertEqual(r.status_code, 409)
+        self.reversement.refresh_from_db()
+        self.assertEqual(self.reversement.statut, Reversement.Statut.DISPONIBLE)
+
+    def test_transfert_confirme_par_notification(self):
+        from .fournisseurs.base import ResultatTransfert
+
+        self.livrer(il_y_a_jours=8)
+        with mock.patch.object(FournisseurSimule, "transferer",
+                               return_value=ResultatTransfert(statut=EN_ATTENTE, identifiant_externe="T1")):
+            self.api(self.admin).post(f"/api/paiements/admin/reversements/{self.reversement.pk}/transferer/",
+                                      {"operateur": "wave"})
+        self.reversement.refresh_from_db()
+        self.assertEqual((self.reversement.statut, self.reversement.operateur), ("en_cours", "wave"))
+        r = self.notifier(self.reversement.reference, montant=8400, transfert=True)
+        self.assertEqual(r.status_code, 200)
+        self.reversement.refresh_from_db()
+        self.assertEqual(self.reversement.statut, Reversement.Statut.VERSE)
+
+    def test_vue_vendeur(self):
+        self.livrer()
+        (autre,) = self.commander((self.variante2, 1))
+        self.notifier_succes(self.payer(autre))
+        api = self.api(self.vendeur1)
+        donnees = api.get("/api/paiements/vendeur/reversements/").data
+        self.assertEqual(donnees["count"], 1)  # jamais ceux d'une autre boutique
+        ligne = donnees["results"][0]["lignes"][0]
+        self.assertEqual((ligne["montant_commission"], ligne["montant_frais_fixes"]), ("1200.00", "400.00"))
+        resume = api.get("/api/paiements/vendeur/reversements/resume/").data
+        self.assertEqual((resume["en_retractation"], resume["disponible"], resume["verse"]), (8400, 0, 0))
+        self.assertEqual(resume["delai_retractation_jours"], 7)
+        self.assertEqual(self.api(self.vendeur2).get("/api/paiements/vendeur/reversements/resume/").data[
+            "en_attente_livraison"], 8600)
+        self.assertEqual(self.api(self.client1).get("/api/paiements/vendeur/reversements/").status_code, 403)
+        (encore,) = self.commander((self.variante1, 1))
+        self.notifier_succes(self.payer(encore))
+        # count + page (commande jointe) + articles : constant, sans N+1.
+        with self.assertNumQueries(3):
+            self.assertEqual(api.get("/api/paiements/vendeur/reversements/").data["count"], 2)
+
+
+# =====================================================================
+# ADAPTATEUR CINETPAY (appels HTTP simulés, format des SDK officiels)
+# =====================================================================
+
+class ReponseHTTP:
+    def __init__(self, donnees, code=200):
+        self.donnees, self.status_code = donnees, code
+
+    def json(self):
+        return self.donnees
+
+
+class CinetPayTests(Donnees, APITestCase):
+    def setUp(self):
+        self.creer_donnees()
+        (self.commande,) = self.commander((self.variante1, 3))
+        self.reglages = self.settings(PAIEMENT_FOURNISSEUR="cinetpay", CINETPAY_API_KEY="sk_test_cle",
+                                      CINETPAY_API_PASSWORD="mdp", CINETPAY_API_URL="")
+        self.reglages.enable()
+        self.addCleanup(self.reglages.disable)
+        self.appels = []
+        self.reponses = {}
+
+    def repondre(self, methode, url, json=None, headers=None, timeout=None):
+        self.appels.append((methode, url, json, headers))
+        chemin = url.replace("https://api.cinetpay.net", "")
+        reponse = self.reponses.get((methode, chemin))
+        if callable(reponse):
+            return reponse()
+        return reponse or ReponseHTTP({"access_token": "jwt"} if chemin == "/v1/oauth/login" else {}, 200)
+
+    def initier_cinetpay(self):
+        self.reponses[("POST", "/v1/payment")] = ReponseHTTP({
+            "code": 200, "status": "OK", "payment_token": "pt", "notify_token": "jeton-secret",
+            "transaction_id": "CP-TX-1", "merchant_transaction_id": "x", "payment_url": "https://pay.cinetpay.co/p/1",
+        })
+        with mock.patch("requests.request", side_effect=self.repondre):
+            paiement = self.payer(self.commande, methode="orange_money")
+        return paiement
+
+    def notification(self, paiement, jeton="jeton-secret", transaction_id="CP-TX-1"):
+        return self.api().post(url_webhook("cinetpay"), {
+            "notify_token": jeton, "merchant_transaction_id": paiement.reference, "transaction_id": transaction_id,
+            "status": "SUCCESS",
+        }, format="json")
+
+    def test_initiation(self):
+        paiement = self.initier_cinetpay()
+        self.assertEqual(paiement.fournisseur, "cinetpay")
+        self.assertEqual(paiement.url_paiement, "https://pay.cinetpay.co/p/1")
+        self.assertEqual(paiement.hash_jeton_notification, hacher_jeton("jeton-secret"))
+        (_, url, corps, entetes) = self.appels[-1]
+        self.assertEqual(url, "https://api.cinetpay.net/v1/payment")
+        self.assertEqual(entetes["Authorization"], "Bearer jwt")
+        self.assertEqual((corps["amount"], corps["currency"], corps["payment_method"], corps["merchant_transaction_id"]),
+                         (15000 + FRAIS_ABIDJAN, "XOF", "OM_CI", paiement.reference))
+        self.assertEqual(corps["notify_url"], "https://api.anitche.test/api/paiements/webhook/cinetpay/")
+        self.assertNotIn(b"jeton-secret", self.api(self.client1).get(f"/api/paiements/{paiement.pk}/").content)
+
+    def test_carte_bancaire_sans_moyen_impose(self):
+        self.reponses[("POST", "/v1/payment")] = ReponseHTTP({"payment_url": "https://p", "notify_token": "t",
+                                                               "transaction_id": "T"})
+        with mock.patch("requests.request", side_effect=self.repondre):
+            self.payer(self.commande, methode="carte_bancaire")
+        self.assertNotIn("payment_method", self.appels[-1][2])
+
+    def test_notification_verifiee_aupres_de_cinetpay(self):
+        paiement = self.initier_cinetpay()
+        self.reponses[("GET", f"/v1/payment/{paiement.reference}")] = ReponseHTTP({
+            "code": 100, "status": "SUCCESS", "merchant_transaction_id": paiement.reference, "transaction_id": "CP-TX-1",
+        })
+        with mock.patch("requests.request", side_effect=self.repondre):
+            self.assertEqual(self.notification(paiement, jeton="mauvais").status_code, 401)
+            self.assertEqual(self.notification(paiement).status_code, 200)
+        paiement.refresh_from_db()
+        self.assertEqual(paiement.statut, Paiement.Statut.VALIDE)
+        self.assertEqual(self.appels[-1][:2], ("GET", f"https://api.cinetpay.net/v1/payment/{paiement.reference}"))
+
+    def test_statut_de_la_notification_ignore_seule_l_api_fait_foi(self):
+        paiement = self.initier_cinetpay()
+        self.reponses[("GET", f"/v1/payment/{paiement.reference}")] = ReponseHTTP({
+            "code": 2010, "status": "FAILED", "merchant_transaction_id": paiement.reference, "transaction_id": "CP-TX-1",
+        })
+        with mock.patch("requests.request", side_effect=self.repondre):
+            self.assertEqual(self.notification(paiement).status_code, 200)  # la notification dit SUCCESS
+        paiement.refresh_from_db()
+        self.assertEqual(paiement.statut, Paiement.Statut.ECHOUE)
+
+    def test_transaction_ou_montant_incoherents_refuses(self):
+        paiement = self.initier_cinetpay()
+        chemin = ("GET", f"/v1/payment/{paiement.reference}")
+        self.reponses[chemin] = ReponseHTTP({"status": "SUCCESS", "merchant_transaction_id": paiement.reference,
+                                             "transaction_id": "AUTRE"})
+        with mock.patch("requests.request", side_effect=self.repondre):
+            self.assertEqual(self.notification(paiement).status_code, 400)
+            self.reponses[chemin] = ReponseHTTP({"status": "SUCCESS", "merchant_transaction_id": paiement.reference,
+                                                 "transaction_id": "CP-TX-2", "amount": "100", "currency": "XOF"})
+            self.assertEqual(self.notification(paiement, transaction_id="CP-TX-2").status_code, 400)
+        paiement.refresh_from_db()
+        self.assertEqual(paiement.statut, Paiement.Statut.EN_ATTENTE)
+
+    def test_jeton_expire_renouvele_une_fois(self):
+        paiement = self.initier_cinetpay()
+        reponses = iter([ReponseHTTP({"code": 1003, "status": "EXPIRED_TOKEN"}, 401),
+                         ReponseHTTP({"status": "SUCCESS", "merchant_transaction_id": paiement.reference,
+                                      "transaction_id": "CP-TX-1"})])
+        self.reponses[("GET", f"/v1/payment/{paiement.reference}")] = lambda: next(reponses)
+        with mock.patch("requests.request", side_effect=self.repondre):
+            self.assertEqual(self.notification(paiement).status_code, 200)
+        self.assertEqual(sum(1 for appel in self.appels if appel[1].endswith("/v1/oauth/login")), 2)
+
+    def test_cinetpay_injoignable(self):
+        import requests
+
+        with mock.patch("requests.request", side_effect=requests.ConnectionError()):
+            r = self.initier(commande_id=str(self.commande.pk))
+        self.assertEqual(r.status_code, 502)
+        paiement = self.initier_cinetpay()
+        with mock.patch("requests.request", side_effect=requests.Timeout()):
+            self.assertEqual(self.notification(paiement).status_code, 503)
+
+    def test_montant_hors_limites(self):
+        Commande.objects.filter(pk=self.commande.pk).update(montant_total=Decimal("3000000"))
+        self.assertEqual(self.initier(commande_id=str(self.commande.pk)).status_code, 400)
+
+    def test_transfert(self):
+        adaptateur = FournisseurCinetPay()
+        reversement = Reversement(reference="REV-2026-A", montant_a_verser=Decimal("8400"))
+        self.reponses[("POST", "/v1/transfer")] = ReponseHTTP({"code": 200, "status": "PENDING",
+                                                                "transaction_id": "TR-1", "notify_token": "nt"})
+        with mock.patch("requests.request", side_effect=self.repondre):
+            resultat = adaptateur.transferer(reversement, "+2250707070707", "wave")
+        self.assertEqual((resultat.statut, resultat.identifiant_externe), (EN_ATTENTE, "TR-1"))
+        corps = self.appels[-1][2]
+        self.assertEqual((corps["payment_method"], corps["amount"], corps["phone_number"]),
+                         ("WAVE_CI", 8400, "+2250707070707"))
+
+
+# =====================================================================
+# CONFIGURATION DE PRODUCTION
+# =====================================================================
+
+class ConfigurationProductionTests(APITestCase):
+    """prod.py refuse le fournisseur simulé, une clé de sandbox ou l'absence de clés."""
+
+    def importer_prod(self, **variables):
+        env = {
+            **os.environ,
+            "DJANGO_SETTINGS_MODULE": "config.settings.prod",
+            "SECRET_KEY": "x" * 50,
+            "FIELD_ENCRYPTION_KEYS": Fernet.generate_key().decode(),
+            "ALLOWED_HOSTS": "api.anitche.com",
+            "CORS_ALLOWED_ORIGINS": "https://anitche.com",
+            "BACKEND_BASE_URL": "https://api.anitche.com",
+            "PAIEMENT_FOURNISSEUR": "cinetpay",
+            "CINETPAY_API_KEY": "sk_live_cle",
+            "CINETPAY_API_PASSWORD": "mdp",
+            **variables,
+        }
+        return subprocess.run(
+            [sys.executable, "-c", "import config.settings.prod"],
+            cwd=Path(settings.BASE_DIR), env=env, capture_output=True, text=True,
+        )
+
+    def test_configuration_valide(self):
+        self.assertEqual(self.importer_prod().returncode, 0, self.importer_prod().stderr[-500:])
+
+    def test_refus(self):
+        cas = {
+            "simulé": {"PAIEMENT_FOURNISSEUR": "simule"},
+            "sandbox": {"CINETPAY_API_KEY": "sk_test_cle"},
+            "sans clé": {"CINETPAY_API_KEY": ""},
+            "http": {"BACKEND_BASE_URL": "http://api.anitche.com"},
+        }
+        for libelle, variables in cas.items():
+            with self.subTest(libelle):
+                resultat = self.importer_prod(**variables)
+                self.assertNotEqual(resultat.returncode, 0)
+                self.assertIn("ImproperlyConfigured", resultat.stderr)
+
+
+# =====================================================================
+# FRAIS DE LIVRAISON : REVERSEMENTS, RETOURS, POINTS
+# =====================================================================
+
+class FraisDeLivraisonFinancesTests(Donnees, APITestCase):
+    """Produit A : 5 000 FCFA, barème 12 % + 200 par article ; tarif
+    Abidjan : 1 500. Deux articles : brut 10 000, net vendeur 8 400."""
+
+    def setUp(self):
+        self.creer_donnees()
+
+    def commande_payee(self, quantite=2):
+        (commande,) = self.commander((self.variante1, quantite))
+        self.notifier_succes(self.payer(commande))
+        return commande, Reversement.objects.get(commande=commande)
+
+    def livrer(self, commande):
+        Commande.objects.filter(pk=commande.pk).update(status=Commande.Status.EXPEDIEE)
+        synchroniser_depuis_livraison(commande, "livree")
+        Livraison.objects.filter(commande=commande).update(status=Livraison.Status.LIVREE, date_livraison=timezone.now())
+
+    def demander_retour(self, commande, motif="produit_defectueux", quantite=1):
+        r = self.api(self.client1).post("/api/retours/", {
+            "commande_id": str(commande.pk), "motif": motif, "type_resolution": "remboursement",
+            "description": "Article abîmé à l'ouverture du colis",
+            "articles": [{"commande_item_id": str(commande.article.get().pk), "quantite": quantite}],
+        }, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        return DemandeRetour.objects.get(pk=r.data["id"])
+
+    def rembourser(self, demande):
+        DemandeRetour.objects.filter(pk=demande.pk).update(statut=DemandeRetour.Statut.RECEPTIONNE)
+        r = self.api(self.vendeur1).patch(f"/api/retours/{demande.pk}/traiter/", {"action": "rembourser"},
+                                          format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+
+    def offrir_la_livraison(self, tarif=None):
+        Boutique.objects.filter(pk=self.boutique1.pk).update(livraison_offerte=True)
+        if tarif is not None:
+            TarifLivraison.objects.filter(zone="abidjan").update(montant=tarif)
+
+    # --- Reversements ---
+
+    def test_frais_payes_par_le_client_jamais_reverses_au_vendeur(self):
+        commande, reversement = self.commande_payee()
+        self.assertEqual(Paiement.objects.get().montant, Decimal("10000") + FRAIS_ABIDJAN)
+        self.assertEqual((reversement.montant_livraison, reversement.montant_net), (Decimal("0"), Decimal("8400")))
+
+    def test_livraison_offerte_deduite_du_reversement(self):
+        self.offrir_la_livraison()
+        commande, reversement = self.commande_payee()
+        self.assertEqual(Paiement.objects.get().montant, Decimal("10000"))
+        self.assertEqual((reversement.montant_livraison, reversement.montant_net), (FRAIS_ABIDJAN, Decimal("6900")))
+        self.livrer(commande)
+        self.assertFalse(AjustementVendeur.objects.exists())  # couverte par la vente
+        ligne = self.api(self.vendeur1).get("/api/paiements/vendeur/reversements/").data["results"][0]
+        self.assertEqual((ligne["montant_livraison"], ligne["montant_net"]), ("1500.00", "6900.00"))
+
+    def test_livraison_offerte_superieure_au_net_reste_du_apres_livraison(self):
+        self.offrir_la_livraison(tarif=9000)
+        commande, reversement = self.commande_payee()
+        # Plafonnée au net (8 400) : jamais de reversement négatif.
+        self.assertEqual((reversement.montant_livraison, reversement.montant_net), (Decimal("8400"), Decimal("0")))
+        self.assertFalse(AjustementVendeur.objects.exists())  # rien de dû avant la livraison
+        self.livrer(commande)
+        reversements.ouvrir_retractation(commande)  # rejoué : idempotent
+        ajustement = AjustementVendeur.objects.get()
+        self.assertEqual((ajustement.nature, ajustement.montant, ajustement.commande, ajustement.boutique),
+                         (AjustementVendeur.Nature.LIVRAISON_OFFERTE, Decimal("-600"), commande, self.boutique1))
+
+    def test_livraison_offerte_annulee_avant_livraison_rien_n_est_du(self):
+        self.offrir_la_livraison(tarif=9000)
+        commande, reversement = self.commande_payee()
+        annuler_commande(commande, Commande.MotifAnnulation.CLIENT)
+        reversement.refresh_from_db()
+        self.assertEqual(reversement.statut, Reversement.Statut.ANNULE)
+        self.assertFalse(AjustementVendeur.objects.exists())
+
+    def test_contestation_fondee_efface_le_reste_non_encore_deduit(self):
+        self.offrir_la_livraison(tarif=9000)
+        commande, _ = self.commande_payee()
+        self.livrer(commande)
+        self.assertTrue(AjustementVendeur.objects.exists())
+        reversements.annuler_reversement(commande)  # colis déclaré non reçu, contestation fondée
+        self.assertFalse(AjustementVendeur.objects.exists())
+
+    # --- Retours ---
+
+    def test_retour_imputable_au_vendeur_rend_les_frais_une_fois(self):
+        commande, reversement = self.commande_payee()
+        self.livrer(commande)
+        premiere = self.demander_retour(commande)
+        self.assertEqual((premiere.frais_livraison_rembourses, premiere.montant_remboursement),
+                         (FRAIS_ABIDJAN, Decimal("5000") + FRAIS_ABIDJAN))
+        seconde = self.demander_retour(commande, motif="non_conforme")
+        self.assertEqual((seconde.frais_livraison_rembourses, seconde.montant_remboursement),
+                         (Decimal("0"), Decimal("5000")))
+
+        self.rembourser(premiere)
+        self.assertEqual(Remboursement.objects.get(retour=premiere).montant, Decimal("6500"))
+        reversement.refresh_from_db()
+        # Part du vendeur réduite des seuls articles (5 000 − 600 de commission rendue).
+        self.assertEqual(reversement.montant_retours, Decimal("4400"))
+        ajustement = AjustementVendeur.objects.get(nature=AjustementVendeur.Nature.FRAIS_LIVRAISON_RETOUR)
+        self.assertEqual((ajustement.montant, ajustement.commande, ajustement.boutique),
+                         (-FRAIS_ABIDJAN, commande, self.boutique1))
+        reversements.facturer_frais_livraison_retour(premiere)  # rejoué : idempotent
+        self.assertEqual(AjustementVendeur.objects.count(), 1)
+        self.assertEqual(self.api(self.client1).get(f"/api/retours/{premiere.pk}/").data["frais_livraison_rembourses"],
+                         "1500.00")
+
+    def test_changement_d_avis_ou_mauvaise_taille_sans_frais(self):
+        commande, _ = self.commande_payee()
+        self.livrer(commande)
+        for motif in ("changement_avis", "mauvaise_taille", "autre"):
+            with self.subTest(motif):
+                demande = self.demander_retour(commande, motif=motif)
+                self.assertEqual((demande.frais_livraison_rembourses, demande.montant_remboursement),
+                                 (Decimal("0"), Decimal("5000")))
+                demande.delete()
+
+    def test_frais_rendus_si_la_premiere_demande_a_ete_rejetee(self):
+        commande, _ = self.commande_payee()
+        self.livrer(commande)
+        premiere = self.demander_retour(commande)
+        DemandeRetour.objects.filter(pk=premiere.pk).update(statut=DemandeRetour.Statut.REJETE)
+        self.assertEqual(self.demander_retour(commande).frais_livraison_rembourses, FRAIS_ABIDJAN)
+
+    def test_livraison_offerte_rien_a_rendre(self):
+        self.offrir_la_livraison()
+        commande, _ = self.commande_payee()
+        self.livrer(commande)
+        demande = self.demander_retour(commande)
+        self.assertEqual((demande.frais_livraison_rembourses, demande.montant_remboursement),
+                         (Decimal("0"), Decimal("5000")))
+
+    # --- Points de fidélité ---
+
+    def test_points_jamais_sur_les_frais(self):
+        commande, _ = self.commande_payee(quantite=1)  # 5 000 + 1 500 payés
+        self.livrer(commande)
+        self.assertEqual(GainFidelite.objects.get(commande=commande).points, 5)
+
+    def test_retour_avec_frais_points_recalcules_sur_les_articles(self):
+        commande, _ = self.commande_payee()  # 10 000 d'articles → 10 points en attente
+        self.livrer(commande)
+        self.rembourser(self.demander_retour(commande))  # 5 000 d'articles + 1 500 de frais rendus
+        # Reste 5 000 d'articles payés → 5 points (les frais rendus ne
+        # comptent pas comme des articles remboursés : 10 000 − 6 500 → 3).
+        self.assertEqual(GainFidelite.objects.get(commande=commande).points, 5)
+
+    def test_retour_sans_frais_points_recalcules_hors_livraison(self):
+        commande, _ = self.commande_payee()
+        self.livrer(commande)
+        self.rembourser(self.demander_retour(commande, motif="changement_avis"))
+        # 10 000 − 5 000 → 5 points (et non 11 500 − 5 000 → 6 : les frais
+        # payés n'ont jamais rapporté de points).
+        self.assertEqual(GainFidelite.objects.get(commande=commande).points, 5)
+
+    @override_settings(RETOUR_DELAI_JOURS=30)
+    def test_points_deja_credites_reprise_sur_les_articles_seulement(self):
+        commande, _ = self.commande_payee()
+        self.livrer(commande)
+        gain = GainFidelite.objects.get(commande=commande)
+        GainFidelite.objects.filter(pk=gain.pk).update(date_disponibilite=timezone.now() - timedelta(minutes=1))
+        crediter_gains_echus()
+        compte = CompteFidelite.objects.get(utilisateur=self.client1)
+        self.assertEqual(compte.solde_points, 10)
+        self.rembourser(self.demander_retour(commande))
+        compte.refresh_from_db()
+        # 5 points repris pour 5 000 d'articles (6 si les frais comptaient).
+        self.assertEqual(compte.solde_points, 5)
