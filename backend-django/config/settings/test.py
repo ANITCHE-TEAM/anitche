@@ -6,6 +6,9 @@ from pathlib import Path
 
 DEBUG = True
 
+# Commande seed_demo testée par apps/demo/tests.py (jamais installée en production).
+INSTALLED_APPS = [*INSTALLED_APPS, 'apps.demo']
+
 # Routes de documentation montées pour les tests du schéma (config/tests_schema.py).
 DOCUMENTATION_API_ACTIVE = True
 

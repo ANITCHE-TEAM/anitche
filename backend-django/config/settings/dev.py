@@ -3,6 +3,10 @@ from .base import *
 
 DEBUG = True
 
+# Données de démonstration (python manage.py seed_demo) : dev et tests
+# seulement, jamais dans base.py (docs/GUIDE_FRONTEND.md).
+INSTALLED_APPS = [*INSTALLED_APPS, 'apps.demo']
+
 # Documentation d'API (/api/schema/, /api/docs/, /api/redoc/) : libre en dev.
 DOCUMENTATION_API_ACTIVE = True
 ALLOWED_HOSTS = ['localhost', '127.0.0.1', 'anitche-backend']

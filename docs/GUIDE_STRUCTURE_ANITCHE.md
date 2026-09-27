@@ -51,8 +51,10 @@ anitche/
 │   └── package.json
 │
 ├── backend-django/               # Coeur métier
-│   ├── config/settings/{base,dev,prod}.py
+│   ├── config/settings/{base,dev,prod,test,ci}.py
 │   ├── apps/                     # un dossier par epic du backlog
+│   │   └── demo/                 # seed_demo : données de démo (dev et tests seulement)
+│   ├── schema.yaml               # contrat OpenAPI versionné (lu par le frontend, vérifié en CI)
 │   └── manage.py
 │
 ├── backend-fastapi/               # Services rapides / IA
@@ -85,8 +87,17 @@ docker compose -f infra/docker-compose.yml up
 
 - Frontend  → http://localhost:5173
 - Django    → http://localhost:8000
+- Swagger   → http://localhost:8000/api/docs/ (documentation de l'API Django, dev uniquement)
 - FastAPI   → http://localhost:8001/docs
 - Mailpit   → http://localhost:8025 (emails envoyés en dev)
+
+Puis, pour avoir des boutiques, des produits, des commandes et un compte par rôle :
+
+```bash
+docker exec anitche-backend python manage.py seed_demo
+```
+
+Comptes, contenu et conventions de l'API (JWT, erreurs, pagination) : [`GUIDE_FRONTEND.md`](./GUIDE_FRONTEND.md).
 
 ### Sans Docker
 
@@ -109,14 +120,17 @@ En dev, aucun email ne sort vers l'extérieur : Django les envoie au service **M
 
 ### Limites de débit relevées en dev uniquement
 
-Pour que les Runs Postman répétés (connexions, codes OTP, inscriptions à chaque exécution) ne soient pas bloqués en 429, `config/settings/dev.py` relève quatre limites :
+Pour que les Runs Postman répétés (connexions, codes OTP, inscriptions, paiements, retours et tickets à chaque exécution) ne soient pas bloqués en 429, `config/settings/dev.py` relève ces limites à 1000/hour :
 
-| Scope | Dev | Production (`base.py`) |
-|---|---|---|
-| `login` | 1000/hour | 10/hour |
-| `otp_envoi` | 1000/hour | 5/hour |
-| `otp_verification` | 1000/hour | 10/hour |
-| `inscription` | 1000/hour | 10/hour |
+| Scope | Production (`base.py`) |
+|---|---|
+| `login` | 10/hour |
+| `otp_envoi` | 5/hour |
+| `otp_verification` | 10/hour |
+| `inscription` | 10/hour |
+| `paiements` | 20/hour |
+| `retour_creation`, `retour_photo` | 10/hour, 30/hour |
+| `support_ticket`, `support_message`, `support_piece_jointe` | 10/hour, 60/hour, 20/hour |
 
 - Ces valeurs ne concernent **que le dev** : `prod.py` et `ci.py` ne chargent jamais `dev.py` et ne redéfinissent aucune limite, donc la production applique celles de `base.py`. Des tests le vérifient (`TauxDeLimiteParEnvironnementTests` dans `apps/core/tests.py`, `LimitesDeProductionTests` dans `apps/utilisateurs/tests.py`).
 - Toutes les autres limites (`kyc`, `anon`, `user`, `boutique_creation`…) restent identiques en dev et en production.
