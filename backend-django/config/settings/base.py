@@ -30,6 +30,7 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
     'django_celery_beat',
+    'drf_spectacular',
 
     # Apps métier (apps/<nom>)
     'apps.utilisateurs',
@@ -219,6 +220,9 @@ REST_FRAMEWORK = {
     # Sans cette ligne, config/exceptions.py::custom_exception_handler
     # n'est jamais appelé : les 500 utilisent le handler DRF par défaut.
     'EXCEPTION_HANDLER': 'config.exceptions.custom_exception_handler',
+    # Schéma OpenAPI (drf-spectacular) : tags par module et réponses
+    # d'erreur au format commun, voir config/schema.py.
+    'DEFAULT_SCHEMA_CLASS': 'config.schema.SchemaAnitche',
     # A04:2025 (Unrestricted Resource Consumption) : sans pagination par
     # défaut, chaque ListAPIView du projet renvoie l'intégralité des
     # résultats en une requête — trivialement coûteux dès que le catalogue
@@ -236,6 +240,78 @@ REST_FRAMEWORK = {
     # logout...). 0 = aucun proxy : seul REMOTE_ADDR compte (dev, tests).
     # En production, prod.py le passe à 1 (Nginx, qui réécrit l'en-tête).
     'NUM_PROXIES': 0,
+}
+
+# Documentation d'API interactive (drf-spectacular) : /api/schema/,
+# /api/docs/ (Swagger UI), /api/redoc/. Montée seulement si
+# DOCUMENTATION_API_ACTIVE (dev.py, test.py) ; prod.py la force à False
+# (décision d'équipe : aucune documentation exposée en production). Le
+# schéma versionné (backend-django/schema.yaml) reste la référence du
+# frontend, vérifié par la CI.
+DOCUMENTATION_API_ACTIVE = False
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'API ANITCHE',
+    'DESCRIPTION': (
+        "API REST du backend Django d'ANITCHE (marketplace, Abidjan, montants en FCFA entiers).\n\n"
+        "**Authentification** : JWT. `POST /api/utilisateurs/connexion/` renvoie `access` (15 minutes) "
+        "et `refresh` (7 jours, à usage unique : `POST /api/utilisateurs/connexion/rafraichir/` en "
+        "renvoie un nouveau). Envoyer `Authorization: Bearer <access>` (bouton Authorize).\n\n"
+        "**Erreurs** : format commun `{success, status_code, detail, errors}` (composant `Erreur`), "
+        "`errors` étant un objet clé → liste de messages.\n\n"
+        "**Pagination** : les listes paginées renvoient `{count, next, previous, results}` "
+        "(20 éléments par page, paramètre `page`).\n\n"
+        "Guide complet : docs/GUIDE_FRONTEND.md."
+    ),
+    'VERSION': '1.0.0',
+    'OAS_VERSION': '3.1.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    # Composants distincts en lecture et en écriture (ex. Produit /
+    # ProduitRequest) : champs en lecture seule absents des corps de
+    # requête, multipart correctement typé, types TypeScript exacts.
+    'COMPONENT_SPLIT_REQUEST': True,
+    'SCHEMA_PATH_PREFIX': r'/api/',
+    'TAGS': [
+        {'name': 'Utilisateurs', 'description': "Inscription, connexion JWT (et Google), profil, codes OTP (email), mot de passe oublié, dépôt et lecture du dossier KYC."},
+        {'name': 'Vendeurs', 'description': "Boutiques publiques, boutique du vendeur connecté, décisions sur les demandes vendeur et suspension des boutiques (administration)."},
+        {'name': 'Catalogue', 'description': "Catégories et produits publics ; espace vendeur : produits, variantes, stock et images ; modération (administration)."},
+        {'name': 'Panier', 'description': "Panier du client connecté ou anonyme (cookie de session) : articles, quantités, disponibilité."},
+        {'name': 'Commandes', 'description': "Simulation et validation du checkout (une commande par boutique), suivi, annulation ; espace vendeur ; annulation par l'administration."},
+        {'name': 'Paiements', 'description': "Paiement en ligne (mobile money, carte), annulation d'un paiement en attente ; reversements vendeur ; remboursements, reversements et barèmes de frais (administration). Les notifications des fournisseurs (webhooks) ne figurent pas ici."},
+        {'name': 'Livraison', 'description': "Tarifs par commune, suivi selon le rôle (client, livreur, vendeur, administration), code de livraison, contestation, assignation et gestion des livreurs."},
+        {'name': 'Retours', 'description': "Demandes de retour (commande livrée, 7 jours), photos justificatives, traitement par la boutique ou l'administration."},
+        {'name': 'Fidélité', 'description': "Compte de points, gains en attente, transactions, conversion de points en coupon, vérification d'un code promo."},
+        {'name': 'Notifications', 'description': "Notifications de l'utilisateur connecté, compteur de non lues, préférences d'envoi par email."},
+        {'name': 'Support', 'description': "Tickets, messages, pièces jointes et notation ; file et assignation pour l'équipe support."},
+        {'name': 'Passeports QR', 'description': "Passeports d'authenticité : vérification publique d'un QR, gestion par le vendeur."},
+    ],
+    # Noms stables des énumérations dont le nom de champ revient dans
+    # plusieurs modèles (sans eux : StatusC4bEnum, Statut8cbEnum...).
+    'ENUM_NAME_OVERRIDES': {
+        'StatutCommandeEnum': 'apps.commandes.models.Commande.Status',
+        'StatutLivraisonEnum': 'apps.livraison.models.Livraison.Status',
+        'StatutContestationEnum': 'apps.livraison.models.ContestationLivraison.Statut',
+        'StatutPaiementEnum': 'apps.paiements.models.Paiement.Statut',
+        'StatutRemboursementEnum': 'apps.paiements.models.Remboursement.Statut',
+        'MotifRemboursementEnum': 'apps.paiements.models.Remboursement.Motif',
+        'StatutReversementEnum': 'apps.paiements.models.Reversement.Statut',
+        'CanalReversementEnum': 'apps.paiements.models.Reversement.Canal',
+        'StatutRetourEnum': 'apps.retours.models.DemandeRetour.Statut',
+        'MotifRetourEnum': 'apps.retours.models.DemandeRetour.Motif',
+        'StatutGainFideliteEnum': 'apps.fidelite.models.GainFidelite.Statut',
+        'StatutTicketEnum': 'apps.support.models.SupportTicket.Status',
+        'CanalNotificationEnum': 'apps.notifications.models.Notification.Canal',
+    },
+    # Versions figées (drf-spectacular charge sinon « @latest » depuis le
+    # CDN) : même interface pour toute l'équipe, pas de mise à jour subie.
+    'SWAGGER_UI_DIST': 'https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.33.0',
+    'SWAGGER_UI_FAVICON_HREF': 'https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.33.0/favicon-32x32.png',
+    'REDOC_DIST': 'https://cdn.jsdelivr.net/npm/redoc@2.5.4',
+    'SWAGGER_UI_SETTINGS': {
+        'persistAuthorization': True,
+        'displayRequestDuration': True,
+        'filter': True,
+    },
 }
 
 from datetime import timedelta

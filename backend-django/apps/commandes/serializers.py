@@ -1,5 +1,6 @@
 import re
 
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from .models import Commande, GroupeCommande, CommandeItem
@@ -27,6 +28,17 @@ class AdresseLivraisonSerializer(serializers.Serializer):
         if not re.fullmatch(r"\+?\d{8,15}", compact):
             raise serializers.ValidationError("Numéro de téléphone invalide (8 à 15 chiffres, « + » initial accepté).")
         return compact
+
+
+class AdresseLivraisonLectureSerializer(serializers.Serializer):
+    """Adresse de livraison telle que renvoyée (schéma OpenAPI) : celle du
+    checkout, avec la zone tarifaire déduite de la commune."""
+
+    zone = serializers.CharField()
+    commune = serializers.CharField()
+    quartier = serializers.CharField()
+    point_de_repere = serializers.CharField()
+    telephone = serializers.CharField()
 
 
 def adresse_du_groupe(groupe):
@@ -62,6 +74,7 @@ class GroupeCommandeSerializer(serializers.ModelSerializer):
             ]
         read_only_fields = fields
 
+    @extend_schema_field(AdresseLivraisonLectureSerializer(allow_null=True))
     def get_adresse_livraison(self, groupe):
         return adresse_du_groupe(groupe)
 
@@ -85,6 +98,7 @@ class CommandeDetailSerializer(CommandeSerializer):
         fields = CommandeSerializer.Meta.fields + ["articles", "adresse_livraison"]
         read_only_fields = fields
 
+    @extend_schema_field(AdresseLivraisonLectureSerializer(allow_null=True))
     def get_adresse_livraison(self, commande):
         return adresse_du_groupe(commande.groupe)
 
@@ -114,12 +128,13 @@ class CommandeVendeurSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
-    def get_client(self, commande):
+    def get_client(self, commande) -> str:
         """Prénom + initiale du nom (ex. « Awa K. »)."""
         client = commande.client
         initiale = f" {client.nom[:1].upper()}." if client.nom else ""
         return f"{client.prenom}{initiale}".strip()
 
+    @extend_schema_field(AdresseLivraisonLectureSerializer(allow_null=True))
     def get_adresse_livraison(self, commande):
         return adresse_du_groupe(commande.groupe)
 
@@ -129,3 +144,27 @@ class SimulerFraisSerializer(serializers.Serializer):
 
     adresse_livraison = AdresseLivraisonSerializer()
     coupon_code = serializers.CharField(max_length=30, required=False, allow_blank=True)
+
+
+# ---------------------------------------------------------------------
+# Documentation OpenAPI de la simulation du checkout (réponse construite
+# dans SimulerFraisView).
+# ---------------------------------------------------------------------
+
+class SimulationCommandeSerializer(serializers.Serializer):
+    boutique = serializers.IntegerField()
+    boutique_nom = serializers.CharField()
+    montant_articles = serializers.IntegerField()
+    remise = serializers.IntegerField()
+    frais_livraison = serializers.IntegerField()
+    livraison_offerte = serializers.BooleanField()
+    montant_total = serializers.IntegerField()
+
+
+class SimulationCheckoutSerializer(serializers.Serializer):
+    zone = serializers.CharField(help_text="Zone tarifaire déduite de la commune.")
+    commandes = SimulationCommandeSerializer(many=True, help_text="Une commande par boutique.")
+    total_articles = serializers.IntegerField()
+    total_remise = serializers.IntegerField()
+    total_frais_livraison = serializers.IntegerField()
+    total_a_payer = serializers.IntegerField()

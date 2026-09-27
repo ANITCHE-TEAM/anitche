@@ -14,6 +14,11 @@ import logging
 
 from apps.core.exceptions import ErreurMetier
 from apps.core.reseau import adresse_ip_client
+from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
+from rest_framework import serializers
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, TokenRefreshSerializer
+
+from config.schema import FICHIER, JetonsSerializer, MessageSerializer, erreurs
 from .permissions import EmailVerifie
 
 logger_securite = logging.getLogger('securite')
@@ -87,6 +92,10 @@ class InscriptionView(generics.CreateAPIView):
         envoyer_code_otp_email.delay(utilisateur.email, code, TypeUsageOTP.INSCRIPTION)
 
 
+@extend_schema(
+    summary="Connexion (email + mot de passe)",
+    responses={200: TokenObtainPairSerializer, **erreurs(401)},
+)
 class LoginThrottleView(TokenObtainPairView):
     """Connexion JWT avec limite de fréquence (anti brute-force)."""
     throttle_classes = [ScopedRateThrottle]
@@ -112,6 +121,11 @@ class LoginThrottleView(TokenObtainPairView):
         return response
 
 
+@extend_schema(
+    summary="Rafraîchir le jeton d'accès",
+    description="Renvoie un nouvel `access` et un nouveau `refresh` (rotation) ; l'ancien refresh devient inutilisable.",
+    responses={200: TokenRefreshSerializer, **erreurs(401)},
+)
 class RafraichissementView(TokenRefreshView):
     """Rafraîchissement du jeton (simplejwt) avec une limite dédiée.
 
@@ -150,6 +164,12 @@ class ProfilView(generics.RetrieveUpdateAPIView):
 # DEMANDE DE CHANGEMENT D'EMAIL / TÉLÉPHONE
 # =====================================================
 
+@extend_schema(
+    summary="Demander un changement d'email ou de téléphone",
+    description="Envoie un code OTP (sur le nouvel email, ou sur l'email actuel pour un téléphone), à saisir dans `verification-otp/`.",
+    request=DemandeChangementContactSerializer,
+    responses={200: MessageSerializer},
+)
 class DemandeChangementContactView(APIView):
     """
     Génère un code OTP permettant de confirmer
@@ -203,6 +223,12 @@ class DemandeChangementContactView(APIView):
 # VALIDATION DU CODE OTP
 # =====================================================
 
+@extend_schema(
+    summary="Valider un code OTP",
+    description="Confirme l'inscription (email vérifié) ou applique le changement de contact demandé. Code faux ou expiré : 400 `errors.code` (essais restants).",
+    request=VerificationOTPSerializer,
+    responses={200: MessageSerializer},
+)
 class VerificationOTPView(APIView):
     """
     Vérifie un code OTP puis applique
@@ -286,6 +312,12 @@ class VerificationOTPView(APIView):
 # RENVOI DU CODE D'INSCRIPTION
 # =====================================================
 
+@extend_schema(
+    summary="Renvoyer le code de vérification de l'email",
+    description="400 si l'email est déjà vérifié.",
+    request=None,
+    responses={200: MessageSerializer},
+)
 class RenvoyerCodeInscriptionView(APIView):
     """
     Envoie un nouveau code de vérification de l'email du compte.
@@ -335,6 +367,11 @@ class UploadKYCView(generics.CreateAPIView):
     ]
 
 
+@extend_schema(
+    summary="Télécharger une pièce du dossier KYC",
+    description="Titulaire du dossier ou administration. `champ` : piece_identite_recto, piece_identite_verso ou selfie.",
+    responses={200: FICHIER, **erreurs(403)},
+)
 class TelechargerDocumentKYCView(APIView):
     """
     Sert un document KYC (pièce d'identité ou selfie) après vérification
@@ -400,6 +437,12 @@ class TelechargerDocumentKYCView(APIView):
 # MOT DE PASSE OUBLIÉ
 # =====================================================
 
+@extend_schema(
+    summary="Mot de passe oublié : demander un code",
+    description="Réponse identique que le compte existe ou non.",
+    request=DemandeMotDePasseOublieSerializer,
+    responses={200: MessageSerializer},
+)
 class DemandeMotDePasseOublieView(APIView):
     """
     Génère un OTP permettant
@@ -444,6 +487,12 @@ class DemandeMotDePasseOublieView(APIView):
 # CONFIRMATION DE LA RÉINITIALISATION
 # =====================================================
 
+@extend_schema(
+    summary="Mot de passe oublié : définir le nouveau mot de passe",
+    description="Code invalide ou expiré : 400 avec un message générique (sans révéler si le compte existe). Révoque les sessions ouvertes.",
+    request=ConfirmationMotDePasseOublieSerializer,
+    responses={200: MessageSerializer},
+)
 class ConfirmationMotDePasseOublieView(APIView):
     """
     Vérifie l'OTP puis définit
@@ -515,6 +564,11 @@ class ConfirmationMotDePasseOublieView(APIView):
 
 
 
+@extend_schema(
+    summary="Connexion avec Google",
+    request=ConnexionGoogleSerializer,
+    responses={200: JetonsSerializer, **erreurs(403, 409)},
+)
 class ConnexionGoogleView(APIView):
     """
     Connexion/inscription via Google Identity Services.
@@ -581,6 +635,12 @@ class ConnexionGoogleView(APIView):
 # DÉCONNEXION
 # =====================================================
 
+@extend_schema(
+    summary="Déconnexion (révocation du refresh token)",
+    auth=[],
+    request=inline_serializer("DeconnexionRequest", {"refresh": serializers.CharField()}),
+    responses={205: OpenApiResponse(description="Refresh token révoqué, aucun corps.")},
+)
 class LogoutView(APIView):
     """
     Déconnecte l'utilisateur en révoquant son refresh token.

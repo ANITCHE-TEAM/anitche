@@ -169,7 +169,7 @@ class Produit(models.Model):
     objects = ProduitQuerySet.as_manager()
 
     @property
-    def est_achetable(self):
+    def est_achetable(self) -> bool:
         """Autorisation d'affichage et d'achat sur la marketplace."""
         return self.est_actif and self.boutique.est_publiable
 

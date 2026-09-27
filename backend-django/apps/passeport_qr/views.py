@@ -19,6 +19,9 @@ from .serializers import (
 )
 from apps.catalogue.models import Produit
 from apps.core.reseau import adresse_ip_client
+from drf_spectacular.utils import PolymorphicProxySerializer, extend_schema, extend_schema_view
+
+from config.schema import erreurs
 from apps.vendeurs.permissions import ROLES_ADMINISTRATION
 
 PERMISSIONS_ESPACE_VENDEUR = [EstVendeurValideOuAdministrateur, BoutiqueDuVendeurNonSuspendue]
@@ -32,6 +35,15 @@ def passeports_accessibles(utilisateur):
     return passeports.filter(boutique__proprietaire=utilisateur)
 
 
+@extend_schema(
+    summary="Vérifier un passeport (scan du QR)",
+    description="Passeport actif : certificat complet (PasseportPublic). Passeport révoqué : 200 réduit (PasseportRevoque, `statut_passeport: \"revoque\"`). Code inconnu : 404.",
+    responses={200: PolymorphicProxySerializer(
+        component_name="PasseportVerifie",
+        serializers=[PasseportPublicSerializer, PasseportRevoqueSerializer],
+        resource_type_field_name=None,
+    ), **erreurs(404)},
+)
 class PasseportPublicVerificationView(APIView):
     """Consultation publique et vérification d'authenticité d'un produit via son code passeport."""
 
@@ -69,6 +81,14 @@ class PasseportPublicVerificationView(APIView):
         return Response(serializer_class(passeport).data, status=status.HTTP_200_OK)
 
 
+@extend_schema_view(
+    get=extend_schema(summary="Passeports de ma boutique"),
+    post=extend_schema(
+        summary="Créer un passeport",
+        request=CreerPasseportSerializer,
+        responses={201: PasseportVendeurSerializer},
+    ),
+)
 class PasseportVendeurListCreateView(generics.ListAPIView):
     """Espace vendeur : lister (paginé) et créer les passeports numériques des produits de sa boutique."""
 
@@ -104,6 +124,12 @@ class PasseportVendeurListCreateView(generics.ListAPIView):
         return Response(PasseportVendeurSerializer(passeport).data, status=status.HTTP_201_CREATED)
 
 
+@extend_schema_view(
+    delete=extend_schema(
+        summary="Révoquer un passeport",
+        description="Révocation, jamais de suppression : le QR affiche ensuite « certificat révoqué ».",
+    ),
+)
 class PasseportVendeurDetailView(generics.RetrieveUpdateDestroyAPIView):
     """Détail, mise à jour ou révocation d'un passeport par le vendeur propriétaire."""
 

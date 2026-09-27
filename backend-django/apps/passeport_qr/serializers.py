@@ -1,3 +1,5 @@
+from typing import Literal, Optional
+
 from django.db import transaction
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -103,22 +105,22 @@ class PasseportPublicSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
-    def get_statut_passeport(self, obj):
+    def get_statut_passeport(self, obj) -> Literal["valide"]:
         return STATUT_PASSEPORT_VALIDE
 
-    def get_statut_passeport_display(self, obj):
+    def get_statut_passeport_display(self, obj) -> str:
         return LIBELLES_STATUT_PASSEPORT[STATUT_PASSEPORT_VALIDE]
 
-    def get_produit_slug(self, obj):
+    def get_produit_slug(self, obj) -> Optional[str]:
         return obj.produit.slug if obj.est_disponible_a_la_vente else None
 
-    def get_boutique_nom(self, obj):
+    def get_boutique_nom(self, obj) -> str:
         return obj.boutique.nom if obj.est_disponible_a_la_vente else VENDEUR_INDISPONIBLE
 
-    def get_variante_nom(self, obj):
+    def get_variante_nom(self, obj) -> Optional[str]:
         return obj.variante.nom if obj.variante else None
 
-    def get_motif_indisponibilite(self, obj):
+    def get_motif_indisponibilite(self, obj) -> Optional[str]:
         return None if obj.est_disponible_a_la_vente else MOTIF_INDISPONIBILITE
 
 
@@ -135,13 +137,13 @@ class PasseportRevoqueSerializer(serializers.ModelSerializer):
         fields = ["code_passeport", "statut_passeport", "statut_passeport_display", "disponible_a_la_vente"]
         read_only_fields = fields
 
-    def get_statut_passeport(self, obj):
+    def get_statut_passeport(self, obj) -> Literal["revoque"]:
         return STATUT_PASSEPORT_REVOQUE
 
-    def get_statut_passeport_display(self, obj):
+    def get_statut_passeport_display(self, obj) -> str:
         return LIBELLES_STATUT_PASSEPORT[STATUT_PASSEPORT_REVOQUE]
 
-    def get_disponible_a_la_vente(self, obj):
+    def get_disponible_a_la_vente(self, obj) -> bool:
         return False
 
 

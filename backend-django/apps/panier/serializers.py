@@ -123,3 +123,10 @@ class PanierSerializer(serializers.ModelSerializer):
             "total",
             "nombre_articles",
         ]
+        # Panier pas encore créé (aucun article ajouté) : renvoyé vide, non
+        # enregistré, avec ces champs à null (schéma OpenAPI exact).
+        extra_kwargs = {
+            "id": {"allow_null": True},
+            "created_at": {"allow_null": True},
+            "updated_at": {"allow_null": True},
+        }

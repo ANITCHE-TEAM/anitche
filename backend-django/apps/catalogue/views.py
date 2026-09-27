@@ -9,6 +9,7 @@ from rest_framework import generics
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.throttling import ScopedRateThrottle
+from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 
 from apps.vendeurs.permissions import BoutiqueDuVendeurNonSuspendue, EstAdministrateur, EstVendeurValide
 from .models import MAX_IMAGES_PAR_PRODUIT, Categorie, Produit, VarianteProduit, ImageProduit, Stock
@@ -73,6 +74,18 @@ class CategorieDetailView(VuePubliqueCatalogueMixin, generics.RetrieveAPIView):
         return Categorie.objects.actives().prefetch_related(sous_categories_actives())
 
 
+@extend_schema(
+    summary="Rechercher des produits",
+    description="Prix filtrés et triés sur le prix affiché : plus petit prix effectif (promo comprise) des variantes actives.",
+    parameters=[
+        OpenApiParameter("recherche", str, description="Nom, description ou nom de boutique (100 caractères au plus)."),
+        OpenApiParameter("categorie", str, description="Slug ou identifiant ; inclut les sous-catégories."),
+        OpenApiParameter("boutique", str, description="Slug ou identifiant de la boutique."),
+        OpenApiParameter("prix_min", int, description="FCFA."),
+        OpenApiParameter("prix_max", int, description="FCFA."),
+        OpenApiParameter("tri", enum=["prix_asc", "prix_desc", "date_asc", "date_desc"], description="Défaut : plus récents d'abord."),
+    ],
+)
 class ProduitPublicListView(VuePubliqueCatalogueMixin, generics.ListAPIView):
     """Recherche et filtrage des produits visibles sur la marketplace."""
     serializer_class = ProduitPublicListSerializer
@@ -256,6 +269,13 @@ class StockUpdateView(generics.UpdateAPIView):
         return get_object_or_404(Stock, variante=variante)
 
 
+@extend_schema_view(
+    post=extend_schema(
+        summary="Ajouter une image à un produit",
+        description="10 images au plus par produit (400 `errors.image` au-delà), 5 Mo au plus.",
+        request={"multipart/form-data": ImageProduitSerializer},
+    ),
+)
 class ImageProduitListCreateView(generics.ListCreateAPIView):
     """Ajout d'images à la galerie d'un produit (10 au maximum)."""
     permission_classes = PERMISSIONS_VENDEUR

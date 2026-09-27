@@ -10,6 +10,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.throttling import ScopedRateThrottle
+from drf_spectacular.utils import extend_schema
 
 from .models import CompteFidelite, CouponReduction, GainFidelite, TransactionFidelite
 from .serializers import (
@@ -18,10 +19,12 @@ from .serializers import (
     CouponReductionSerializer,
     ConvertirPointsCouponSerializer,
     GainFideliteSerializer,
+    VerificationCouponSerializer,
     VerifierCouponSerializer,
 )
 
 
+@extend_schema(summary="Mon compte fidélité", responses={200: CompteFideliteSerializer})
 class MonCompteFideliteView(APIView):
     """Consulter l'état de son compte fidélité (solde, palier, total cumulé)."""
 
@@ -63,6 +66,12 @@ class MesCouponsListView(generics.ListAPIView):
         return CouponReduction.objects.filter(client=self.request.user)
 
 
+@extend_schema(
+    summary="Convertir des points en coupon",
+    description="Débite les points et crée un coupon nominatif valable 3 mois. Solde insuffisant : 400.",
+    request=ConvertirPointsCouponSerializer,
+    responses={201: CouponReductionSerializer},
+)
 class ConvertirPointsEnCouponView(APIView):
     """Échange des points de fidélité contre un bon de réduction personnalisé.
 
@@ -125,6 +134,15 @@ class ConvertirPointsEnCouponView(APIView):
         return Response(CouponReductionSerializer(coupon).data, status=status.HTTP_201_CREATED)
 
 
+@extend_schema(
+    summary="Vérifier un code promo",
+    description=(
+        "Calcule la remise sur un montant donné. Code inexistant (ou coupon nominatif d'un autre client) : 404. "
+        "Coupon inapplicable (déjà utilisé, expiré, montant minimum non atteint) : 400, motif dans `errors.code`."
+    ),
+    request=VerifierCouponSerializer,
+    responses={200: VerificationCouponSerializer},
+)
 class VerifierCouponView(APIView):
     """Vérifie la validité d'un code promo / coupon sur un montant de panier donné.
 

@@ -11,10 +11,14 @@
 uniquement par apps.livraison.services (table des transitions, historique).
 """
 
+from datetime import datetime
+from typing import Optional
+
 from django.utils import timezone
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
-from apps.commandes.serializers import adresse_du_groupe
+from apps.commandes.serializers import AdresseLivraisonLectureSerializer, adresse_du_groupe
 
 from .models import ContestationLivraison, Livraison, LivraisonHistorique, TarifLivraison, normaliser_commune
 from .services import CODE_ESSAIS_MAX, STATUTS_TERMINES, fin_du_delai_de_contestation, role_acteur
@@ -23,6 +27,38 @@ CHAMPS_COMMUNS = [
     "id", "commande", "numero_commande", "livreur", "status",
     "date_livraison_estimee", "date_expedition", "date_livraison", "created_at", "updated_at",
 ]
+
+
+# ---------------------------------------------------------------------
+# Documentation OpenAPI des objets imbriqués construits à la main
+# (livreur et contestation, différents selon le rôle).
+# ---------------------------------------------------------------------
+
+class LivreurVuParLaBoutiqueSerializer(serializers.Serializer):
+    prenom = serializers.CharField()
+
+
+class LivreurVuParLeClientSerializer(serializers.Serializer):
+    prenom = serializers.CharField()
+    telephone = serializers.CharField(allow_null=True, help_text="Seulement pendant « en cours ».")
+
+
+class LivreurVuParLAdministrationSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    prenom = serializers.CharField()
+    nom = serializers.CharField()
+
+
+class ContestationVueParLeClientSerializer(serializers.Serializer):
+    statut = serializers.ChoiceField(choices=ContestationLivraison.Statut.choices)
+    date_creation = serializers.DateTimeField()
+    date_resolution = serializers.DateTimeField(allow_null=True)
+
+
+class ContestationVueParLAdministrationSerializer(ContestationVueParLeClientSerializer):
+    id = serializers.UUIDField()
+    motif = serializers.CharField()
+    commentaire_resolution = serializers.CharField()
 
 
 def _contestation(livraison):
@@ -36,6 +72,7 @@ class _LivraisonBaseSerializer(serializers.ModelSerializer):
     numero_commande = serializers.CharField(source="commande.numero_commande", read_only=True)
     livreur = serializers.SerializerMethodField()
 
+    @extend_schema_field(LivreurVuParLaBoutiqueSerializer(allow_null=True))
     def get_livreur(self, livraison):
         if livraison.livreur is None:
             return None
@@ -50,10 +87,11 @@ class _CoordonneesClientMixin(serializers.Serializer):
     adresse = serializers.SerializerMethodField()
     telephone_contact = serializers.SerializerMethodField()
 
+    @extend_schema_field(AdresseLivraisonLectureSerializer(allow_null=True))
     def get_adresse(self, livraison):
         return adresse_du_groupe(livraison.commande.groupe)
 
-    def get_telephone_contact(self, livraison):
+    def get_telephone_contact(self, livraison) -> str:
         groupe = livraison.commande.groupe
         return groupe.livraison_telephone if groupe else ""
 
@@ -71,6 +109,7 @@ class LivraisonClientSerializer(_CoordonneesClientMixin, _LivraisonBaseSerialize
         ]
         read_only_fields = fields
 
+    @extend_schema_field(LivreurVuParLeClientSerializer(allow_null=True))
     def get_livreur(self, livraison):
         if livraison.livreur is None:
             return None
@@ -78,11 +117,12 @@ class LivraisonClientSerializer(_CoordonneesClientMixin, _LivraisonBaseSerialize
         telephone = livraison.livreur.telephone if livraison.status == Livraison.Status.EN_COURS else None
         return {"prenom": livraison.livreur.prenom, "telephone": telephone}
 
-    def get_code_livraison(self, livraison):
+    def get_code_livraison(self, livraison) -> Optional[str]:
         if livraison.status != Livraison.Status.EN_COURS:
             return None
         return livraison.code_chiffre or None
 
+    @extend_schema_field(ContestationVueParLeClientSerializer(allow_null=True))
     def get_contestation(self, livraison):
         contestation = _contestation(livraison)
         if contestation is None:
@@ -93,7 +133,7 @@ class LivraisonClientSerializer(_CoordonneesClientMixin, _LivraisonBaseSerialize
             "date_resolution": contestation.date_resolution,
         }
 
-    def get_date_limite_contestation(self, livraison):
+    def get_date_limite_contestation(self, livraison) -> Optional[datetime]:
         if livraison.status != Livraison.Status.LIVREE or not livraison.date_livraison:
             return None
         return fin_du_delai_de_contestation(livraison)
@@ -116,7 +156,7 @@ class LivraisonLivreurSerializer(_CoordonneesClientMixin, _LivraisonBaseSerializ
             donnees.update({"adresse_livraison": "", "adresse": None, "telephone_contact": ""})
         return donnees
 
-    def get_code_essais_restants(self, livraison):
+    def get_code_essais_restants(self, livraison) -> Optional[int]:
         if livraison.status != Livraison.Status.EN_COURS:
             return None
         return max(CODE_ESSAIS_MAX - livraison.code_essais, 0)
@@ -139,11 +179,13 @@ class LivraisonAdministrationSerializer(_CoordonneesClientMixin, _LivraisonBaseS
         ]
         read_only_fields = fields
 
+    @extend_schema_field(LivreurVuParLAdministrationSerializer(allow_null=True))
     def get_livreur(self, livraison):
         if livraison.livreur is None:
             return None
         return {"id": livraison.livreur.pk, "prenom": livraison.livreur.prenom, "nom": livraison.livreur.nom}
 
+    @extend_schema_field(ContestationVueParLAdministrationSerializer(allow_null=True))
     def get_contestation(self, livraison):
         contestation = _contestation(livraison)
         if contestation is None:
@@ -168,7 +210,7 @@ class LivraisonHistoriqueSerializer(serializers.ModelSerializer):
         fields = ["id", "livraison", "ancien_status", "nouveau_status", "acteur", "commentaire", "created_at"]
         read_only_fields = fields
 
-    def get_acteur(self, ligne):
+    def get_acteur(self, ligne) -> str:
         # Lignes antérieures au champ role_acteur : rôle actuel de l'auteur.
         return ligne.role_acteur or role_acteur(ligne.effectue_par)
 
@@ -296,3 +338,35 @@ class TarifLivraisonSerializer(serializers.ModelSerializer):
                 if commune_normalisee else "Cette zone a déjà un tarif par défaut."
             )})
         return attrs
+
+
+# ---------------------------------------------------------------------
+# Documentation OpenAPI des réponses construites dans les vues.
+# ---------------------------------------------------------------------
+
+class TarifCommuneSerializer(serializers.Serializer):
+    commune = serializers.CharField()
+    zone = serializers.ChoiceField(choices=TarifLivraison.Zone.choices)
+    montant = serializers.IntegerField(help_text="FCFA.")
+
+
+class TarifAutresVillesSerializer(serializers.Serializer):
+    zone = serializers.ChoiceField(choices=TarifLivraison.Zone.choices)
+    montant = serializers.IntegerField(help_text="FCFA.")
+
+
+class GrilleTarifsSerializer(serializers.Serializer):
+    communes = TarifCommuneSerializer(many=True, help_text="Menu déroulant du checkout.")
+    autres_villes = TarifAutresVillesSerializer(allow_null=True, help_text="Tarif des villes sans tarif propre.")
+
+
+class LivreurRetireSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    prenom = serializers.CharField()
+    nom = serializers.CharField()
+    role = serializers.CharField()
+
+
+class RetraitLivreurSerializer(serializers.Serializer):
+    utilisateur = LivreurRetireSerializer()
+    livraisons_a_reassigner = LivraisonAReassignerSerializer(many=True)

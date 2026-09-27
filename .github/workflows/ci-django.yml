@@ -57,5 +57,16 @@ jobs:
       - name: Vérifier les migrations (pas de modèle non migré)
         run: python manage.py makemigrations --check --dry-run
 
+      # Schéma OpenAPI : aucun avertissement toléré, et le fichier versionné
+      # (lu par le frontend, relu dans les PR) doit être à jour. En cas
+      # d'échec : python manage.py spectacular --file schema.yaml
+      - name: Vérifier le schéma OpenAPI (sans avertissement, schema.yaml à jour)
+        run: |
+          python manage.py spectacular --validate --fail-on-warn --file /tmp/schema.yaml
+          diff -u schema.yaml /tmp/schema.yaml || {
+            echo "::error file=backend-django/schema.yaml::schema.yaml n'est plus à jour : python manage.py spectacular --file schema.yaml"
+            exit 1
+          }
+
       - name: Lancer les tests
         run: python manage.py test

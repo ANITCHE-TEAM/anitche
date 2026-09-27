@@ -1,4 +1,7 @@
+from typing import Optional
+
 from django.db import transaction
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
@@ -285,7 +288,7 @@ class ProduitPublicListSerializer(serializers.ModelSerializer):
             'date_creation',
         ]
 
-    def get_image_principale(self, obj):
+    def get_image_principale(self, obj) -> Optional[str]:
         images = list(obj.images.all())
         image = next((i for i in images if i.est_principale), images[0] if images else None)
         if image and image.image:
@@ -295,13 +298,13 @@ class ProduitPublicListSerializer(serializers.ModelSerializer):
             return image.image.url
         return None
 
-    def get_prix_min(self, obj):
+    def get_prix_min(self, obj) -> float:
         """Plus petit prix effectif (promo comprise) des variantes actives."""
         if obj.prix_min_effectif is not None:
             return obj.prix_min_effectif
         return obj.prix_base
 
-    def get_en_stock(self, obj):
+    def get_en_stock(self, obj) -> bool:
         return obj.a_du_stock
 
 
@@ -329,6 +332,7 @@ class ProduitPublicDetailSerializer(serializers.ModelSerializer):
             'date_mise_a_jour',
         ]
 
+    @extend_schema_field(VariantePubliqueSerializer(many=True))
     def get_variantes(self, obj):
         variantes_actives = getattr(obj, 'variantes_actives', None)
         if variantes_actives is None:

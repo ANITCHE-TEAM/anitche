@@ -19,6 +19,7 @@ from .serializers import (
     CommandeVendeurSerializer,
     GroupeCommandeSerializer,
     CommandeItemSerializer,
+    SimulationCheckoutSerializer,
     SimulerFraisSerializer,
 )
 from .services import (
@@ -32,6 +33,9 @@ from .services import (
 )
 from apps.catalogue.models import Stock
 from apps.core.exceptions import ErreurMetier
+from drf_spectacular.utils import extend_schema
+
+from config.schema import erreurs
 from apps.panier.models import Panier
 from apps.panier.services import get_or_create_panier
 from apps.fidelite.services import consommer_coupon
@@ -49,6 +53,16 @@ class ServiceIndisponible(APIException):
     default_detail = "La validation des commandes est momentanément indisponible."
 
 
+@extend_schema(
+    summary="Valider le panier (checkout)",
+    description=(
+        "Crée une commande par boutique (statut `creee`, à payer sous 30 minutes), décrémente le stock "
+        "et vide le panier. Mêmes montants que `simuler-frais/`. Stock insuffisant ou panier vide : "
+        "400 (`errors.non_field_errors`)."
+    ),
+    request=SimulerFraisSerializer,
+    responses={201: CommandeSerializer(many=True), **erreurs(503)},
+)
 class ValiderPanierView(APIView):
     """Transforme le panier courant en une ou plusieurs commandes (une par
     boutique), décrémente le stock, puis vide le panier.
@@ -188,6 +202,12 @@ class ValiderPanierView(APIView):
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
+@extend_schema(
+    summary="Simuler les montants du checkout",
+    description="Aucune écriture : montants par commande (une par boutique) et totaux, recalculés à l'identique à la validation.",
+    request=SimulerFraisSerializer,
+    responses={200: SimulationCheckoutSerializer, **erreurs(503)},
+)
 class SimulerFraisView(APIView):
     """Montants du checkout AVANT validation : par commande (une par
     boutique), articles, remise, frais de livraison (ou livraison offerte)
@@ -264,6 +284,12 @@ class CommandeDetailView(generics.RetrieveAPIView):
         return Commande.objects.filter(client=self.request.user).select_related("groupe").prefetch_related("article")
 
 
+@extend_schema(
+    summary="Annuler sa commande",
+    description="Possible tant que la commande n'est pas en préparation (409 sinon).",
+    request=None,
+    responses={200: CommandeDetailSerializer, **erreurs(409)},
+)
 class AnnulerCommandeView(APIView):
     """Annulation par le client, tant que la commande n'est pas en
     préparation. Stock restitué une seule fois ; un paiement déjà encaissé
@@ -308,6 +334,12 @@ class CommandeVendeurDetailView(generics.RetrieveAPIView):
         return commandes_du_vendeur(self.request.user)
 
 
+@extend_schema(
+    summary="Passer une commande en préparation (vendeur)",
+    description="`confirmee` → `preparation`. Boutique suspendue : seules les commandes payées (403 sinon).",
+    request=None,
+    responses={200: CommandeVendeurSerializer, **erreurs(409)},
+)
 class PasserEnPreparationView(APIView):
     """confirmee → preparation, par le vendeur de la boutique.
 
@@ -332,6 +364,12 @@ class PasserEnPreparationView(APIView):
 # ADMINISTRATION
 # =====================================================================
 
+@extend_schema(
+    summary="Annuler une commande (administration)",
+    description="Jusqu'à la préparation incluse (409 au-delà).",
+    request=None,
+    responses={200: CommandeDetailSerializer, **erreurs(409)},
+)
 class AnnulerCommandeAdministrationView(APIView):
     """Annulation par l'administration (jusqu'à la préparation incluse)."""
     permission_classes = [IsAuthenticated, EstAdministrateur]

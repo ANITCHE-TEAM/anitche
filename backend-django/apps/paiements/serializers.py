@@ -163,3 +163,19 @@ class BaremeFraisSerializer(serializers.ModelSerializer):
         if debut and fin and fin <= debut:
             raise serializers.ValidationError({"date_fin": "Doit être postérieure à date_debut."})
         return attrs
+
+
+class ResumeReversementsSerializer(serializers.Serializer):
+    """Réponse de vendeur/reversements/resume/ (documentation OpenAPI) :
+    montants nets en FCFA par étape, et nombre de reversements."""
+
+    en_attente_livraison = serializers.IntegerField()
+    nombre_en_attente_livraison = serializers.IntegerField()
+    en_retractation = serializers.IntegerField(help_text="Suspendus (retour en cours) compris.")
+    nombre_en_retractation = serializers.IntegerField()
+    disponible = serializers.IntegerField(help_text="Versements en cours compris.")
+    nombre_disponible = serializers.IntegerField()
+    verse = serializers.IntegerField()
+    nombre_verse = serializers.IntegerField()
+    ajustements_en_attente = serializers.IntegerField()
+    delai_retractation_jours = serializers.IntegerField()

@@ -46,7 +46,7 @@ class CompteFideliteSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
-    def get_points_en_attente(self, compte):
+    def get_points_en_attente(self, compte) -> int:
         return points_en_attente(compte.utilisateur_id)
 
 
@@ -118,3 +118,14 @@ class ConvertirPointsCouponSerializer(serializers.Serializer):
 class VerifierCouponSerializer(serializers.Serializer):
     code = serializers.CharField(max_length=30)
     montant_commande = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.00"))
+
+
+class VerificationCouponSerializer(serializers.Serializer):
+    """Réponse 200 de verifier-coupon/ (documentation OpenAPI)."""
+
+    valide = serializers.BooleanField(help_text="Toujours true (un refus est une erreur 400 ou 404).")
+    detail = serializers.CharField()
+    remise = serializers.DecimalField(max_digits=12, decimal_places=2)
+    montant_initial = serializers.DecimalField(max_digits=12, decimal_places=2)
+    montant_final = serializers.DecimalField(max_digits=12, decimal_places=2)
+    coupon = CouponReductionSerializer()

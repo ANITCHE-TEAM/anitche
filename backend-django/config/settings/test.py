@@ -6,6 +6,9 @@ from pathlib import Path
 
 DEBUG = True
 
+# Routes de documentation montées pour les tests du schéma (config/tests_schema.py).
+DOCUMENTATION_API_ACTIVE = True
+
 # Fichiers écrits par les tests (pièces KYC, logos, images produit,
 # pièces jointes...) : dossier temporaire propre à chaque exécution,
 # supprimé à la fin. Sans ceci, chaque lancement de la suite déposait des

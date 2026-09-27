@@ -17,6 +17,9 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from apps.core.exceptions import ErreurMetier
+from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
+
+from config.schema import erreurs
 
 from .models import Boutique, DemandeVendeur
 from .permissions import (
@@ -29,6 +32,7 @@ from .serializers import (
     BoutiqueAdministrationSerializer,
     BoutiquePubliqueSerializer,
     BoutiqueSerializer,
+    DecisionVendeurReponseSerializer,
     DecisionVendeurSerializer,
     DemandeVendeurSerializer,
     RefusVendeurSerializer,
@@ -47,6 +51,13 @@ logger_securite = logging.getLogger('securite')
 # Public
 # --------------------------------------------------------------------------
 
+@extend_schema(
+    summary="Boutiques publiques",
+    parameters=[
+        OpenApiParameter("recherche", str, description="Partie du nom (100 caractères au plus)."),
+        OpenApiParameter("ville", str, description="Ville exacte (insensible à la casse)."),
+    ],
+)
 class BoutiquePubliqueListView(generics.ListAPIView):
     """Liste des boutiques ouvertes tenues par un vendeur validé."""
 
@@ -82,6 +93,16 @@ class BoutiquePubliqueDetailView(generics.RetrieveAPIView):
 # Vendeur authentifié
 # --------------------------------------------------------------------------
 
+@extend_schema_view(
+    get=extend_schema(summary="Ma boutique", responses={200: BoutiqueSerializer, **erreurs(404)}),
+    put=extend_schema(summary="Modifier ma boutique", responses={200: BoutiqueSerializer, **erreurs(404)}),
+    patch=extend_schema(summary="Modifier ma boutique", responses={200: BoutiqueSerializer, **erreurs(404)}),
+    post=extend_schema(
+        summary="Créer ma boutique",
+        description="Une seule boutique par compte (400 sinon).",
+        responses={201: BoutiqueSerializer},
+    ),
+)
 class MaBoutiqueView(generics.RetrieveUpdateAPIView):
     """GET / PATCH / PUT : la boutique du vendeur connecté. POST : la créer.
 
@@ -173,11 +194,23 @@ class DecisionVendeurView(APIView):
         )
 
 
+@extend_schema(
+    summary="Valider une demande vendeur",
+    description="Le compte devient vendeur (KYC validé). Auto-approbation : 403 ; demande hors file d'attente : 404.",
+    request=DecisionVendeurSerializer,
+    responses={200: DecisionVendeurReponseSerializer},
+)
 class ValiderDemandeVendeurView(DecisionVendeurView):
     service = staticmethod(valider_demande_vendeur)
     message_succes = "Demande validée : le compte est désormais vendeur."
 
 
+@extend_schema(
+    summary="Refuser une demande vendeur",
+    description="Commentaire obligatoire (motif transmis au demandeur). Auto-décision : 403 ; demande hors file d'attente : 404.",
+    request=RefusVendeurSerializer,
+    responses={200: DecisionVendeurReponseSerializer},
+)
 class RefuserDemandeVendeurView(DecisionVendeurView):
     serializer_class = RefusVendeurSerializer
     service = staticmethod(refuser_demande_vendeur)

@@ -12,6 +12,9 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.core.exceptions import ErreurMetier
+from drf_spectacular.utils import extend_schema, extend_schema_view
+
+from config.schema import FICHIER, erreurs
 from apps.vendeurs.permissions import ROLES_ADMINISTRATION
 
 from . import services
@@ -39,11 +42,25 @@ def erreur_refus(refus):
     return ErreurMetier(refus.message, refus.code_http)
 
 
+@extend_schema_view(
+    get=extend_schema(summary="Mes demandes de retour", responses={200: DemandeRetourSerializer(many=True)}),
+    post=extend_schema(
+        summary="Demander un retour",
+        description=(
+            "Commande livrée, dans les 7 jours suivant la livraison ; remboursement uniquement. "
+            "Hors délai, commande non livrée ou déjà retournée : 400 avec le motif."
+        ),
+        request=CreerDemandeRetourSerializer,
+        responses={201: DemandeRetourSerializer, **erreurs(403, 404)},
+    ),
+)
 class DemandeRetourListCreateView(APIView):
     """Le client liste ses demandes de retour ou en crée une (commande livrée,
     dans le délai de retour)."""
 
     permission_classes = [IsAuthenticated]
+    # APIView brut : la pagination par défaut ne s'applique pas d'elle-même.
+    pagination_class = PageNumberPagination
 
     def get_throttles(self):
         # Limite dédiée à la création ; la liste garde le taux général.
@@ -56,8 +73,7 @@ class DemandeRetourListCreateView(APIView):
             .select_related("commande", "boutique", "client")
             .prefetch_related("articles__commande_item", "photos")
         )
-        # APIView brut : la pagination par défaut ne s'applique pas d'elle-même.
-        paginator = PageNumberPagination()
+        paginator = self.pagination_class()
         page = paginator.paginate_queryset(retours, request, view=self)
         serializer = DemandeRetourSerializer(page, many=True, context={"request": request})
         return paginator.get_paginated_response(serializer.data)
@@ -99,6 +115,16 @@ class EspaceVendeurRetoursListView(generics.ListAPIView):
         return qs.filter(boutique__proprietaire=self.request.user)
 
 
+@extend_schema(
+    summary="Faire avancer une demande de retour",
+    description=(
+        "Boutique (vendeur propriétaire ou administration) : approuver, rejeter (motif `reponse` obligatoire), "
+        "en_transit, receptionner, rembourser, cloturer. Client : en_transit, annuler. "
+        "Action non permise à ce compte : 403 ; transition invalide : 400."
+    ),
+    request=TraiterDemandeRetourSerializer,
+    responses={200: DemandeRetourSerializer, **erreurs(403, 404)},
+)
 class TraiterDemandeRetourView(APIView):
     """Actions sur une demande (table des transitions : apps.retours.services).
 
@@ -121,6 +147,12 @@ class TraiterDemandeRetourView(APIView):
         return Response(DemandeRetourSerializer(demande, context={"request": request}).data, status=status.HTTP_200_OK)
 
 
+@extend_schema(
+    summary="Ajouter une photo justificative",
+    description="Client de la demande, avant la réception, 5 photos au plus. Fichier manquant : 400 `errors.image`.",
+    request={"multipart/form-data": PhotoRetourSerializer},
+    responses={201: PhotoRetourSerializer, **erreurs(403, 404)},
+)
 class AjouterPhotoRetourView(APIView):
     """Photo justificative ajoutée par le client, tant que le retour n'est pas
     traité (5 au plus). Fichier vérifié (taille, contenu réel) et renommé."""
@@ -144,6 +176,10 @@ class AjouterPhotoRetourView(APIView):
         return Response(PhotoRetourSerializer(photo, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
 
+@extend_schema(
+    summary="Télécharger une photo justificative",
+    responses={200: FICHIER},
+)
 class TelechargerPhotoRetourView(APIView):
     """Fichier d'une photo justificative, servi par Django après contrôle
     d'accès (client, vendeur de la boutique, administration) : /media/

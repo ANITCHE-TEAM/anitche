@@ -1,3 +1,5 @@
+from drf_spectacular.utils import OpenApiParameter, extend_schema, inline_serializer
+from rest_framework import serializers
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
 from rest_framework.views import APIView
@@ -9,6 +11,13 @@ from .serializers import NotificationSerializer, PreferenceNotificationSerialize
 from .services import ServiceNotification
 
 
+@extend_schema(
+    summary="Mes notifications",
+    parameters=[
+        OpenApiParameter("non_lues", bool, description="true : seulement les non lues."),
+        OpenApiParameter("type", enum=[valeur for valeur, _ in Notification.TypeNotification.choices]),
+    ],
+)
 class NotificationListView(generics.ListAPIView):
     """Liste paginée des notifications de l'utilisateur connecté."""
 
@@ -32,6 +41,10 @@ class NotificationListView(generics.ListAPIView):
         return qs
 
 
+@extend_schema(
+    summary="Nombre de notifications non lues",
+    responses={200: inline_serializer("CompteurNonLues", {"non_lues": serializers.IntegerField()})},
+)
 class NotificationCompteurNonLuesView(APIView):
     """Retourne le nombre de notifications non lues de l'utilisateur connecté."""
 
@@ -45,6 +58,11 @@ class NotificationCompteurNonLuesView(APIView):
         return Response({"non_lues": nb_non_lues}, status=status.HTTP_200_OK)
 
 
+@extend_schema(
+    summary="Marquer une notification comme lue",
+    request=None,
+    responses={200: NotificationSerializer},
+)
 class NotificationMarquerLueView(APIView):
     """Marque une notification spécifique comme lue."""
 
@@ -56,6 +74,14 @@ class NotificationMarquerLueView(APIView):
         return Response(NotificationSerializer(notification).data, status=status.HTTP_200_OK)
 
 
+@extend_schema(
+    summary="Marquer toutes les notifications comme lues",
+    request=None,
+    responses={200: inline_serializer(
+        "NotificationsMarqueesLues",
+        {"message": serializers.CharField(), "nb_modifiees": serializers.IntegerField()},
+    )},
+)
 class NotificationMarquerToutesLuesView(APIView):
     """Marque toutes les notifications non lues de l'utilisateur connecté comme lues."""
 

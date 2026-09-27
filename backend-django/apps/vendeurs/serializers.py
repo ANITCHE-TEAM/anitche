@@ -1,3 +1,5 @@
+from typing import Optional
+
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
 from django.urls import reverse
@@ -222,13 +224,13 @@ class DossierKYCLectureSerializer(serializers.ModelSerializer):
         )
         return request.build_absolute_uri(chemin) if request else chemin
 
-    def get_piece_identite_recto_url(self, obj):
+    def get_piece_identite_recto_url(self, obj) -> Optional[str]:
         return self._url_document(obj, 'piece_identite_recto') if obj.piece_identite_recto else None
 
-    def get_piece_identite_verso_url(self, obj):
+    def get_piece_identite_verso_url(self, obj) -> Optional[str]:
         return self._url_document(obj, 'piece_identite_verso') if obj.piece_identite_verso else None
 
-    def get_selfie_url(self, obj):
+    def get_selfie_url(self, obj) -> Optional[str]:
         return self._url_document(obj, 'selfie') if obj.selfie else None
 
 
@@ -256,3 +258,17 @@ class RefusVendeurSerializer(DecisionVendeurSerializer):
     """Un refus doit être motivé : le motif est renvoyé au vendeur."""
 
     commentaire = serializers.CharField(required=True, allow_blank=False)
+
+
+class CompteDecisionSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    email = serializers.EmailField()
+    role = serializers.CharField()
+    statut_kyc = serializers.CharField()
+
+
+class DecisionVendeurReponseSerializer(serializers.Serializer):
+    """Réponse des décisions sur une demande vendeur (documentation OpenAPI)."""
+
+    message = serializers.CharField()
+    utilisateur = CompteDecisionSerializer()

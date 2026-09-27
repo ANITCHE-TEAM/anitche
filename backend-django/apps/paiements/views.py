@@ -9,6 +9,9 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from apps.core.exceptions import ErreurMetier
+from drf_spectacular.utils import OpenApiParameter, PolymorphicProxySerializer, extend_schema
+
+from config.schema import erreurs
 from apps.vendeurs.permissions import ROLES_ADMINISTRATION, EstAdministrateur, EstVendeurValide
 
 from . import reversements, services
@@ -21,6 +24,7 @@ from .serializers import (
     PaiementSerializer,
     RemboursementAdminSerializer,
     ReversementAdminSerializer,
+    ResumeReversementsSerializer,
     ReversementVendeurSerializer,
     TransfererReversementSerializer,
     TraiterRemboursementSerializer,
@@ -40,6 +44,16 @@ def paiements_visibles(utilisateur):
     return qs.filter(client=utilisateur)
 
 
+def paiement_selon_role(many=False):
+    """Paiement vu par le client ou par l'administration (schéma OpenAPI)."""
+    return PolymorphicProxySerializer(
+        component_name="PaiementSelonRole",
+        serializers=[PaiementSerializer, PaiementAdminSerializer],
+        resource_type_field_name=None,
+        many=many,
+    )
+
+
 def serializer_paiement(utilisateur):
     return PaiementAdminSerializer if utilisateur.role in ROLES_ADMINISTRATION else PaiementSerializer
 
@@ -48,6 +62,15 @@ def serializer_paiement(utilisateur):
 # CLIENT
 # =====================================================================
 
+@extend_schema(
+    summary="Payer une commande ou un checkout entier",
+    description=(
+        "Indiquer `commande_id` ou `groupe_commande_id`. Rediriger ensuite vers `url_paiement` ; le statut final "
+        "arrive par la notification serveur du fournisseur (interroger le détail du paiement)."
+    ),
+    request=InitierPaiementSerializer,
+    responses={201: PaiementSerializer, **erreurs(502)},
+)
 class InitierPaiementView(APIView):
     """Le client paie sa commande (ou son checkout entier) en ligne."""
 
@@ -74,26 +97,50 @@ class InitierPaiementView(APIView):
                         status=status.HTTP_201_CREATED)
 
 
+@extend_schema(
+    summary="Mes paiements (tous pour l'administration)",
+    description="Représentation PaiementAdmin pour l'administration, Paiement sinon.",
+    responses={200: paiement_selon_role(many=True)},
+)
 class PaiementListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):  # génération du schéma OpenAPI
+            return Paiement.objects.none()
         return paiements_visibles(self.request.user)
 
     def get_serializer_class(self):
+        if getattr(self, "swagger_fake_view", False):  # génération du schéma OpenAPI
+            return PaiementSerializer
         return serializer_paiement(self.request.user)
 
 
+@extend_schema(
+    summary="Détail d'un paiement",
+    description="Représentation PaiementAdmin pour l'administration, Paiement sinon.",
+    responses={200: paiement_selon_role()},
+)
 class PaiementDetailView(generics.RetrieveAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):  # génération du schéma OpenAPI
+            return Paiement.objects.none()
         return paiements_visibles(self.request.user)
 
     def get_serializer_class(self):
+        if getattr(self, "swagger_fake_view", False):  # génération du schéma OpenAPI
+            return PaiementSerializer
         return serializer_paiement(self.request.user)
 
 
+@extend_schema(
+    summary="Abandonner un paiement en attente",
+    description="Pour changer de moyen de paiement. 409 si le paiement n'est plus en attente.",
+    request=None,
+    responses={200: PaiementSerializer, **erreurs(409)},
+)
 class AnnulerPaiementView(APIView):
     """Le client abandonne son paiement en attente pour en relancer un autre."""
 
@@ -130,11 +177,13 @@ class _VueNotification(APIView):
         return Response({cle: resultat.message}, status=resultat.code_http)
 
 
+@extend_schema(exclude=True)
 class WebhookPaiementView(_VueNotification):
     def post(self, request, fournisseur):
         return self.repondre(services.traiter_notification_paiement(fournisseur, request))
 
 
+@extend_schema(exclude=True)
 class WebhookTransfertView(_VueNotification):
     def post(self, request, fournisseur):
         return self.repondre(reversements.traiter_notification_transfert(fournisseur, request))
@@ -150,6 +199,7 @@ def reversements_du_vendeur(utilisateur):
     ).prefetch_related("commande__article")
 
 
+@extend_schema(parameters=[OpenApiParameter("statut", enum=[valeur for valeur, _ in Reversement.Statut.choices])])
 class ReversementVendeurListView(generics.ListAPIView):
     """Ce que le vendeur a vendu, les frais déduits, ce qui lui sera reversé et quand."""
 
@@ -162,6 +212,10 @@ class ReversementVendeurListView(generics.ListAPIView):
         return qs.filter(statut=statut) if statut else qs
 
 
+@extend_schema(
+    summary="Résumé de mes reversements (vendeur)",
+    responses={200: ResumeReversementsSerializer, **erreurs(404)},
+)
 class ResumeReversementsVendeurView(APIView):
     permission_classes = [IsAuthenticated, EstVendeurValide]
 
@@ -176,6 +230,7 @@ class ResumeReversementsVendeurView(APIView):
 # ADMINISTRATION
 # =====================================================================
 
+@extend_schema(parameters=[OpenApiParameter("statut", enum=[valeur for valeur, _ in Remboursement.Statut.choices])])
 class RemboursementAdminListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated, EstAdministrateur]
     serializer_class = RemboursementAdminSerializer
@@ -186,6 +241,11 @@ class RemboursementAdminListView(generics.ListAPIView):
         return qs.filter(statut=statut) if statut else qs
 
 
+@extend_schema(
+    summary="Traiter un remboursement (administration)",
+    request=TraiterRemboursementSerializer,
+    responses={200: RemboursementAdminSerializer, **erreurs(409)},
+)
 class TraiterRemboursementView(APIView):
     permission_classes = [IsAuthenticated, EstAdministrateur]
 
@@ -205,6 +265,7 @@ def reversements_admin():
     return Reversement.objects.select_related("commande", "boutique").prefetch_related("commande__article")
 
 
+@extend_schema(parameters=[OpenApiParameter("statut", enum=[valeur for valeur, _ in Reversement.Statut.choices])])
 class ReversementAdminListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated, EstAdministrateur]
     serializer_class = ReversementAdminSerializer
@@ -215,6 +276,11 @@ class ReversementAdminListView(generics.ListAPIView):
         return qs.filter(statut=statut) if statut else qs
 
 
+@extend_schema(
+    summary="Enregistrer un versement manuel (administration)",
+    request=VerserReversementSerializer,
+    responses={200: ReversementAdminSerializer, **erreurs(409)},
+)
 class VerserReversementView(APIView):
     """Versement manuel : l'admin a envoyé l'argent et saisit la référence."""
 
@@ -231,6 +297,11 @@ class VerserReversementView(APIView):
         return Response(ReversementAdminSerializer(reversements_admin().get(pk=pk)).data)
 
 
+@extend_schema(
+    summary="Verser par transfert du fournisseur (administration)",
+    request=TransfererReversementSerializer,
+    responses={200: ReversementAdminSerializer, **erreurs(409)},
+)
 class TransfererReversementView(APIView):
     """Versement par l'API de transfert du fournisseur."""
 

@@ -19,6 +19,10 @@ def _parse_liste_env(valeur):
 
 DEBUG = False
 
+# Aucune documentation d'API en production (décision d'équipe) : valeur
+# figée ici, jamais lue dans l'environnement. Vérifié par un test permanent.
+DOCUMENTATION_API_ACTIVE = False
+
 SECRET_KEY = config('SECRET_KEY', default='')
 # Le check sur le préfixe 'django-insecure-' vise le placeholder connu de
 # startproject, mais ne protège pas contre une future valeur par défaut

@@ -10,6 +10,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.core.exceptions import ErreurMetier
+from drf_spectacular.utils import extend_schema, extend_schema_view, inline_serializer
+from rest_framework import serializers
+
+from config.schema import FICHIER, erreurs
 
 from . import services
 from .models import SupportTicket, TicketAttachment, TicketMessage
@@ -36,6 +40,10 @@ class ScopedOnPostMixin:
 
 # ---------- SupportTicket ----------
 
+@extend_schema_view(
+    get=extend_schema(summary="Tickets visibles par ce compte"),
+    post=extend_schema(summary="Ouvrir un ticket"),
+)
 class SupportTicketListCreateView(ScopedOnPostMixin, generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = SupportTicketSerializer
@@ -59,6 +67,18 @@ class SupportTicketListCreateView(ScopedOnPostMixin, generics.ListCreateAPIView)
             transaction.on_commit(lambda: services.notify_new_ticket(ticket))
 
 
+@extend_schema_view(
+    get=extend_schema(summary="Détail d'un ticket"),
+    put=extend_schema(
+        summary="Reclasser un ticket (équipe support)",
+        responses={200: SupportTicketSerializer, **erreurs(403)},
+    ),
+    patch=extend_schema(
+        summary="Reclasser un ticket (équipe support)",
+        description="Catégorie et priorité, réservées à l'équipe support et à l'administration (403 sinon).",
+        responses={200: SupportTicketSerializer, **erreurs(403)},
+    ),
+)
 class SupportRetrieveUpdateView(generics.RetrieveUpdateAPIView):
     """Détail et reclassement (category/priority, staff seulement). Plus de
     suppression par l'API : un ticket est un historique de litige."""
@@ -79,6 +99,14 @@ class SupportRetrieveUpdateView(generics.RetrieveUpdateAPIView):
             serializer.save()
 
 
+@extend_schema(
+    summary="Changer le statut d'un ticket",
+    description="Équipe support ; le créateur peut seulement fermer son ticket. Transition invalide : 400.",
+    request=inline_serializer("ChangementStatutTicketRequest", {
+        "status": serializers.ChoiceField(choices=SupportTicket.Status.choices),
+    }),
+    responses={200: SupportTicketSerializer, **erreurs(403, 404)},
+)
 class SupportTicketChangeStatusView(APIView):
     """Transitions réservées au staff (table services.ALLOWED_TRANSITIONS),
     sauf pour le créateur qui peut fermer son propre ticket."""
@@ -93,6 +121,14 @@ class SupportTicketChangeStatusView(APIView):
         return Response(SupportTicketSerializer(ticket, context={"request": request}).data)
 
 
+@extend_schema(
+    summary="Prendre ou assigner un ticket",
+    description="Agent support : prendre un ticket de la file (sans corps). Administration : assigner à un agent (`assigned_to`).",
+    request=inline_serializer("AssignationTicketRequest", {
+        "assigned_to": serializers.IntegerField(required=False, help_text="Identifiant de l'agent (administration)."),
+    }),
+    responses={200: SupportTicketSerializer, **erreurs(403, 404)},
+)
 class SupportTicketAssignView(APIView):
     """Agent support : prendre un ticket de la file. Administration :
     assigner à un agent (`assigned_to`) ou à soi."""
@@ -107,6 +143,14 @@ class SupportTicketAssignView(APIView):
         return Response(SupportTicketSerializer(ticket, context={"request": request}).data)
 
 
+@extend_schema(
+    summary="Noter un ticket résolu ou fermé",
+    description="Créateur du ticket, une seule fois (403 pour un autre compte, 400 si pas encore résolu ou déjà noté).",
+    request=inline_serializer("NoteTicketRequest", {
+        "satisfaction_rating": serializers.IntegerField(min_value=1, max_value=5),
+    }),
+    responses={200: SupportTicketSerializer, **erreurs(403)},
+)
 class SupportTicketRateView(APIView):
     """Le créateur note le ticket une fois, quand il est résolu ou fermé."""
 
@@ -136,6 +180,14 @@ class SupportTicketRateView(APIView):
 
 # ---------- TicketMessage ----------
 
+@extend_schema_view(
+    get=extend_schema(summary="Messages d'un ticket", description="Les notes internes ne sont visibles que de l'équipe support."),
+    post=extend_schema(
+        summary="Écrire un message",
+        description="Ticket fermé : 400.",
+        responses={201: TicketMessageSerializer, **erreurs(403)},
+    ),
+)
 class TicketMessageListCreateView(ScopedOnPostMixin, generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = TicketMessageSerializer
@@ -175,6 +227,15 @@ class TicketMessageListCreateView(ScopedOnPostMixin, generics.ListCreateAPIView)
 
 # ---------- TicketAttachment ----------
 
+@extend_schema_view(
+    get=extend_schema(summary="Pièces jointes d'un message"),
+    post=extend_schema(
+        summary="Joindre un fichier à un message",
+        description="Auteur du message seulement (403 sinon), 5 fichiers au plus, ticket non fermé.",
+        request={"multipart/form-data": TicketAttachmentSerializer},
+        responses={201: TicketAttachmentSerializer, **erreurs(403)},
+    ),
+)
 class TicketAttachmentListCreateView(ScopedOnPostMixin, generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = TicketAttachmentSerializer
@@ -205,6 +266,10 @@ class TicketAttachmentListCreateView(ScopedOnPostMixin, generics.ListCreateAPIVi
         return Response(self.get_serializer(attachment).data, status=status.HTTP_201_CREATED)
 
 
+@extend_schema(
+    summary="Télécharger une pièce jointe",
+    responses={200: FICHIER},
+)
 class TicketAttachmentDownloadView(APIView):
     """Fichier servi par Django après contrôle d'accès (mêmes règles que le
     message) : /media/ n'est pas exposé en production."""
