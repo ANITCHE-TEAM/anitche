@@ -326,9 +326,9 @@ graph TD
 * **3. Scan & Validation QR ([`routeurs/scan_qr.py`](file:///c:/Users/Jordan/Documents/Anitche/backend-fastapi/app/routeurs/scan_qr.py))** :
   - `POST /qr/scan` & `GET /qr/passeport/{code}` : Décodage instantané de codes ou URLs QR de passeports et certification d'authenticité.
 * **4. Suivi GPS & Télémétrie en Direct ([`routeurs/suivi_temps_reel.py`](file:///c:/Users/Jordan/Documents/Anitche/backend-fastapi/app/routeurs/suivi_temps_reel.py))** :
-  - `POST /livraison/position` : Réception des coordonnées du livreur (latitude, longitude, vitesse, cap).
-  - `GET /livraison/position/{id}` : Consultation de la dernière position et calcul de la distance restante / ETA.
-  - `WebSocket /livraison/ws/{id}` : Streaming continu des positions en temps réel vers le client.
+  - `POST /livraison/position` : Position du livreur assigné, pendant `en_cours` seulement (latitude, longitude, vitesse, cap).
+  - `GET /livraison/position/{id}` : Dernière position (client de la commande, livreur assigné, administration). Distance restante et ETA **indicatifs**, calculés **seulement si le client a donné son point GPS au checkout** (sinon `null`, jamais de valeur inventée).
+  - `WebSocket /livraison/ws/{id}` : Positions en direct, authentification par premier message. Contrat : [`MODULE_SUIVI_GPS.md`](./MODULE_SUIVI_GPS.md).
 * **Validation & Tests ([`tests/test_api.py`](file:///c:/Users/Jordan/Documents/Anitche/backend-fastapi/tests/test_api.py))** : **13 tests automatisés pytest réussis à 100%**.
 
 ---

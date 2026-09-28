@@ -155,6 +155,7 @@ Chaque module documente les changements de contrat à intégrer côté interface
 | Commandes | [`MODULE_COMMANDES.md` § 9](./MODULE_COMMANDES.md#9-impact-frontend) |
 | Paiements | [`MODULE_PAIEMENTS.md` § 10](./MODULE_PAIEMENTS.md#10-impact-frontend) |
 | Livraison | [`MODULE_LIVRAISON.md` § 10](./MODULE_LIVRAISON.md#10-impact-frontend) |
+| Suivi GPS (FastAPI) | § 12 ci-dessous et [`MODULE_SUIVI_GPS.md`](./MODULE_SUIVI_GPS.md) |
 | Retours | [`MODULE_RETOURS.md` § 8](./MODULE_RETOURS.md#8-impact-frontend) |
 | Fidélité | [`MODULE_FIDELITE.md` § 6](./MODULE_FIDELITE.md#6-impact-frontend) |
 | Notifications | [`MODULE_NOTIFICATIONS.md` § 5](./MODULE_NOTIFICATIONS.md#5-impact-frontend) |
@@ -218,3 +219,109 @@ const corps = {
 - Pour changer de lieu, redemander la position ou retirer le point (bouton « Ne pas utiliser ma position »).
 
 > **Vie privée.** Ce point est l'emplacement précis du domicile du client. L'API ne le montre qu'**au client**, **au livreur assigné pendant la livraison** (masqué une fois la livraison livrée ou annulée) et **à l'administration** ; **jamais au vendeur**. Côté interface : ne pas l'afficher aux autres rôles, ne pas le garder dans `localStorage` au-delà du checkout, ne pas l'envoyer à un service tiers (analytics, logs).
+
+## 12. Service FastAPI (`/fast/`)
+
+Second backend, pour le temps réel et les services rapides. Les modules 2 à 4 de la refonte FastAPI (recherche, QR, IA) ajouteront leurs routes ici. Aujourd'hui : **suivi GPS du livreur**, contrat complet dans [`MODULE_SUIVI_GPS.md`](./MODULE_SUIVI_GPS.md).
+
+### Base et authentification
+
+| | Dev | Prod |
+|---|---|---|
+| HTTP | `http://localhost:8001` (`VITE_FASTAPI_URL`) | `https://anitche.com/fast` |
+| WebSocket | `ws://localhost:8001` | `wss://anitche.com/fast` |
+
+- **HTTP** : le **même jeton `access` que Django** (§ 4), en-tête `Authorization: Bearer <access>`. Sur **401**, rafraîchir le jeton auprès de Django (§ 4) puis rejouer : l'intercepteur axios de Django convient.
+- **Format d'erreur** : identique à Django (§ 5). Les refus du suivi portent un **code machine** : se fier à `errors.code[0]`, **jamais au texte** de `detail`.
+- **429** : en-tête `Retry-After`, exposé par CORS (§ 7).
+
+### Suivi GPS : qui fait quoi
+
+| Rôle | Action |
+|---|---|
+| Livreur (app) | Pendant `en_cours` (statut lu dans Django) : `POST /livraison/position` toutes les **5 s**. **Arrêter** sur 403, 404 ou 409 |
+| Client, administration | Écran de suivi pendant `en_cours` : WebSocket (ci-dessous), repli `GET /livraison/position/{livraison_id}` toutes les 5 s |
+| Vendeur | Aucun suivi de ses ventes (il suit ses propres achats comme un client) |
+
+```json
+{
+  "livraison_id": "d27b428a-ed14-4284-bc44-de11f3552bd5",
+  "latitude": 5.32, "longitude": -4.015,
+  "vitesse_kmh": 28.0, "cap_degres": 40.0,
+  "horodatage": "2026-09-27T23:28:12.251Z",
+  "distance_restante_km": 12.8, "temps_estime_minutes": 39
+}
+```
+
+- **Distance et temps restants : indicatifs** (vol d'oiseau corrigé d'un facteur de détour, vitesse moyenne urbaine, **sans trafic**). Afficher « environ 39 min », jamais une heure d'arrivée précise.
+- **`null` sans point GPS du client** (§ 11, point facultatif au checkout) : **ne rien afficher**, ne pas inventer de valeur.
+- `horodatage` : UTC (le `Z`) ; garder la position la plus récente.
+
+Codes machine (`errors.code[0]`) :
+
+| Code HTTP | Code | Réaction |
+|---|---|---|
+| 404 | `aucune_position` | Pas encore de position (ou plus) : afficher « Position du livreur bientôt disponible », **pas une erreur** |
+| 404 | `livraison_introuvable` | Livraison inexistante ou d'un autre compte |
+| 403 | `acces_reserve_livreurs` | App livreur : compte qui n'est plus livreur, arrêter d'émettre |
+| 403 | `livraison_non_assignee` | App livreur : livraison réassignée, arrêter d'émettre |
+| 409 | `livraison_pas_en_cours` | App livreur : la tournée est finie (ou pas commencée), arrêter d'émettre |
+| 400 | clés de champ | `errors.livraison_id`, `errors.latitude`… : bug du client |
+
+### WebSocket `/livraison/ws/{livraison_id}`
+
+Un navigateur ne peut pas poser d'en-tête `Authorization` sur un WebSocket, et une URL finit dans les journaux : **le jeton n'est jamais dans l'URL**, il part dans le **premier message**.
+
+```js
+function suivreLivraison(livraisonId, { jeton, rafraichirJeton, surPosition, surFin }) {
+  let socket, renouvellement, essais = 0, fermeVolontairement = false, derniere = null;
+
+  function ouvrir() {
+    socket = new WebSocket(`${WS_FASTAPI}/livraison/ws/${livraisonId}`);
+    socket.onopen = () => socket.send(JSON.stringify({ type: 'auth', token: jeton() }));
+    socket.onmessage = ({ data }) => {
+      const message = JSON.parse(data);
+      if (message.type === 'authentifie') {
+        essais = 0;
+        // Renouveler le jeton avant ses 15 minutes, sans se reconnecter.
+        renouvellement = setInterval(async () => {
+          socket.send(JSON.stringify({ type: 'auth', token: await rafraichirJeton() }));
+        }, 10 * 60 * 1000);
+      } else if (message.type === 'position') {
+        // Doublon possible à la connexion : garder la plus récente.
+        if (!derniere || message.horodatage >= derniere.horodatage) { derniere = message; surPosition(message); }
+      } else if (message.type === 'fin_suivi') {
+        surFin(message.statut);
+      }
+    };
+    socket.onclose = async ({ code }) => {
+      clearInterval(renouvellement);
+      if (fermeVolontairement || [1000, 1008, 1009, 4403].includes(code)) return; // relire la livraison dans Django
+      if (code === 4401) await rafraichirJeton();
+      const attente = code === 4429 ? 60000 : Math.min(30000, 1000 * 2 ** essais++);
+      setTimeout(ouvrir, attente); // 1011, 1006 (réseau), 4401, 4429
+    };
+  }
+
+  ouvrir();
+  return () => { fermeVolontairement = true; socket.close(); };
+}
+```
+
+- Ouvrir le WebSocket **seulement** si la livraison est `en_cours` (Django). Envoyer `auth` **dans les 5 s**.
+- Seul message accepté du client : `{"type": "auth", "token"}` (connexion, puis renouvellement), **6 par minute** au plus, 4 096 octets au plus. Tout autre message ferme la connexion (1008).
+- Messages reçus : `authentifie`, `position` (format du `GET`, avec `"type": "position"`), `fin_suivi` (`statut` : `livree`, `echouee`…) juste avant la fermeture 1000.
+
+Codes de fermeture (se fier au **code**, pas au motif) :
+
+| Code | Signification | Reconnexion |
+|---|---|---|
+| 1000 | Suivi terminé (après `fin_suivi`) | Non : relire la livraison dans Django |
+| 4403 | Hors périmètre, pas `en_cours`, ou droits perdus | Non : relire la livraison dans Django |
+| 4401 | Pas d'`auth` en 5 s, jeton refusé ou expiré | Oui, après avoir rafraîchi le jeton |
+| 4429 | Trop de connexions (60/h) ou de messages | Oui, après une longue attente |
+| 1011 | Service indisponible | Oui, délai croissant |
+| 1006 | Coupure réseau | Oui, délai croissant |
+| 1008, 1009 | Message non prévu ou trop grand | Non : bug du client |
+
+Le serveur revalide le jeton et les droits toutes les 60 s : un compte désactivé ou une livraison réassignée ferme la connexion en 4403, une livraison terminée en 1000.
