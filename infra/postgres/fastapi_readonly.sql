@@ -13,8 +13,9 @@
 -- argument de commande.
 --
 -- Moindre privilège : CONNECT sur la base, USAGE sur le schéma public et
--- SELECT sur les seules colonnes lues (en fin de fichier). Chaque module
--- ajoute ses GRANT SELECT par colonne (jamais de GRANT sur tout le schéma ni
+-- SELECT sur les seules colonnes ou vues lues (en fin de fichier). Chaque
+-- module ajoute ses GRANT SELECT par colonne, ou sur une vue publique créée
+-- pour lui par une migration Django (jamais de GRANT sur tout le schéma ni
 -- d'ALTER DEFAULT PRIVILEGES) : les tables sensibles (KYC, paiements...)
 -- restent illisibles.
 --
@@ -69,3 +70,18 @@ GRANT SELECT (id, client_id, groupe_id) ON TABLE commandes_commande TO anitche_f
 -- restants indicatifs).
 GRANT SELECT (id, livraison_latitude, livraison_longitude) ON TABLE commandes_groupecommande TO anitche_fastapi_ro;
 GRANT SELECT (id, role, is_active) ON TABLE utilisateurs_utilisateur TO anitche_fastapi_ro;
+
+-- Module 2 (recherche, docs/MODULE_RECHERCHE.md) : les trois VUES publiques
+-- créées par la migration Django catalogue 0004, rien d'autre. AUCUNE table
+-- du catalogue n'est lisible : ni stock exact (catalogue_stock), ni seuil
+-- d'alerte, ni SKU, ni produits désactivés, ni données du propriétaire
+-- d'une boutique (vendeurs_boutique, statut KYC). Les vues s'exécutent avec
+-- les droits de leur propriétaire (le compte des migrations) : aucun droit
+-- de table n'est nécessaire. Un retour arrière de la migration 0004
+-- supprime les vues et ces droits : relancer ce script après `migrate`.
+REVOKE ALL ON TABLE catalogue_produit_public FROM anitche_fastapi_ro;
+REVOKE ALL ON TABLE catalogue_categorie_publique FROM anitche_fastapi_ro;
+REVOKE ALL ON TABLE catalogue_boutique_publique FROM anitche_fastapi_ro;
+GRANT SELECT ON TABLE catalogue_produit_public TO anitche_fastapi_ro;
+GRANT SELECT ON TABLE catalogue_categorie_publique TO anitche_fastapi_ro;
+GRANT SELECT ON TABLE catalogue_boutique_publique TO anitche_fastapi_ro;

@@ -161,6 +161,12 @@ services:
       # Un seul proxy de confiance : nginx (comme NUM_PROXIES = 1 côté Django).
       TRUSTED_PROXY_COUNT: 1
       ROOT_PATH: /fast
+      # Recherche, sans valeur par défaut : absentes ou pas en https://, le
+      # service refuse de démarrer (app/core/settings.py). Adresse publique
+      # de FastAPI, préfixe /fast compris (liens next/previous), et adresse
+      # publique des fichiers média de Django (images des produits).
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      MEDIA_BASE_URL: ${MEDIA_BASE_URL}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3)"]
       interval: 10s

@@ -43,21 +43,37 @@ async def _fetch(url: str, query: str, *args):
 
 
 def test_column_privileges_are_exactly_the_granted_list(admin_database_url):
+    # Droits par colonne sur les TABLES (les colonnes des vues apparaissent
+    # aussi dans column_privileges, conséquence du droit sur la vue entière).
     rows = asyncio.run(_fetch(
         admin_database_url,
         """
-        SELECT table_name, column_name, privilege_type
-        FROM information_schema.column_privileges
-        WHERE grantee = 'anitche_fastapi_ro'
+        SELECT p.table_name, p.column_name, p.privilege_type
+        FROM information_schema.column_privileges AS p
+        JOIN information_schema.tables AS t
+          ON t.table_schema = p.table_schema AND t.table_name = p.table_name
+        WHERE p.grantee = 'anitche_fastapi_ro' AND t.table_type = 'BASE TABLE'
         """,
     ))
     assert {row["privilege_type"] for row in rows} == {"SELECT"}
     assert {(row["table_name"], row["column_name"]) for row in rows} == EXPECTED_COLUMN_PRIVILEGES
+    # Module 2 : seuls droits sur une relation entière, les trois vues
+    # publiques de la recherche, en lecture ; aucune table entière.
     tables = asyncio.run(_fetch(
         admin_database_url,
-        "SELECT table_name FROM information_schema.table_privileges WHERE grantee = 'anitche_fastapi_ro'",
+        """
+        SELECT p.table_name, p.privilege_type, t.table_type
+        FROM information_schema.table_privileges AS p
+        JOIN information_schema.tables AS t
+          ON t.table_schema = p.table_schema AND t.table_name = p.table_name
+        WHERE p.grantee = 'anitche_fastapi_ro'
+        """,
     ))
-    assert tables == []  # aucun droit sur une table entière
+    assert {(row["table_name"], row["privilege_type"], row["table_type"]) for row in tables} == {
+        ("catalogue_produit_public", "SELECT", "VIEW"),
+        ("catalogue_categorie_publique", "SELECT", "VIEW"),
+        ("catalogue_boutique_publique", "SELECT", "VIEW"),
+    }
 
 
 @pytest.mark.parametrize(

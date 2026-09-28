@@ -1,7 +1,8 @@
 """Module 0 : image Docker, dépendances, compose et CI du service FastAPI.
 
-Module 1 (fin du fichier) : options WebSocket d'uvicorn, droits par colonne
-du rôle en lecture seule, job CI « integration ».
+Module 1 : options WebSocket d'uvicorn, droits par colonne du rôle en
+lecture seule, job CI « integration ». Module 2 : droits sur les trois vues
+publiques de la recherche, PUBLIC_BASE_URL et MEDIA_BASE_URL.
 
 Failles du rapport module 0 §1 couvertes : 24-25 (compose sans URL Django
 ni DATABASE_URL, mot de passe superutilisateur transmis sans être lu), 27
@@ -117,11 +118,19 @@ def test_dockerfile_bounds_websocket_messages_and_pings():
     assert '"--ws-max-size", "8192", "--ws-ping-interval", "20", "--ws-ping-timeout", "20"' in cmd
 
 
+SEARCH_VIEWS = {"catalogue_produit_public", "catalogue_categorie_publique", "catalogue_boutique_publique"}
+
+
+def _readonly_sql_code() -> str:
+    sql = (REPO / "infra" / "postgres" / "fastapi_readonly.sql").read_text(encoding="utf-8")
+    return "\n".join(line for line in sql.splitlines() if not line.lstrip().startswith("--"))
+
+
 def test_readonly_role_gets_exactly_the_tracking_columns():
     """Module 1 §b : SELECT par colonne, rien d'autre ; REVOKE ALL sur chaque
-    table accordée (script idempotent)."""
-    sql = (REPO / "infra" / "postgres" / "fastapi_readonly.sql").read_text(encoding="utf-8")
-    code = "\n".join(line for line in sql.splitlines() if not line.lstrip().startswith("--"))
+    table accordée (script idempotent). Module 2 : plus les trois vues
+    publiques de la recherche (test suivant), aucune autre table."""
+    code = _readonly_sql_code()
     grants = {
         table: {column.strip() for column in columns.split(",")}
         for columns, table in re.findall(r"GRANT SELECT \(([^)]*)\) ON TABLE (\w+) TO anitche_fastapi_ro;", code)
@@ -134,10 +143,49 @@ def test_readonly_role_gets_exactly_the_tracking_columns():
     }
     for table in grants:
         assert f"REVOKE ALL ON TABLE {table} FROM anitche_fastapi_ro;" in code
-    # Aucun droit par table, sur tout le schéma, ni d'écriture.
-    assert len(re.findall(r"\bGRANT\b", code)) == len(grants) + 2  # + CONNECT et USAGE
+    # Aucun droit sur tout le schéma, ni d'écriture ; seuls droits de table :
+    # les trois vues de la recherche.
+    assert len(re.findall(r"\bGRANT\b", code)) == len(grants) + len(SEARCH_VIEWS) + 2  # + CONNECT et USAGE
     assert "ALL TABLES" not in code and "DEFAULT PRIVILEGES" not in code
     assert not re.search(r"GRANT (INSERT|UPDATE|DELETE|TRUNCATE|ALL)", code)
+
+
+def test_readonly_role_reads_only_the_public_catalogue_views():
+    """Module 2 §g : SELECT sur les trois vues créées par la migration Django
+    catalogue 0004, REVOKE ALL avant (idempotent) ; aucune table du
+    catalogue ni des boutiques."""
+    code = _readonly_sql_code()
+    table_grants = set(re.findall(r"GRANT SELECT ON TABLE (\w+) TO anitche_fastapi_ro;", code))
+    assert table_grants == SEARCH_VIEWS
+    for view in SEARCH_VIEWS:
+        assert f"REVOKE ALL ON TABLE {view} FROM anitche_fastapi_ro;" in code
+    granted = re.findall(r"GRANT SELECT[^;]* ON TABLE (\w+)", code)
+    assert not [table for table in granted if table.startswith(("catalogue_", "vendeurs_")) and table not in SEARCH_VIEWS]
+
+
+@pytest.mark.parametrize("compose_file", ["docker-compose.yml", "docker-compose.prod.yml"])
+def test_compose_passes_search_urls(compose_file):
+    """Module 2 (décision 10) : adresses publiques de FastAPI et des médias."""
+    environment = fastapi_service(compose_file)["environment"]
+    assert {"PUBLIC_BASE_URL", "MEDIA_BASE_URL"} <= set(environment)
+
+
+def test_search_urls_have_no_default_in_prod_and_local_values_in_dev():
+    """Prod : aucune valeur par défaut (obligatoires, refusées par les
+    réglages si absentes ou pas en https://) ; dev : services locaux."""
+    prod = fastapi_service("docker-compose.prod.yml")["environment"]
+    assert prod["PUBLIC_BASE_URL"] == "${PUBLIC_BASE_URL}"
+    assert prod["MEDIA_BASE_URL"] == "${MEDIA_BASE_URL}"
+    dev = fastapi_service("docker-compose.yml")["environment"]
+    assert dev["PUBLIC_BASE_URL"] == "http://localhost:8001"
+    assert dev["MEDIA_BASE_URL"] == "http://localhost:8000/media/"
+
+
+def test_env_example_documents_https_search_urls():
+    lines = (REPO / "infra" / ".env.example").read_text(encoding="utf-8").splitlines()
+    values = dict(line.split("=", 1) for line in lines if "=" in line and not line.startswith("#"))
+    assert values["PUBLIC_BASE_URL"] == "https://anitche.com/fast"
+    assert values["MEDIA_BASE_URL"].startswith("https://")
 
 
 def _workflow() -> dict:
