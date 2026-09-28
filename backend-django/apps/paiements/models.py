@@ -234,7 +234,9 @@ class BaremeFrais(models.Model):
     Barème de la plateforme (boutique vide) ou propre à une boutique (offre
     de lancement), valable entre date_debut et date_fin. Appliqué et figé
     dans chaque CommandeItem à la validation du panier : le modifier ne
-    change jamais une vente passée.
+    change jamais une vente passée. Une fois commencé, il ne se modifie
+    plus : seule sa clôture reste possible (BaremeFraisSerializer), pour
+    que l'historique des barèmes reste celui des ventes.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -284,6 +286,10 @@ class BaremeFrais(models.Model):
                 name="bareme_frais_petit_article_complet_ou_absent",
             ),
         ]
+
+    def a_commence(self, moment=None):
+        """En vigueur ou passé : il a pu s'appliquer à des ventes."""
+        return self.date_debut <= (moment or timezone.now())
 
     def frais_fixe_pour(self, prix_unitaire):
         """Frais fixe (FCFA) d'un article vendu à ce prix effectif."""

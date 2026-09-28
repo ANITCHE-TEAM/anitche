@@ -3546,8 +3546,10 @@ paths:
             par l''en-tête Retry-After.'
     post:
       operationId: paiements_admin_baremes_create
-      description: Barèmes de frais vendeur (plateforme ou offre de lancement d'une
-        boutique).
+      description: 'date_debut maintenant ou plus tard (une date passée de moins d''une
+        minute vaut maintenant, ramenée à l''heure du serveur) ; plus ancienne : 400,
+        errors.code = ["date_debut_passee"]. Absente : le barème commence à l''enregistrement,
+        et ne pourra ensuite qu''être clôturé.'
       tags:
       - Paiements
       requestBody:
@@ -3600,6 +3602,9 @@ paths:
   /api/paiements/admin/baremes/{id}/:
     get:
       operationId: paiements_admin_baremes_retrieve
+      description: |-
+        Un barème commencé a pu s'appliquer à des ventes : il ne se modifie
+        plus, sauf pour le clôturer (date_fin), et ne se supprime pas.
       parameters:
       - in: path
         name: id
@@ -3645,6 +3650,12 @@ paths:
             par l''en-tête Retry-After.'
     put:
       operationId: paiements_admin_baremes_update
+      description: 'Barème pas encore commencé (date_debut future) : tout se modifie,
+        date_debut maintenant ou plus tard (sinon 400, errors.code = ["date_debut_passee"]).
+        Barème commencé : seule date_fin, pour le clôturer maintenant ou plus tard
+        ; toute autre modification, une date_fin passée, une réouverture ou un barème
+        déjà clôturé : 400, errors.code = ["bareme_deja_applique"]. Une date passée
+        de moins d''une minute vaut maintenant (ramenée à l''heure du serveur).'
       parameters:
       - in: path
         name: id
@@ -3709,6 +3720,12 @@ paths:
             par l''en-tête Retry-After.'
     patch:
       operationId: paiements_admin_baremes_partial_update
+      description: 'Barème pas encore commencé (date_debut future) : tout se modifie,
+        date_debut maintenant ou plus tard (sinon 400, errors.code = ["date_debut_passee"]).
+        Barème commencé : seule date_fin, pour le clôturer maintenant ou plus tard
+        ; toute autre modification, une date_fin passée, une réouverture ou un barème
+        déjà clôturé : 400, errors.code = ["bareme_deja_applique"]. Une date passée
+        de moins d''une minute vaut maintenant (ramenée à l''heure du serveur).'
       parameters:
       - in: path
         name: id
@@ -3763,6 +3780,57 @@ paths:
               schema:
                 $ref: '#/components/schemas/Erreur'
           description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+    delete:
+      operationId: paiements_admin_baremes_destroy
+      description: 'Barème commencé : 409, errors.code = ["bareme_deja_applique"]
+        (le clôturer avec date_fin).'
+      summary: Supprimer un barème pas encore commencé
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Paiements
+      security:
+      - jwtAuth: []
+      responses:
+        '204':
+          description: No response body
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Conflit : l''état actuel de la ressource ne permet pas cette
+            action.'
         '429':
           content:
             application/json:
@@ -7576,6 +7644,10 @@ components:
         * `support` - Support ANITCHE
     BaremeFrais:
       type: object
+      description: |-
+        Barème pas encore commencé : tout se modifie, date_debut maintenant ou
+        plus tard. Barème commencé (date_debut passée) : seule sa clôture est
+        possible (PUT et PATCH).
       properties:
         id:
           type: string
@@ -7641,6 +7713,10 @@ components:
       - taux_commission
     BaremeFraisRequest:
       type: object
+      description: |-
+        Barème pas encore commencé : tout se modifie, date_debut maintenant ou
+        plus tard. Barème commencé (date_debut passée) : seule sa clôture est
+        possible (PUT et PATCH).
       properties:
         boutique:
           type:
@@ -11383,6 +11459,10 @@ components:
       - $ref: '#/components/schemas/PasseportRevoque'
     PatchedBaremeFraisRequest:
       type: object
+      description: |-
+        Barème pas encore commencé : tout se modifie, date_debut maintenant ou
+        plus tard. Barème commencé (date_debut passée) : seule sa clôture est
+        possible (PUT et PATCH).
       properties:
         boutique:
           type:

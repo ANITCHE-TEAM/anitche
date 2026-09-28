@@ -9,7 +9,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from apps.core.exceptions import ErreurMetier
-from drf_spectacular.utils import OpenApiParameter, PolymorphicProxySerializer, extend_schema
+from drf_spectacular.utils import OpenApiParameter, PolymorphicProxySerializer, extend_schema, extend_schema_view
 
 from config.schema import erreurs
 from apps.vendeurs.permissions import ROLES_ADMINISTRATION, EstAdministrateur, EstVendeurValide
@@ -18,6 +18,7 @@ from . import reversements, services
 from .fournisseurs.base import ErreurFournisseur, MontantHorsLimites
 from .models import BaremeFrais, Paiement, Remboursement, Reversement
 from .serializers import (
+    CODE_BAREME_DEJA_APPLIQUE,
     BaremeFraisSerializer,
     InitierPaiementSerializer,
     PaiementAdminSerializer,
@@ -318,6 +319,13 @@ class TransfererReversementView(APIView):
         return Response(ReversementAdminSerializer(reversements_admin().get(pk=pk)).data)
 
 
+@extend_schema_view(
+    post=extend_schema(description=(
+        "date_debut maintenant ou plus tard (une date passée de moins d'une minute vaut maintenant, ramenée à "
+        "l'heure du serveur) ; plus ancienne : 400, errors.code = [\"date_debut_passee\"]. Absente : le barème "
+        "commence à l'enregistrement, et ne pourra ensuite qu'être clôturé."
+    )),
+)
 class BaremeFraisListCreateView(generics.ListCreateAPIView):
     """Barèmes de frais vendeur (plateforme ou offre de lancement d'une boutique)."""
 
@@ -330,7 +338,28 @@ class BaremeFraisListCreateView(generics.ListCreateAPIView):
         logger_securite.info("Barème de frais %s créé par admin_id=%s : %s", bareme.pk, self.request.user.id, bareme)
 
 
-class BaremeFraisDetailView(generics.RetrieveUpdateAPIView):
+MODIFIER_UN_BAREME = (
+    "Barème pas encore commencé (date_debut future) : tout se modifie, date_debut maintenant ou plus tard "
+    "(sinon 400, errors.code = [\"date_debut_passee\"]). Barème commencé : seule date_fin, pour le clôturer "
+    "maintenant ou plus tard ; toute autre modification, une date_fin passée, une réouverture ou un barème "
+    "déjà clôturé : 400, errors.code = [\"bareme_deja_applique\"]. Une date passée de moins d'une minute vaut "
+    "maintenant (ramenée à l'heure du serveur)."
+)
+
+
+@extend_schema_view(
+    put=extend_schema(description=MODIFIER_UN_BAREME),
+    patch=extend_schema(description=MODIFIER_UN_BAREME),
+    delete=extend_schema(
+        summary="Supprimer un barème pas encore commencé",
+        description="Barème commencé : 409, errors.code = [\"bareme_deja_applique\"] (le clôturer avec date_fin).",
+        responses={204: None, **erreurs(409)},
+    ),
+)
+class BaremeFraisDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Un barème commencé a pu s'appliquer à des ventes : il ne se modifie
+    plus, sauf pour le clôturer (date_fin), et ne se supprime pas."""
+
     permission_classes = [IsAuthenticated, EstAdministrateur]
     serializer_class = BaremeFraisSerializer
     queryset = BaremeFrais.objects.select_related("boutique")
@@ -338,4 +367,15 @@ class BaremeFraisDetailView(generics.RetrieveUpdateAPIView):
     def perform_update(self, serializer):
         bareme = serializer.save()
         logger_securite.info("Barème de frais %s modifié par admin_id=%s : %s", bareme.pk, self.request.user.id, bareme)
+
+    def perform_destroy(self, instance):
+        if instance.a_commence():
+            raise ErreurMetier(
+                {"detail": "Barème déjà appliqué : il ne se supprime pas. Clôturez-le (date_fin).",
+                 "code": CODE_BAREME_DEJA_APPLIQUE},
+                status.HTTP_409_CONFLICT,
+            )
+        logger_securite.info("Barème de frais %s supprimé par admin_id=%s : %s",
+                             instance.pk, self.request.user.id, instance)
+        instance.delete()
 

@@ -656,25 +656,29 @@ class FraisTests(Donnees, APITestCase):
         url = "/api/paiements/admin/baremes/"
         self.assertEqual(self.api(self.vendeur1).post(url, {}).status_code, 403)
         admin = self.api(self.admin)
+        # Barème programmé (pas encore commencé) : il se modifie librement.
+        debut = timezone.now() + timedelta(days=1)
         r = admin.post(url, {"boutique": self.boutique1.pk, "libelle": "Lancement", "taux_commission": "8.00",
-                             "frais_fixe_article": 100}, format="json")
+                             "frais_fixe_article": 100, "date_debut": debut.isoformat()}, format="json")
         self.assertEqual((r.status_code, r.data["cree_par"]), (201, self.admin.pk))
         self.assertEqual(admin.post(url, {"taux_commission": "120", "frais_fixe_article": 1}).status_code, 400)
         self.assertEqual(admin.patch(f"{url}{r.data['id']}/", {"date_fin": "2000-01-01T00:00:00Z"},
                                      format="json").status_code, 400)
         self.assertEqual(admin.patch(f"{url}{r.data['id']}/", {"taux_commission": "9"}, format="json").status_code, 200)
-        self.assertEqual(bareme_en_vigueur(self.boutique1).taux_commission, Decimal("9"))
+        self.assertEqual(bareme_en_vigueur(self.boutique1, debut).taux_commission, Decimal("9"))
         self.assertEqual((r.data["seuil_petit_article"], r.data["frais_fixe_petit_article"]), (None, None))
 
     def test_administration_du_seuil_petit_article(self):
         url = "/api/paiements/admin/baremes/"
         admin = self.api(self.admin)
+        debut = timezone.now() + timedelta(days=1)
         r = admin.post(url, {"boutique": self.boutique2.pk, "libelle": "Petits articles", "taux_commission": "10",
-                             "frais_fixe_article": 150, "seuil_petit_article": 5000, "frais_fixe_petit_article": 50},
+                             "frais_fixe_article": 150, "seuil_petit_article": 5000, "frais_fixe_petit_article": 50,
+                             "date_debut": debut.isoformat()},
                        format="json")
         self.assertEqual((r.status_code, r.data["seuil_petit_article"], r.data["frais_fixe_petit_article"]),
                          (201, 5000, 50))
-        self.assertEqual(bareme_en_vigueur(self.boutique2).frais_fixe_pour(Decimal("5000")), 50)
+        self.assertEqual(bareme_en_vigueur(self.boutique2, debut).frais_fixe_pour(Decimal("5000")), 50)
         # L'un sans l'autre : 400 sur le champ manquant, jamais une erreur de contrainte (500).
         seul = admin.post(url, {"taux_commission": "10", "frais_fixe_article": 150, "seuil_petit_article": 5000},
                           format="json")
@@ -684,7 +688,245 @@ class FraisTests(Donnees, APITestCase):
         self.assertEqual((vide_un.status_code, list(vide_un.data["errors"])), (400, ["frais_fixe_petit_article"]))
         vide_tout = admin.patch(detail, {"seuil_petit_article": None, "frais_fixe_petit_article": None}, format="json")
         self.assertEqual((vide_tout.status_code, vide_tout.data["seuil_petit_article"]), (200, None))
-        self.assertEqual(bareme_en_vigueur(self.boutique2).frais_fixe_pour(Decimal("5000")), 150)
+        self.assertEqual(bareme_en_vigueur(self.boutique2, debut).frais_fixe_pour(Decimal("5000")), 150)
+
+
+class BaremeDejaAppliqueTests(Donnees, APITestCase):
+    """Un barème commencé ne se modifie plus (sauf sa clôture, maintenant ou
+    plus tard) et ne se supprime pas, quel que soit le chemin de l'API ; un
+    barème programmé reste libre."""
+
+    URL = "/api/paiements/admin/baremes/"
+
+    def setUp(self):
+        self.creer_donnees()
+        maintenant = timezone.now()
+        # Offre de la boutique 1 commencée hier, sans fin ; barème de la
+        # plateforme : celui de la migration 0008 (commencé lui aussi).
+        self.commence = BaremeFrais.objects.create(
+            boutique=self.boutique1, libelle="Offre", taux_commission=Decimal("8"), frais_fixe_article=50,
+            date_debut=maintenant - timedelta(days=1),
+        )
+        self.plateforme = bareme_en_vigueur(self.boutique2)
+        self.admin_api = self.api(self.admin)
+
+    def detail(self, bareme):
+        return f"{self.URL}{bareme.pk}/"
+
+    def patch(self, bareme, donnees):
+        return self.admin_api.patch(self.detail(bareme), donnees, format="json")
+
+    def assertRefus(self, reponse, statut=400):
+        self.assertEqual(reponse.status_code, statut, reponse.data)
+        self.assertEqual((reponse.data["success"], reponse.data["status_code"]), (False, statut))
+        self.assertEqual(reponse.data["errors"]["code"], ["bareme_deja_applique"])
+
+    def test_patch_du_taux_d_un_bareme_commence_refuse(self):
+        for bareme in (self.commence, self.plateforme):
+            with self.subTest(bareme=str(bareme)):
+                avant = BaremeFrais.objects.filter(pk=bareme.pk).values().get()
+                r = self.patch(bareme, {"taux_commission": "20.00"})
+                self.assertRefus(r)
+                self.assertEqual(r.data["errors"]["taux_commission"], ["Non modifiable : le barème a déjà commencé."])
+                self.assertEqual(BaremeFrais.objects.filter(pk=bareme.pk).values().get(), avant)
+        # Autres champs, un par un, et plusieurs à la fois.
+        for donnees in ({"libelle": "Autre"}, {"frais_fixe_article": 10}, {"boutique": self.boutique2.pk},
+                        {"date_debut": timezone.now().isoformat()},
+                        {"seuil_petit_article": 3000, "frais_fixe_petit_article": 10},
+                        {"taux_commission": "1", "date_fin": (timezone.now() + timedelta(days=1)).isoformat()}):
+            with self.subTest(donnees=donnees):
+                self.assertRefus(self.patch(self.commence, donnees))
+        self.commence.refresh_from_db()
+        self.assertEqual((self.commence.taux_commission, self.commence.date_fin), (Decimal("8"), None))
+
+    def test_valeur_identique_n_est_pas_une_modification(self):
+        r = self.patch(self.commence, {"taux_commission": "8.00", "libelle": "Offre"})
+        self.assertEqual(r.status_code, 200, r.data)
+
+    def test_put_meme_regle(self):
+        corps = {"boutique": self.boutique1.pk, "libelle": "Offre", "taux_commission": "8.00", "frais_fixe_article": 50}
+        refuse = self.admin_api.put(self.detail(self.commence), {**corps, "frais_fixe_article": 0}, format="json")
+        self.assertRefus(refuse)
+        fin = timezone.now() + timedelta(days=2)
+        cloture = self.admin_api.put(self.detail(self.commence), {**corps, "date_fin": fin.isoformat()}, format="json")
+        self.assertEqual(cloture.status_code, 200, cloture.data)
+        self.commence.refresh_from_db()
+        self.assertEqual((self.commence.date_fin, self.commence.frais_fixe_article), (fin, 50))
+
+    def test_cloture_maintenant(self):
+        avant = timezone.now()
+        r = self.patch(self.plateforme, {"date_fin": avant.isoformat()})
+        self.assertEqual(r.status_code, 200, r.data)
+        self.plateforme.refresh_from_db()
+        # Ramenée à l'heure du serveur : jamais avant la réception de la requête.
+        self.assertGreaterEqual(self.plateforme.date_fin, avant)
+        self.assertLessEqual(self.plateforme.date_fin, timezone.now())
+        self.assertEqual(self.plateforme.taux_commission, Decimal("14"))
+        # Horloge du client en retard de 30 secondes : même effet.
+        avant = timezone.now()
+        r = self.patch(self.commence, {"date_fin": (avant - timedelta(seconds=30)).isoformat()})
+        self.assertEqual(r.status_code, 200, r.data)
+        self.commence.refresh_from_db()
+        self.assertGreaterEqual(self.commence.date_fin, avant)
+
+    def test_cloture_dans_le_futur_puis_avancee(self):
+        fin = timezone.now() + timedelta(days=10)
+        self.assertEqual(self.patch(self.commence, {"date_fin": fin.isoformat()}).status_code, 200)
+        plus_tot = timezone.now() + timedelta(days=3)
+        self.assertEqual(self.patch(self.commence, {"date_fin": plus_tot.isoformat()}).status_code, 200)
+        self.commence.refresh_from_db()
+        self.assertEqual(self.commence.date_fin, plus_tot)
+        # Clôture programmée : pas de réouverture.
+        self.assertRefus(self.patch(self.commence, {"date_fin": None}))
+
+    def test_cloture_dans_le_passe_refusee(self):
+        r = self.patch(self.commence, {"date_fin": (timezone.now() - timedelta(hours=1)).isoformat()})
+        self.assertRefus(r)
+        self.assertIn("date_fin", r.data["errors"])
+        self.commence.refresh_from_db()
+        self.assertIsNone(self.commence.date_fin)
+
+    def test_bareme_deja_cloture_ne_se_modifie_plus(self):
+        # L'ancien barème de la plateforme (12 %), clôturé par la migration 0008.
+        ancien = BaremeFrais.objects.get(boutique=None, taux_commission=Decimal("12"))
+        fin = ancien.date_fin
+        for donnees in ({"date_fin": (timezone.now() + timedelta(days=1)).isoformat()}, {"date_fin": None},
+                        {"taux_commission": "14.00"}):
+            with self.subTest(donnees=donnees):
+                self.assertRefus(self.patch(ancien, donnees))
+        ancien.refresh_from_db()
+        self.assertEqual((ancien.date_fin, ancien.taux_commission), (fin, Decimal("12")))
+
+    def test_suppression_d_un_bareme_commence_refusee(self):
+        for bareme in (self.commence, self.plateforme):
+            with self.subTest(bareme=str(bareme)):
+                self.assertRefus(self.admin_api.delete(self.detail(bareme)), 409)
+                self.assertTrue(BaremeFrais.objects.filter(pk=bareme.pk).exists())
+
+    def test_bareme_programme_modifiable_et_supprimable(self):
+        futur = BaremeFrais.objects.create(
+            boutique=self.boutique2, taux_commission=Decimal("10"), frais_fixe_article=100,
+            date_debut=timezone.now() + timedelta(days=7),
+        )
+        r = self.patch(futur, {"taux_commission": "11.50", "libelle": "Rentrée", "seuil_petit_article": 3000,
+                               "frais_fixe_petit_article": 50})
+        self.assertEqual((r.status_code, r.data["taux_commission"], r.data["libelle"]), (200, "11.50", "Rentrée"))
+        r = self.admin_api.put(self.detail(futur), {"boutique": self.boutique2.pk, "taux_commission": "12.00",
+                                                    "frais_fixe_article": 150}, format="json")
+        self.assertEqual((r.status_code, r.data["frais_fixe_article"]), (200, 150))
+        self.assertEqual(self.admin_api.delete(self.detail(futur)).status_code, 204)
+        self.assertFalse(BaremeFrais.objects.filter(pk=futur.pk).exists())
+
+    def test_non_administrateur_toujours_403(self):
+        futur = BaremeFrais.objects.create(taux_commission=Decimal("10"), frais_fixe_article=100,
+                                           date_debut=timezone.now() + timedelta(days=7))
+        for utilisateur in (self.vendeur1, self.client1):
+            api = self.api(utilisateur)
+            for bareme in (self.commence, futur):
+                with self.subTest(utilisateur=utilisateur.email, bareme=str(bareme)):
+                    url = self.detail(bareme)
+                    self.assertEqual(api.get(url).status_code, 403)
+                    self.assertEqual(api.patch(url, {"date_fin": timezone.now().isoformat()}, format="json").status_code, 403)
+                    self.assertEqual(api.put(url, {}, format="json").status_code, 403)
+                    self.assertEqual(api.delete(url).status_code, 403)
+            self.assertEqual(api.get(self.URL).status_code, 403)
+        self.assertEqual(self.api().delete(self.detail(futur)).status_code, 401)
+        self.assertTrue(BaremeFrais.objects.filter(pk=futur.pk).exists())
+        self.commence.refresh_from_db()
+        self.assertIsNone(self.commence.date_fin)
+
+    def test_admin_django_en_lecture_seule(self):
+        from django.contrib.admin.sites import AdminSite
+        from django.test import RequestFactory
+
+        from .admin import BaremeFraisAdmin
+
+        requete = RequestFactory().get("/")
+        requete.user = Utilisateur.objects.create_superuser(email="su@pay.ci", password="x", nom="S", prenom="U")
+        modele_admin = BaremeFraisAdmin(BaremeFrais, AdminSite())
+        self.assertFalse(modele_admin.has_add_permission(requete))
+        self.assertFalse(modele_admin.has_change_permission(requete, self.commence))
+        self.assertFalse(modele_admin.has_delete_permission(requete, self.commence))
+
+
+class DateDebutBaremeTests(Donnees, APITestCase):
+    """Par l'API, date_debut n'est jamais dans le passé (création,
+    reprogrammation d'un barème programmé) : un barème ne devient jamais
+    rétroactivement en vigueur sur une période déjà vendue."""
+
+    URL = "/api/paiements/admin/baremes/"
+
+    def setUp(self):
+        self.creer_donnees()
+        self.admin_api = self.api(self.admin)
+
+    def creer(self, **champs):
+        corps = {"boutique": self.boutique1.pk, "taux_commission": "9.00", "frais_fixe_article": 100, **champs}
+        return self.admin_api.post(self.URL, corps, format="json")
+
+    def assertDateDebutPassee(self, reponse):
+        self.assertEqual(reponse.status_code, 400, reponse.data)
+        self.assertEqual((reponse.data["success"], reponse.data["status_code"]), (False, 400))
+        self.assertEqual(reponse.data["errors"]["code"], ["date_debut_passee"])
+        self.assertIn("date_debut", reponse.data["errors"])
+
+    def test_creation_dans_le_passe_refusee(self):
+        for il_y_a in (timedelta(minutes=2), timedelta(days=30)):
+            with self.subTest(il_y_a=il_y_a):
+                self.assertDateDebutPassee(self.creer(date_debut=(timezone.now() - il_y_a).isoformat()))
+        self.assertFalse(BaremeFrais.objects.filter(boutique=self.boutique1).exists())
+
+    def test_creation_maintenant_ramenee_a_l_heure_du_serveur(self):
+        avant = timezone.now()
+        r = self.creer(date_debut=(avant - timedelta(seconds=30)).isoformat())
+        self.assertEqual(r.status_code, 201, r.data)
+        bareme = BaremeFrais.objects.get(pk=r.data["id"])
+        self.assertGreaterEqual(bareme.date_debut, avant)
+        self.assertLessEqual(bareme.date_debut, timezone.now())
+        self.assertEqual(bareme_en_vigueur(self.boutique1), bareme)
+
+    def test_creation_future(self):
+        debut = timezone.now() + timedelta(days=3)
+        r = self.creer(date_debut=debut.isoformat())
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(BaremeFrais.objects.get(pk=r.data["id"]).date_debut, debut)
+
+    def test_sans_date_debut_commence_a_l_enregistrement(self):
+        # Comportement conservé : date_debut = instant de l'enregistrement.
+        avant = timezone.now()
+        r = self.creer()
+        self.assertEqual(r.status_code, 201, r.data)
+        bareme = BaremeFrais.objects.get(pk=r.data["id"])
+        self.assertTrue(avant <= bareme.date_debut <= timezone.now())
+
+    def test_sans_date_debut_date_fin_passee_400(self):
+        r = self.creer(date_fin=(timezone.now() - timedelta(days=1)).isoformat())
+        self.assertEqual((r.status_code, list(r.data["errors"])), (400, ["date_fin"]))
+        self.assertFalse(BaremeFrais.objects.filter(boutique=self.boutique1).exists())
+
+    def test_reprogrammation_d_un_bareme_programme(self):
+        futur = BaremeFrais.objects.create(boutique=self.boutique1, taux_commission=Decimal("9"),
+                                           frais_fixe_article=100, date_debut=timezone.now() + timedelta(days=7))
+        url = f"{self.URL}{futur.pk}/"
+        debut_prevu = futur.date_debut
+        # Vers le passé : refusé, par PATCH comme par PUT, et rien ne change.
+        passe = (timezone.now() - timedelta(days=1)).isoformat()
+        self.assertDateDebutPassee(self.admin_api.patch(url, {"date_debut": passe}, format="json"))
+        corps = {"boutique": self.boutique1.pk, "taux_commission": "9.00", "frais_fixe_article": 100}
+        self.assertDateDebutPassee(self.admin_api.put(url, {**corps, "date_debut": passe}, format="json"))
+        futur.refresh_from_db()
+        self.assertEqual(futur.date_debut, debut_prevu)
+        # Vers une autre date future : accepté.
+        plus_tot = timezone.now() + timedelta(days=2)
+        self.assertEqual(self.admin_api.patch(url, {"date_debut": plus_tot.isoformat()}, format="json").status_code, 200)
+        # Vers « maintenant » (horloge du client en retard) : ramené à l'heure
+        # du serveur ; le barème commence.
+        avant = timezone.now()
+        r = self.admin_api.patch(url, {"date_debut": (avant - timedelta(seconds=20)).isoformat()}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        futur.refresh_from_db()
+        self.assertGreaterEqual(futur.date_debut, avant)
+        self.assertTrue(futur.a_commence())
 
 
 class MigrationBaremeQuatorzePourcentTests(Donnees, TransactionTestCase):
