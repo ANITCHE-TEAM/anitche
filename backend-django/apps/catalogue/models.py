@@ -11,6 +11,8 @@ from apps.core.validators import validateur_image_standard
 
 class CategorieQuerySet(models.QuerySet):
     def actives(self):
+        # Règle aussi traduite dans la vue catalogue_categorie_publique
+        # (migration 0004, lue par FastAPI) : test de parité dans tests.py.
         return self.filter(est_active=True)
 
     def racines(self):
@@ -93,6 +95,10 @@ class ProduitQuerySet(models.QuerySet):
         Traduction SQL de la règle centrale Boutique.est_publiable (statut_kyc=valide,
         boutique active et non suspendue, vendeur actif) : toute évolution de
         est_publiable doit être répercutée ici.
+
+        Règle aussi traduite dans la vue catalogue_produit_public (migration
+        0004, lue par FastAPI) : toute évolution doit y être répercutée
+        (test de parité dans tests.py).
         """
         return self.actifs().filter(
             boutique__est_active=True,
@@ -105,7 +111,12 @@ class ProduitQuerySet(models.QuerySet):
     def visibles_publiquement(self):
         """Ce que le public voit : produits publiés ayant au moins une
         variante active. Sans variante active, rien ne peut être mis au
-        panier : le produit n'apparaît ni dans les listes ni en fiche (404)."""
+        panier : le produit n'apparaît ni dans les listes ni en fiche (404).
+
+        Règle aussi traduite dans la vue catalogue_produit_public (migration
+        0004), avec le prix affiché et `en_stock` de ProduitPublicListView et
+        l'image principale de ProduitPublicListSerializer : toute évolution
+        doit y être répercutée (test de parité dans tests.py)."""
         return self.publies().filter(
             Exists(VarianteProduit.objects.filter(produit=OuterRef('pk'), est_active=True))
         )

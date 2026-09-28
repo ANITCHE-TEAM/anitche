@@ -20,6 +20,7 @@ Modules qui dépendent du catalogue :
 | `retours` | `Stock.incrementer()` | Incrément SQL atomique |
 | `passeport_qr` | `produit`, `variante` (**PROTECT**, migration passeport_qr 0006) | Certificat et historique de scans jamais effacés |
 | `support` | `SupportTicket.product` (**PROTECT**, migration support 0005) | Un ticket ne perd jamais son produit |
+| FastAPI (recherche, listes publiques) | Vues SQL `catalogue_produit_public`, `catalogue_categorie_publique`, `catalogue_boutique_publique` (migration 0004), en lecture seule | Test de parité (§ 11) ; le rôle FastAPI ne lit que ces vues, aucune table du catalogue (§ 2) |
 
 Aucun appel depuis le frontend à ce jour. Collections Postman : `postman_catalogue.json` (§ 11), `postman_panier.json`, `postman_passeport_qr.json`, `postman_paiements.json`, `postman_0_setup_vendeur.json`.
 
@@ -45,6 +46,20 @@ Les colonnes restent en `DecimalField(12, 2)`, mais **l'API refuse tout montant 
 `Produit.objects.visibles_publiquement()` = `publies()` (produit actif, boutique publiable) **et au moins une variante active**. Sans variante active, rien ne peut être mis au panier : le produit est absent des listes et sa fiche répond 404. Les variantes inactives n'apparaissent jamais sur la fiche.
 
 C'est **la seule** règle de visibilité publique : la vérification publique d'un passeport QR l'utilise telle quelle (produit non visible → certificat affiché, mais « Vendeur indisponible », `disponible_a_la_vente: false`, `produit_slug: null`). Toute évolution de `visibles_publiquement()` s'applique donc aux deux.
+
+#### Vues SQL (migration 0004) : elles font partie de la règle
+
+FastAPI (recherche, listes publiques) ne lit pas les tables du catalogue : il lit trois vues qui traduisent ces règles en SQL.
+
+| Vue | Traduit | Colonnes |
+|---|---|---|
+| `catalogue_produit_public` | `Produit.objects.visibles_publiquement()`, prix affiché et `en_stock` de `ProduitPublicListView`, image principale de `ProduitPublicListSerializer` | `id`, `nom`, `slug`, `prix_base`, `date_creation`, `categorie_id`, `categorie_nom`, `categorie_slug`, `categorie_parent_id`, `categorie_parent_slug`, `boutique_id`, `boutique_nom`, `boutique_slug`, `prix_min`, `en_stock`, `image_principale` (chemin relatif au dossier média), `nom_normalise`, `texte_normalise` |
+| `catalogue_categorie_publique` | `Categorie.objects.actives()` | `id`, `nom`, `slug`, `parent_id`, `nom_normalise` |
+| `catalogue_boutique_publique` | `Boutique.objects.publiques()` | `id`, `nom`, `slug`, `nom_normalise` |
+
+- **Colonnes publiques uniquement** : `en_stock` est un booléen ; jamais la quantité, `seuil_alerte`, `sku`, `desactive_par`, ni aucune donnée du propriétaire de la boutique (email, téléphone, KYC, rôle). Le rôle FastAPI n'a de droit que sur ces vues.
+- `nom_normalise` / `texte_normalise` = `catalogue_normaliser(...)` (minuscules, sans accents), fonction créée par la même migration et utilisée par les index de recherche. À ne pas confondre avec la colonne `vendeurs_boutique.nom_normalise` (anti-usurpation), qui n'est pas exposée.
+- Toute évolution des règles ci-dessus (`visibles_publiquement()`, `publies()`, `est_publiable` / `publiques()`, `actives()`, prix affiché, `en_stock`, image principale de la liste) doit être **répercutée dans les vues** par une nouvelle migration. Le test de parité (`CatalogueVuesPubliquesTests`, § 11) échoue sinon.
 
 ## 3. Endpoints — `/api/catalogue/`
 
@@ -138,8 +153,9 @@ Règle : **DELETE = désactivation** (204). En filet de sécurité pour le Djang
 
 - **Niveau 2 — ajustement relatif du stock** : ajouter un endpoint de réassort (`+N` / `−N`, UPDATE `F()`), pour qu'un vendeur n'écrase jamais une vente avec une valeur absolue lue avant elle. Le verrou actuel ordonne les écritures mais ne change pas la sémantique « valeur absolue ».
 - **`seuil_alerte` n'est utilisé nulle part** : aucune notification de stock faible. À brancher sur le module `notifications`.
-- **Recherche sans index** : `icontains` sur nom, description et nom de boutique. Niveau 2 : recherche plein texte ou trigrammes PostgreSQL (`pg_trgm`), selon les mesures.
-- **Produit rangé dans une catégorie inactive** : il reste visible et filtrable par l'id de sa catégorie. À décider (masquer, ou interdire le rattachement à une catégorie inactive).
+- **Recherche de la liste Django sans index** : les index de recherche existent depuis la migration 0004 (trigrammes sur `catalogue_normaliser(nom)` et `catalogue_normaliser(nom || ' ' || description)`, `(date_creation DESC, id DESC)`), mais seule la recherche FastAPI s'en sert. La liste Django garde `icontains` sur nom, description et nom de boutique : sensible aux accents, phrase entière exigée, parcours complet de la table. Son tri par date n'utilise pas non plus l'index (les annotations `Min` / `Exists` calculent tous les produits avant le tri). À reprendre seulement si la liste Django sert au-delà du repli de FastAPI.
+- **Niveau 2, seulement sur mesure** : tri par prix et facettes du catalogue entier calculent le prix minimum de chaque produit (≈ 0,9 s à 100 000 produits synthétiques dans la vue, ≈ 0,6 s dans la liste Django ; sous 70 ms à 10 000). Colonnes `prix_min` / `en_stock` dénormalisées et tenues à jour par Django si un test de charge le justifie, pas avant.
+- **Produit rangé dans une catégorie inactive** : il reste visible et filtrable par l'id de sa catégorie (vue `catalogue_produit_public` comprise). À décider (masquer, ou interdire le rattachement à une catégorie inactive) ; la vue et le test de parité suivront.
 - Les images de catégorie et la gestion des catégories ne passent que par le Django admin (aucune API).
 
 ## 10. Changements de contrat (refonte de septembre 2026)
@@ -175,6 +191,8 @@ Vérifier dans la sortie `-v 2` que tout est `ok` et rien `skipped`. Les tests d
 
 Couverture (`apps/catalogue/tests.py`, classes `Catalogue*Tests`) : suspension (9 écritures), isolation (12 routes, `is_staff`, administration), variante non déplaçable, stock public, visibilité (produit sans variante active, variante inactive, sous-catégories, prix effectif, slug numérique), désactivation au lieu de suppression (commandes, paniers, passeports, tickets, PROTECT en base), modération (12 cas), prix (règles API et contraintes en base), stock (mise à jour concurrente, négatif), images (10 max, contenu falsifié, 5 Mo), N+1 (nombre de requêtes constant), limite de débit.
 
+Vues SQL (`CatalogueVuesPubliquesTests`) : pour chaque cas de visibilité (produit désactivé par le vendeur ou par l'administration, boutique suspendue ou fermée, vendeur KYC en attente ou refusé, redevenu client ou inactif, variantes toutes inactives, sans variante, rupture de stock, promotion, catégorie inactive ou absente, image principale), les produits de `catalogue_produit_public` = `visibles_publiquement()` et la liste publique Django, avec les mêmes prix affichés, `en_stock`, image et champs de liste ; boutiques et catégories publiques identiques ; colonnes exposées = liste autorisée, aucune colonne sensible. Sous SQLite (`config.settings.test`), les vues ne sont pas créées et ces tests sont ignorés : d'où la règle « toujours PostgreSQL ».
+
 **Postman** : `postman_catalogue.json` (hors dépôt) — 1. Connexions et lecture, 2. Administration (remise en état), 3. Préparation vendeur, 4. Parcours public, 5. Parcours vendeur, 6. Scénarios sécurité, 7–8. Nettoyage. Rejouable : produits et variantes retrouvés par leur nom et créés seulement s'ils manquent ; chaque scénario remet l'état qu'il modifie. `admin_password` à renseigner à la main. Les images ne sont pas couvertes (fichier à joindre manuellement).
 
 ## 12. Migrations
@@ -186,3 +204,29 @@ Couverture (`apps/catalogue/tests.py`, classes `Catalogue*Tests`) : suspension (
 - **passeport_qr 0006** et **support 0005** : `on_delete=PROTECT` (aucune opération SQL, la règle est appliquée par Django).
 
 Base de dev vérifiée avant application : 2 produits, 0 inactif, 0 donnée hors règles. Migrations appliquées en dev.
+
+- **catalogue 0004** `recherche_publique` (PostgreSQL uniquement ; rien sous SQLite) :
+  1. extensions `unaccent` et `pg_trgm` (`IF NOT EXISTS`, schéma `public`). « Trusted » : le propriétaire de la base suffit, pas besoin d'être superutilisateur. **Jamais supprimées** au retour arrière (elles peuvent servir ailleurs) ;
+  2. fonction `catalogue_normaliser(text)` (`IMMUTABLE`, pour pouvoir être indexée) ;
+  3. les trois vues du § 2 ;
+  4. index `catalogue_produit_nom_trgm`, `catalogue_produit_texte_trgm` (GIN trigrammes, mêmes expressions que les colonnes de la vue) et `catalogue_produit_date_id` (`date_creation DESC, id DESC`). `CREATE INDEX` simple ; `CONCURRENTLY` (migration non atomique) le jour où la table sera grosse.
+
+  Retour arrière (`migrate catalogue 0003`) : `DROP INDEX`, `DROP VIEW`, `DROP FUNCTION`. Les droits de FastAPI sur les vues disparaissent avec elles : relancer le script de droits après un nouveau `migrate`. Le SQL est dans le fichier de migration (listes `CREATION` / `SUPPRESSION`) ; `sqlmigrate` ne l'affiche pas (opération `RunPython`, nécessaire pour ne rien exécuter sous SQLite).
+
+  Vérifié sur la base de dev : application, retour arrière, nouvelle application sans erreur ; 18 produits dans la vue, identiques à la liste Django (le produit sans variante active est absent), 0 écart de prix ou de stock ; les deux index trigrammes sont utilisés à travers la vue (plan générique, paramètres liés).
+
+### Règle : une migration qui modifie une colonne utilisée par ces vues doit supprimer puis recréer les vues
+
+PostgreSQL refuse sinon (« cannot alter type of a column used by a view or rule » ; même refus pour supprimer la colonne). Changer le `max_length` d'un `CharField` est un changement de type. Colonnes utilisées, **modules vendeurs et utilisateurs compris** :
+
+| Table | Colonnes |
+|---|---|
+| `catalogue_produit` | `id`, `nom`, `slug`, `description`, `prix_base`, `est_actif`, `date_creation`, `boutique_id`, `categorie_id` |
+| `catalogue_varianteproduit` | `id`, `produit_id`, `prix`, `prix_promo`, `est_active` |
+| `catalogue_stock` | `variante_id`, `quantite_disponible` |
+| `catalogue_imageproduit` | `id`, `produit_id`, `image`, `est_principale`, `ordre` |
+| `catalogue_categorie` | `id`, `nom`, `slug`, `parent_id`, `est_active` |
+| `vendeurs_boutique` | `id`, `nom`, `slug`, `est_active`, `est_suspendue`, `proprietaire_id` |
+| `utilisateurs_utilisateur` | `id`, `role`, `statut_kyc`, `is_active` |
+
+Méthode : dans la même migration, `DROP VIEW` des vues concernées, l'opération Django, puis recréation des vues avec leur SQL recopié et mis à jour dans cette migration (une migration ne doit pas importer le code d'une autre, qui peut évoluer). Modifier `catalogue_normaliser` impose aussi de supprimer puis recréer les deux index trigrammes. Ensuite : relancer le test de parité sur PostgreSQL et le script de droits FastAPI.
