@@ -214,15 +214,19 @@ def test_cache_can_be_disabled(client, django):
 LIVRAISON_ID = "550e8400-e29b-41d4-a716-446655440000"
 
 
-def ws_close_code(client, query: str = f"?token={TOKEN}") -> int:
-    with pytest.raises(WebSocketDisconnect) as error:
-        with client.websocket_connect(f"/livraison/ws/{LIVRAISON_ID}{query}"):
-            pass
+def ws_close_code(client, token: str | None = TOKEN) -> int:
+    # Module 1 : jeton dans le premier message, plus dans l'URL.
+    with client.websocket_connect(f"/livraison/ws/{LIVRAISON_ID}") as websocket:
+        if token is not None:
+            websocket.send_json({"type": "auth", "token": token})
+        with pytest.raises(WebSocketDisconnect) as error:
+            websocket.receive_text()
     return error.value.code
 
 
+@pytest.mark.parametrize("settings", [{"ws_auth_timeout": 0.2}], indirect=True)
 def test_websocket_without_token_closes_4401(client):
-    assert ws_close_code(client, "") == 4401
+    assert ws_close_code(client, None) == 4401
 
 
 @pytest.mark.parametrize("status_code, close_code", [(401, 4401), (429, 4429), (503, 1011), (500, 1011)])
@@ -231,9 +235,9 @@ def test_websocket_close_codes_follow_django_answer(client, django, status_code,
     assert ws_close_code(client) == close_code
 
 
-def test_websocket_valid_token_is_accepted(client, django):
-    # Connexion acceptée : pas de WebSocketDisconnect à l'ouverture. Les
-    # messages échangés relèvent du module 1 (gestionnaire encore global).
-    with client.websocket_connect(f"/livraison/ws/{LIVRAISON_ID}?token={TOKEN}"):
-        pass
+def test_websocket_valid_token_is_accepted(client, django, db):
+    # Jeton accepté : un seul appel à Django, puis contrôle des droits
+    # (module 1). Livraison inconnue ici : 4403, et non 4401.
+    assert ws_close_code(client) == 4403
     assert len(django.requests) == 1
+    assert db.queries

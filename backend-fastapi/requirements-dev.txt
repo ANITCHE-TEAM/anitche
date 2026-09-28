@@ -2,3 +2,6 @@
 -r requirements.txt
 pytest==9.1.1
 fakeredis==2.38.0
+# Un test WebSocket qui attend un message jamais envoyé échoue au lieu de
+# bloquer la suite (et la CI).
+pytest-timeout==2.4.0

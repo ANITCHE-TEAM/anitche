@@ -169,3 +169,33 @@ def test_startup_error_does_not_leak_secret_values():
     with pytest.raises(ValidationError) as error:
         Settings(_env_file=None, database_url="postgresql://a:Secret99@db/x", environment="prod")
     assert "Secret99" not in str(error.value)
+
+
+def test_tracking_defaults_are_the_validated_values():
+    """Module 1 (décision 6) : TTL 120 s, revalidation 60 s, authentification
+    en 5 s, gps_read 720/h, 4 096 octets, 6 messages par minute ; ETA :
+    facteur 1,4 et 20 km/h."""
+    settings = Settings(_env_file=None)
+    assert settings.tracking_position_ttl == 120
+    assert settings.ws_revalidate_interval == 60
+    assert settings.ws_auth_timeout == 5
+    assert settings.rate_limits["gps_read"] == "720/hour"
+    assert settings.ws_max_message_bytes == 4096
+    assert settings.ws_client_messages_per_minute == 6
+    assert settings.tracking_queue_size == 8
+    assert (settings.eta_detour_factor, settings.eta_average_speed_kmh) == (1.4, 20.0)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"ws_max_message_bytes": 9000},  # au-delà de --ws-max-size 8192
+        {"tracking_position_ttl": 0},
+        {"ws_auth_timeout": 0},
+        {"eta_detour_factor": 0.5},
+        {"eta_average_speed_kmh": 0},
+    ],
+)
+def test_tracking_settings_are_bounded(overrides):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **overrides)

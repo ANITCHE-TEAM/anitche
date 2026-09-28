@@ -150,12 +150,16 @@ def test_consulter_passeport_get(client):
 # 4. Tests Suivi GPS & Télémétrie Livreur
 # ==========================================
 
-def test_mise_a_jour_position_gps_et_consultation(client):
-    # F-11 : ces routes sont désormais authentifiées (voir
-    # test_f11_auth_gps.py pour les cas d'accès refusé) ; on simule ici un
-    # livreur légitime autorisé sur la livraison pour vérifier que le flux
-    # normal fonctionne toujours.
+def test_mise_a_jour_position_gps_et_consultation(client, db):
+    # Module 1 : changement de contrat assumé (rapport module 1 §g). Le
+    # livreur est celui du jeton (livreur_id du corps ignoré), l'accès est
+    # lu dans PostgreSQL (livraison en cours, livreur assigné). Plus de
+    # statut fictif ni de livreur_id dans la réponse ; distance et temps
+    # restants seulement si le client a donné son point GPS (ici, non).
+    # Cas refusés : test_f11_auth_gps.py et test_suivi_gps.py.
     livraison_id = "550e8400-e29b-41d4-a716-446655440000"
+    db.add_delivery(livraison_id, status="en_cours", courier_id=42, client_id=7)
+    db.add_user(42, "livreur")
     payload = {
         "livraison_id": livraison_id,
         "livreur_id": 42,
@@ -165,9 +169,6 @@ def test_mise_a_jour_position_gps_et_consultation(client):
         "cap_degres": 120.0,
     }
 
-    # Module 0 : dépendance renommée (get_current_user, qui renvoie un
-    # CurrentUser) ; verifier_acces_livraison est retirée du socle (refaite
-    # au module 1), il n'y a donc plus rien à simuler pour elle.
     client.app.dependency_overrides[get_current_user] = lambda: CurrentUser(id=42, role="livreur")
 
     # 1. Envoi de la position par le livreur
@@ -175,14 +176,16 @@ def test_mise_a_jour_position_gps_et_consultation(client):
     assert response_post.status_code == 200
     data_post = response_post.json()
     assert data_post["livraison_id"] == livraison_id
-    assert data_post["statut"] == "en_route"
-    assert data_post["distance_restante_km"] > 0
-    assert data_post["temps_estime_minutes"] > 0
+    assert data_post["horodatage"].endswith("Z")
+    assert data_post["distance_restante_km"] is None
+    assert data_post["temps_estime_minutes"] is None
+    assert "livreur_id" not in data_post and "statut" not in data_post
 
-    # 2. Consultation de la position par le client
+    # 2. Consultation de la position (livreur assigné ; client : test_suivi_gps.py)
     response_get = client.get(f"/livraison/position/{livraison_id}")
     assert response_get.status_code == 200
     data_get = response_get.json()
     assert data_get["latitude"] == 5.3350
     assert data_get["longitude"] == -4.0020
-    assert data_get["livreur_id"] == 42
+    assert data_get["vitesse_kmh"] == 32.5
+    assert "livreur_id" not in data_get

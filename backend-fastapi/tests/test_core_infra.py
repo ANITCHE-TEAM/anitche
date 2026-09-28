@@ -1,10 +1,14 @@
 """Module 0 : image Docker, dépendances, compose et CI du service FastAPI.
 
+Module 1 (fin du fichier) : options WebSocket d'uvicorn, droits par colonne
+du rôle en lecture seule, job CI « integration ».
+
 Failles du rapport module 0 §1 couvertes : 24-25 (compose sans URL Django
 ni DATABASE_URL, mot de passe superutilisateur transmis sans être lu), 27
 (Dockerfile), 28 (dépendances de test dans l'image), 29 (CI).
 Lecture des fichiers du dépôt (PyYAML est fourni par uvicorn[standard]).
 """
+import re
 from pathlib import Path
 
 import pytest
@@ -83,7 +87,7 @@ def test_app_requirements_have_no_test_tools_and_are_pinned():
 def test_dev_requirements_extend_app_requirements():
     requirements = _requirements("requirements-dev.txt")
     assert requirements[0] == "-r requirements.txt"
-    assert {line.split("==")[0] for line in requirements[1:]} == {"pytest", "fakeredis"}
+    assert {line.split("==")[0] for line in requirements[1:]} == {"pytest", "fakeredis", "pytest-timeout"}
 
 
 def test_ci_installs_dev_requirements_once():
@@ -94,3 +98,73 @@ def test_ci_installs_dev_requirements_once():
     assert "pip install pytest" not in commands
     assert "create_app()" in commands
     assert workflow["env"]["ENVIRONMENT"] == "test"
+
+
+# ------------------------------------------------------------ module 1
+
+WS_FLAGS = "--ws-max-size 8192 --ws-ping-interval 20 --ws-ping-timeout 20"
+
+
+@pytest.mark.parametrize("compose_file", ["docker-compose.yml", "docker-compose.prod.yml"])
+def test_compose_bounds_websocket_messages_and_pings(compose_file):
+    """Module 1, faille 10 : barrière extérieure d'uvicorn (8 Kio), ping de 20 s."""
+    assert WS_FLAGS in fastapi_service(compose_file)["command"]
+
+
+def test_dockerfile_bounds_websocket_messages_and_pings():
+    dockerfile = (BACKEND / "Dockerfile").read_text(encoding="utf-8")
+    cmd = next(line for line in dockerfile.splitlines() if line.startswith("CMD"))
+    assert '"--ws-max-size", "8192", "--ws-ping-interval", "20", "--ws-ping-timeout", "20"' in cmd
+
+
+def test_readonly_role_gets_exactly_the_tracking_columns():
+    """Module 1 §b : SELECT par colonne, rien d'autre ; REVOKE ALL sur chaque
+    table accordée (script idempotent)."""
+    sql = (REPO / "infra" / "postgres" / "fastapi_readonly.sql").read_text(encoding="utf-8")
+    code = "\n".join(line for line in sql.splitlines() if not line.lstrip().startswith("--"))
+    grants = {
+        table: {column.strip() for column in columns.split(",")}
+        for columns, table in re.findall(r"GRANT SELECT \(([^)]*)\) ON TABLE (\w+) TO anitche_fastapi_ro;", code)
+    }
+    assert grants == {
+        "livraison_livraison": {"id", "commande_id", "livreur_id", "status"},
+        "commandes_commande": {"id", "client_id", "groupe_id"},
+        "commandes_groupecommande": {"id", "livraison_latitude", "livraison_longitude"},
+        "utilisateurs_utilisateur": {"id", "role", "is_active"},
+    }
+    for table in grants:
+        assert f"REVOKE ALL ON TABLE {table} FROM anitche_fastapi_ro;" in code
+    # Aucun droit par table, sur tout le schéma, ni d'écriture.
+    assert len(re.findall(r"\bGRANT\b", code)) == len(grants) + 2  # + CONNECT et USAGE
+    assert "ALL TABLES" not in code and "DEFAULT PRIVILEGES" not in code
+    assert not re.search(r"GRANT (INSERT|UPDATE|DELETE|TRUNCATE|ALL)", code)
+
+
+def _workflow() -> dict:
+    return yaml.safe_load((REPO / ".github" / "workflows" / "ci-fastapi.yml").read_text(encoding="utf-8"))
+
+
+def test_ci_runs_unit_tests_without_services():
+    commands = "\n".join(step.get("run", "") for step in _workflow()["jobs"]["test"]["steps"])
+    assert '-m "not integration"' in commands
+    assert "services" not in _workflow()["jobs"]["test"]
+
+
+def test_ci_integration_job_uses_real_services_and_cannot_skip():
+    """Module 1 §g : vrais PostgreSQL et Redis, schéma des migrations Django,
+    vrai script du rôle, un test sauté fait échouer le job."""
+    workflow = _workflow()
+    job = workflow["jobs"]["integration"]
+    assert job["services"]["postgres"]["image"] == "postgres:16"
+    assert job["services"]["redis"]["image"] == "redis:7-alpine"
+    runs = [step.get("run", "") for step in job["steps"]]
+    migrate = next(i for i, run in enumerate(runs) if "manage.py migrate" in run)
+    role = next(i for i, run in enumerate(runs) if "infra/postgres/fastapi_readonly.sql" in run)
+    tests = next(i for i, run in enumerate(runs) if "-m integration" in run)
+    assert migrate < role < tests  # les tables existent avant le script
+    env = job["steps"][tests]["env"]
+    assert env["REQUIRE_INTEGRATION"] == "1"
+    assert env["FASTAPI_TEST_DATABASE_URL"].startswith("postgresql://anitche_fastapi_ro:")
+    assert env["FASTAPI_TEST_REDIS_URL"].endswith("/15")
+    paths = workflow[True]["push"]["paths"]  # PyYAML lit la clé « on » comme True
+    assert "infra/postgres/**" in paths and "backend-django/apps/*/migrations/**" in paths

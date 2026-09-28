@@ -42,6 +42,9 @@ DEFAULT_MESSAGES = {
 
 # Codes de fermeture WebSocket (4000-4999 : réservés aux applications).
 WS_CLOSE_CODES = {401: 4401, 403: 4403, 429: 4429}
+WS_CLOSE_NORMAL = 1000
+WS_CLOSE_POLICY_VIOLATION = 1008
+WS_CLOSE_MESSAGE_TOO_BIG = 1009
 WS_CLOSE_INTERNAL_ERROR = 1011
 
 # Messages de validation Pydantic traduits avec les textes de DRF.
@@ -51,11 +54,15 @@ VALIDATION_MESSAGES = {
     "string_too_long": "Assurez-vous que ce champ comporte au plus {max_length}\xa0caractères.",
     "greater_than_equal": "Assurez-vous que cette valeur est supérieure ou égale à\xa0{ge}.",
     "less_than_equal": "Assurez-vous que cette valeur est inférieure ou égale à {le}.",
+    "less_than": "Assurez-vous que cette valeur est strictement inférieure à {lt}.",
+    # NaN, Infinity : refusés (JSON invalide chez les abonnés).
+    "finite_number": "Un nombre valide est requis.",
     "int_parsing": "Un nombre entier valide est requis.",
     "int_type": "Un nombre entier valide est requis.",
     "float_parsing": "Un nombre valide est requis.",
     "float_type": "Un nombre valide est requis.",
     "uuid_parsing": "Doit être un UUID valide.",
+    "uuid_type": "Doit être un UUID valide.",
     "literal_error": "«\xa0{input}\xa0» n'est pas un choix valide.",
     "bool_parsing": "Doit être un booléen valide.",
     "string_type": "Chaîne de caractère invalide.",
@@ -82,6 +89,16 @@ ERROR_RESPONSES = {
 }
 
 
+class CodedHTTPException(StarletteHTTPException):
+    """HTTPException avec un code machine, renvoyé comme Django dans
+    `errors.code = ["<code>"]` : le frontend se fie à `errors.code[0]`,
+    jamais au texte français de `detail`."""
+
+    def __init__(self, status_code: int, detail: str, code: str, headers=None):
+        super().__init__(status_code, detail, headers)
+        self.code = code
+
+
 def error_response(status_code: int, detail: str, errors: dict | None = None, headers=None) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
@@ -100,7 +117,9 @@ def _http_detail(request: Request, exc: StarletteHTTPException) -> str:
 
 
 async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
-    return error_response(exc.status_code, _http_detail(request, exc), headers=exc.headers)
+    code = getattr(exc, "code", None)
+    errors = {"code": [code]} if isinstance(code, str) else None
+    return error_response(exc.status_code, _http_detail(request, exc), errors, headers=exc.headers)
 
 
 def _validation_message(error: dict) -> str:

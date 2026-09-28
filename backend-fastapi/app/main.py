@@ -6,16 +6,18 @@ sienne avec ses réglages et ses ressources.
 """
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.core.access_log import AccessLogMiddleware
+from app.core.access_log import AccessLogMiddleware, redact_websocket_query_strings
 from app.core.errors import ERROR_RESPONSES, install_error_handlers
 from app.core.resources import Resources, build_lifespan
 from app.core.settings import Settings, get_settings
 from app.routeurs import conseiller_ia, recherche, scan_qr, suivi_temps_reel
+from app.services.tracking import TrackingHub
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,6 +53,26 @@ async def health(request: Request) -> JSONResponse:
     )
 
 
+def build_app_lifespan(settings: Settings, resources: Resources | None):
+    """Ressources partagées (app/core/resources.py), puis l'abonnement
+    pub/sub du suivi GPS : un seul par processus, arrêté avant les
+    ressources."""
+    resources_lifespan = build_lifespan(settings, resources)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        async with resources_lifespan(app):
+            hub = TrackingHub(app.state.redis, queue_size=settings.tracking_queue_size)
+            await hub.start()
+            app.state.tracking_hub = hub
+            try:
+                yield
+            finally:
+                await hub.stop()
+
+    return lifespan
+
+
 def create_app(settings: Settings | None = None, *, resources: Resources | None = None) -> FastAPI:
     settings = settings or get_settings()
 
@@ -67,11 +89,12 @@ def create_app(settings: Settings | None = None, *, resources: Resources | None 
         openapi_url="/openapi.json" if settings.docs_enabled else None,
         root_path=settings.root_path,
         responses=ERROR_RESPONSES,
-        lifespan=build_lifespan(settings, resources),
+        lifespan=build_app_lifespan(settings, resources),
     )
     app.state.settings = settings
 
     install_error_handlers(app)
+    redact_websocket_query_strings()
 
     # Authentification par en-tête Authorization, sans cookie : pas de
     # credentials cross-origin (comme CORS_ALLOW_CREDENTIALS = False côté

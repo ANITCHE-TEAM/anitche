@@ -16,7 +16,7 @@ from tests.fakes import AUTH_HEADERS, TOKEN
 
 ONE_PER_MINUTE = {name: "1/minute" for name in rate_limit_module.DEFAULT_RATE_LIMITS}
 LIVRAISON_ID = "550e8400-e29b-41d4-a716-446655440000"
-GPS_PAYLOAD = {"livraison_id": LIVRAISON_ID, "livreur_id": 42, "latitude": 5.33, "longitude": -4.0}
+GPS_PAYLOAD = {"livraison_id": LIVRAISON_ID, "latitude": 5.33, "longitude": -4.0}
 
 # Chaque route existante et son scope (rapport module 0, §2 d).
 ROUTES = [
@@ -28,11 +28,21 @@ ROUTES = [
     ("post", "/ia/recommandations", {"json": {}}, "ai_advice"),
     ("post", "/livraison/position", {"json": GPS_PAYLOAD, "headers": AUTH_HEADERS}, "gps_publish"),
 ]
+# La lecture de la position (module 1) a son propre scope, testé seul : la
+# première lecture exige une position publiée (test_suivi_gps.py, faille 11).
+
+
+@pytest.fixture
+def gps_delivery(db):
+    """Module 1 : livraison en cours du livreur 42 (jeton par défaut), pour
+    que la première publication et la première lecture réussissent."""
+    db.add_delivery(LIVRAISON_ID, status="en_cours", courier_id=42, client_id=7)
+    db.add_user(42, "livreur")
 
 
 @pytest.mark.parametrize("settings", [{"rate_limits": ONE_PER_MINUTE}], indirect=True)
 @pytest.mark.parametrize("method, path, kwargs, scope", ROUTES, ids=[f"{r[0]} {r[1]}" for r in ROUTES])
-def test_existing_routes_are_rate_limited(client, redis_server, method, path, kwargs, scope):
+def test_existing_routes_are_rate_limited(client, redis_server, gps_delivery, method, path, kwargs, scope):
     """Faille 18-19 : chaque route existante a son scope ; au-delà du débit,
     429 au format commun avec Retry-After."""
     first = getattr(client, method)(path, **kwargs)
@@ -52,13 +62,16 @@ def test_existing_routes_are_rate_limited(client, redis_server, method, path, kw
 
 
 @pytest.mark.parametrize("settings", [{"rate_limits": {"ws_connect": "1/minute"}}], indirect=True)
-def test_websocket_connections_are_rate_limited_per_user(client):
-    with client.websocket_connect(f"/livraison/ws/{LIVRAISON_ID}?token={TOKEN}"):
-        pass
+def test_websocket_connections_are_rate_limited_per_user(client, gps_delivery):
+    # Module 1 : jeton dans le premier message.
+    with client.websocket_connect(f"/livraison/ws/{LIVRAISON_ID}") as websocket:
+        websocket.send_json({"type": "auth", "token": TOKEN})
+        assert websocket.receive_json()["type"] == "authentifie"
 
-    with pytest.raises(WebSocketDisconnect) as error:
-        with client.websocket_connect(f"/livraison/ws/{LIVRAISON_ID}?token={TOKEN}"):
-            pass
+    with client.websocket_connect(f"/livraison/ws/{LIVRAISON_ID}") as websocket:
+        websocket.send_json({"type": "auth", "token": TOKEN})
+        with pytest.raises(WebSocketDisconnect) as error:
+            websocket.receive_text()
     assert error.value.code == 4429
 
 

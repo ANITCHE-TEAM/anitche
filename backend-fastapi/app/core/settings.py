@@ -24,6 +24,8 @@ DEFAULT_RATE_LIMITS = {
     "suggestions": "2400/hour",
     "qr_scan": "600/hour",
     "gps_publish": "1500/hour",
+    # Lecture de la position en repli du WebSocket : une toutes les 5 s.
+    "gps_read": "720/hour",
     "ws_connect": "60/hour",
     "ai_advice": "20/hour",
 }
@@ -78,6 +80,28 @@ class Settings(BaseSettings):
     # Durée du cache d'authentification (secondes). 0 : pas de cache.
     auth_cache_ttl: int = Field(default=30, ge=0, le=300)
     rate_limits: dict[str, str] = DEFAULT_RATE_LIMITS
+
+    # Suivi GPS (docs/MODULE_SUIVI_GPS.md).
+    # Durée de vie de la dernière position dans Redis (secondes) : au-delà,
+    # elle n'est plus montrée (téléphone éteint, tunnel...).
+    tracking_position_ttl: int = Field(default=120, ge=10, le=3600)
+    # WebSocket : délai du premier message d'authentification, intervalle de
+    # revalidation (jeton et droits), taille maximale d'un message reçu
+    # (sous --ws-max-size 8192 d'uvicorn), messages du client par minute,
+    # positions en attente par connexion (la plus ancienne est jetée).
+    ws_auth_timeout: float = Field(default=5.0, gt=0, le=60)
+    ws_revalidate_interval: float = Field(default=60.0, gt=0, le=600)
+    ws_max_message_bytes: int = Field(default=4096, ge=256, le=8192)
+    ws_client_messages_per_minute: int = Field(default=6, ge=1, le=60)
+    tracking_queue_size: int = Field(default=8, ge=1, le=100)
+    # Estimation INDICATIVE de la distance et du temps restants, seulement si
+    # le client a donné son point GPS au checkout. Distance à vol d'oiseau
+    # (Haversine) multipliée par un facteur de détour : la route est plus
+    # longue que la ligne droite (1,3 à 1,5 en ville, hypothèse à mesurer).
+    # Vitesse moyenne urbaine d'une moto ou d'une voiture dans Abidjan,
+    # arrêts compris, sans trafic en temps réel (hypothèse à mesurer).
+    eta_detour_factor: float = Field(default=1.4, ge=1.0, le=3.0)
+    eta_average_speed_kmh: float = Field(default=20.0, gt=0, le=120)
 
     @field_validator("cors_allowed_origins", mode="before")
     @classmethod

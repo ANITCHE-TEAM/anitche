@@ -4,8 +4,15 @@ isolées injectées dans create_app (aucun service réel n'est appelé).
 - Django : httpx.MockTransport (tests/fakes.py, FakeDjango), le vrai code de app/core/auth.py
   est exécuté ;
 - Redis : fakeredis, un serveur vide par test ;
-- PostgreSQL : pool simulé (seul /health l'utilise au module 0).
+- PostgreSQL : pool simulé (FakePool : /health et requête d'accès du suivi GPS).
+
+Tests marqués « integration » (tests/integration/) : vrais PostgreSQL et
+Redis, sautés sans les variables FASTAPI_TEST_*. Avec REQUIRE_INTEGRATION=1
+(CI), un test d'intégration sauté ÉCHOUE : impossible de passer en vert
+sans les avoir exécutés.
 """
+import os
+
 import fakeredis
 import httpx
 import pytest
@@ -15,6 +22,19 @@ from app.core.resources import Resources
 from app.core.settings import Settings
 from app.main import create_app
 from tests.fakes import FakeDjango, FakePool, make_settings
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    if (
+        report.skipped
+        and os.environ.get("REQUIRE_INTEGRATION") == "1"
+        and item.get_closest_marker("integration") is not None
+    ):
+        report.outcome = "failed"
+        report.longrepr = f"Test d'intégration sauté alors que REQUIRE_INTEGRATION=1 : {report.longrepr}"
 
 
 @pytest.fixture
