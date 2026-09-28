@@ -156,6 +156,7 @@ Chaque module documente les changements de contrat à intégrer côté interface
 | Paiements | [`MODULE_PAIEMENTS.md` § 10](./MODULE_PAIEMENTS.md#10-impact-frontend) |
 | Livraison | [`MODULE_LIVRAISON.md` § 10](./MODULE_LIVRAISON.md#10-impact-frontend) |
 | Suivi GPS (FastAPI) | § 12 ci-dessous et [`MODULE_SUIVI_GPS.md`](./MODULE_SUIVI_GPS.md) |
+| Recherche (FastAPI) | § 12 ci-dessous et [`MODULE_RECHERCHE.md`](./MODULE_RECHERCHE.md) |
 | Retours | [`MODULE_RETOURS.md` § 8](./MODULE_RETOURS.md#8-impact-frontend) |
 | Fidélité | [`MODULE_FIDELITE.md` § 6](./MODULE_FIDELITE.md#6-impact-frontend) |
 | Notifications | [`MODULE_NOTIFICATIONS.md` § 5](./MODULE_NOTIFICATIONS.md#5-impact-frontend) |
@@ -222,7 +223,7 @@ const corps = {
 
 ## 12. Service FastAPI (`/fast/`)
 
-Second backend, pour le temps réel et les services rapides. Les modules 2 à 4 de la refonte FastAPI (recherche, QR, IA) ajouteront leurs routes ici. Aujourd'hui : **suivi GPS du livreur**, contrat complet dans [`MODULE_SUIVI_GPS.md`](./MODULE_SUIVI_GPS.md).
+Second backend, pour le temps réel et les services rapides. Les modules 3 et 4 de la refonte FastAPI (QR, IA) ajouteront leurs routes ici. Aujourd'hui : **suivi GPS du livreur**, contrat complet dans [`MODULE_SUIVI_GPS.md`](./MODULE_SUIVI_GPS.md), et **recherche du catalogue** (ci-dessous et [`MODULE_RECHERCHE.md`](./MODULE_RECHERCHE.md)).
 
 ### Base et authentification
 
@@ -325,3 +326,40 @@ Codes de fermeture (se fier au **code**, pas au motif) :
 | 1008, 1009 | Message non prévu ou trop grand | Non : bug du client |
 
 Le serveur revalide le jeton et les droits toutes les 60 s : un compte désactivé ou une livraison réassignée ferme la connexion en 4403, une livraison terminée en 1000.
+
+### Recherche et listes de produits
+
+Contrat complet : [`MODULE_RECHERCHE.md`](./MODULE_RECHERCHE.md). Routes **publiques** (aucun jeton).
+
+| Écran | Appel |
+|---|---|
+| Barre de recherche, page de résultats, filtres, facettes | FastAPI `GET /recherche/produits` |
+| Listes publiques (catégorie, boutique, nouveautés) | FastAPI `GET /recherche/produits` sans `recherche` |
+| Autocomplétion | FastAPI `GET /recherche/suggestions` |
+| **Repli** si FastAPI répond 503 ou ne répond pas | Django `GET /api/catalogue/produits/` (mêmes paramètres, sauf `tri=pertinence`) |
+| Fiche produit, catégories, boutiques | **Django** (`/api/catalogue/produits/<slug>/`…) |
+
+- **Paramètres** : ceux de la liste Django (`recherche`, `categorie`, `boutique`, `prix_min`, `prix_max`, `tri`, `page`), plus `tri=pertinence` (défaut quand `recherche` est rempli). Recherche **sans accents ni majuscules**, **fautes de frappe tolérées**, aussi dans les noms de boutique et de catégorie. Valeur invalide : **400** (`errors.<paramètre>`), là où Django l'ignore ; ne pas envoyer de paramètre vide autre que `recherche`.
+- **Réponse** : `{count, next, previous, results}` avec **les mêmes éléments que Django** : un seul composant « carte produit » sert aux deux. Différence : produit sans catégorie → `categorie_nom: null` (Django omet la clé). Plus `facettes` (`categories`, `boutiques`, `prix.tranches`), en **page 1 seulement** (`null` ensuite).
+- `next` / `previous` : URL absolues, à suivre telles quelles. Page au-delà de la dernière : 404 `errors.code[0] = "page_invalide"`. 50 pages au plus.
+- **Stock** : seulement `en_stock` (« En stock » / « Rupture ») ; jamais de quantité.
+- `count` et facettes peuvent avoir **jusqu'à 60 s de retard** (cache) ; la liste elle-même est toujours à jour.
+- **Autocomplétion** : rien sous **3 caractères**, anti-rebond de **300 ms**, annuler la requête précédente ; 8 suggestions par défaut (`limite` 1 à 10), chacune `{type, texte, id, slug}` avec `type` = `categorie`, `boutique` ou `produit`, pour naviguer directement. Sur 429, attendre `Retry-After` sans relancer.
+
+```js
+// Liste de produits : FastAPI, repli sur Django (même enveloppe, sans facettes).
+async function listerProduits(params, signal) {
+  const query = new URLSearchParams(params).toString();
+  try {
+    const reponse = await fetch(`${FASTAPI_URL}/recherche/produits?${query}`, { signal });
+    if (reponse.status !== 503) return await reponse.json(); // 200, 400, 404, 429 : réponse de FastAPI
+  } catch (erreur) {
+    if (erreur.name === 'AbortError') throw erreur; // requête remplacée par une plus récente
+  }
+  const { tri, ...reste } = params; // Django ne connaît pas tri=pertinence
+  const django = new URLSearchParams(tri === 'pertinence' ? reste : params).toString();
+  return (await fetch(`${DJANGO_API_URL}/catalogue/produits/?${django}`, { signal })).json();
+}
+```
+
+En repli, Django cherche la phrase exacte avec accents (`karité` trouve, `karite` non) : afficher les résultats sans facettes.

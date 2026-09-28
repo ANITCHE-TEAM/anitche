@@ -27,7 +27,7 @@ graph TD
 ```
 
 1. **`backend-django`** : Cœur relationnel et transactionnel de la marketplace. Assure l'authentification (JWT SimpleJWT, Google OAuth), le contrôle d'accès strict par rôle, la gestion des boutiques, le catalogue et stocks, les paniers, la création et le fractionnement multi-vendeurs des commandes, la gestion des livraisons avec audit et le support client.
-2. **`backend-fastapi`** : Microservice asynchrone pour la haute performance et les interactions spécialisées (conseiller IA, moteur de recherche vectorielle/sémantique, scan de passeports QR, télémétrie de suivi temps réel).
+2. **`backend-fastapi`** : Microservice asynchrone pour la haute performance et les interactions spécialisées (conseiller IA, recherche publique du catalogue — texte sans accents, fautes de frappe tolérées, facettes, autocomplétion —, scan de passeports QR, télémétrie de suivi temps réel).
 3. **`infra`** : Environnement complet conteneurisé Docker Compose orchestrant Django, FastAPI, PostgreSQL 16, Redis 7, Celery Worker, Celery Beat et le frontend React/Vite.
 
 ---
@@ -318,8 +318,8 @@ graph TD
 ```
 
 * **1. Recherche Rapide & Suggestions ([`routeurs/recherche.py`](file:///c:/Users/Jordan/Documents/Anitche/backend-fastapi/app/routeurs/recherche.py))** :
-  - `GET /recherche/produits` : Recherche textuelle multicritères avec facettes (catégories, fourchettes de prix, boutiques) et tri intelligent.
-  - `GET /recherche/suggestions` : Suggestions instantanées d'autocomplétion pendant la frappe utilisateur.
+  - `GET /recherche/produits` : Recherche dans les produits **visibles selon Django** (vues SQL publiques de la migration `catalogue/0004`, seules lisibles par le rôle en lecture seule), sans accents ni majuscules, fautes de frappe tolérées (`pg_trgm`), aussi dans les noms de boutique et de catégorie ; filtres, tris et pagination de la liste Django (`GET /api/catalogue/produits/`, mêmes champs, jamais de stock exact) ; facettes (catégories, boutiques, tranches de prix) sur l'ensemble filtré, total et facettes en cache Redis 60 s, résultats jamais.
+  - `GET /recherche/suggestions` : Autocomplétion à partir de 3 caractères (catégories actives, boutiques publiques, produits visibles), en cache 60 s. Contrat : [`MODULE_RECHERCHE.md`](./MODULE_RECHERCHE.md).
 * **2. Conseiller Shopping IA ([`routeurs/conseiller_ia.py`](file:///c:/Users/Jordan/Documents/Anitche/backend-fastapi/app/routeurs/conseiller_ia.py))** :
   - `POST /ia/conseil` : Analyse contextuelle (cérémonie, mariage, style, budget) et recommandations argumentées de pièces artisanales et de mode ivoirienne.
   - `POST /ia/recommandations` : Suggestions personnalisées par catégories favorites et budget.
@@ -329,7 +329,7 @@ graph TD
   - `POST /livraison/position` : Position du livreur assigné, pendant `en_cours` seulement (latitude, longitude, vitesse, cap).
   - `GET /livraison/position/{id}` : Dernière position (client de la commande, livreur assigné, administration). Distance restante et ETA **indicatifs**, calculés **seulement si le client a donné son point GPS au checkout** (sinon `null`, jamais de valeur inventée).
   - `WebSocket /livraison/ws/{id}` : Positions en direct, authentification par premier message. Contrat : [`MODULE_SUIVI_GPS.md`](./MODULE_SUIVI_GPS.md).
-* **Validation & Tests ([`tests/test_api.py`](file:///c:/Users/Jordan/Documents/Anitche/backend-fastapi/tests/test_api.py))** : **13 tests automatisés pytest réussis à 100%**.
+* **Validation & Tests (`backend-fastapi/tests/`)** : 862 tests unitaires (ressources simulées) et 34 tests d'intégration (vrais PostgreSQL et Redis, schéma des migrations Django, job CI `integration`) au module 2 de la refonte (septembre 2026).
 
 ---
 
