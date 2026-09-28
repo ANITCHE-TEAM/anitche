@@ -31,6 +31,10 @@ class BoutiqueQuerySet(models.QuerySet):
 
         Le filtre s'appuie sur `statut_kyc`, source de vérité de l'état vendeur
         (module utilisateurs) — aucun statut de validation n'est dupliqué ici.
+
+        Règle aussi traduite dans la vue catalogue_boutique_publique
+        (migration catalogue 0004, lue par FastAPI) : toute évolution doit y
+        être répercutée (test de parité dans apps/catalogue/tests.py).
         """
         return self.ouvertes().filter(
             proprietaire__role=Role.VENDEUR,
@@ -108,7 +112,9 @@ class Boutique(models.Model):
         Point d'entrée unique pour les autres modules (catalogue, commandes) :
         un vendeur non validé, une boutique fermée ou suspendue ne publie rien.
         `Produit.objects.publies()` (catalogue) duplique cette règle en SQL :
-        toute évolution ici doit y être répercutée.
+        toute évolution ici doit y être répercutée. Règle aussi traduite dans
+        les vues catalogue_produit_public et catalogue_boutique_publique
+        (migration catalogue 0004, lues par FastAPI).
         """
         return (
             self.est_active

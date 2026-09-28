@@ -67,6 +67,7 @@ Vérifier en `-v 2` que chaque test affiche `ok` et non `skipped`. La suite comp
 
 1. **`statut_kyc` est la seule source de vérité de l'état vendeur**, et rôle + statut bougent ensemble, uniquement dans `apps/vendeurs/services.py`.
 2. **Visibilité publique** : `Boutique.est_publiable` et `Produit.objects.publies()` portent la règle ; ne jamais re-tester `role` ou `statut_kyc` ailleurs.
+   Exception assumée : les vues `catalogue_produit_public`, `catalogue_boutique_publique` et `catalogue_categorie_publique` (migration catalogue 0004, lues par FastAPI) traduisent volontairement ces règles en SQL ; les tests de parité (`CatalogueVuesPubliquesTests`, [`MODULE_CATALOGUE.md`](./MODULE_CATALOGUE.md) § 2 et § 11) échouent si elles divergent de Django.
 3. **Paiement** : le montant est toujours calculé par le serveur ; une notification de fournisseur n'est crue qu'après signature et vérification de la transaction. Le fournisseur simulé est refusé au démarrage en production.
 4. **Données sensibles** : pièces KYC, photos de retour et pièces jointes ne sont servies que par leurs vues authentifiées, jamais par une URL média directe. Numéros mobile money chiffrés au repos (rotation : `rechiffrer_donnees_sensibles`).
 5. **Production** : `prod.py` refuse de démarrer sans vraie `SECRET_KEY`, clés de chiffrement, `ALLOWED_HOSTS`/`CORS` explicites et fournisseur de paiement réel. Ne jamais contourner ces garde-fous.

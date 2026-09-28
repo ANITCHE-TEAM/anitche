@@ -4,10 +4,11 @@ import shutil
 import tempfile
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest import mock
+from unittest import mock, skipUnless
 
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
+from django.core.files.storage import default_storage
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, connection, transaction
 from django.db.models import ProtectedError
@@ -26,8 +27,10 @@ from apps.support.models import SupportTicket
 from apps.utilisateurs.models import Utilisateur, Role, StatutKYC
 from apps.vendeurs.models import Boutique
 from .models import MAX_IMAGES_PAR_PRODUIT, Categorie, Produit, VarianteProduit, Stock, ImageProduit
-from .serializers import MESSAGE_DESACTIVATION_ADMINISTRATION, MESSAGE_MONTANT_ENTIER, ProduitVendeurSerializer
-from .views import StockUpdateView
+from .serializers import (
+    MESSAGE_DESACTIVATION_ADMINISTRATION, MESSAGE_MONTANT_ENTIER, ProduitPublicListSerializer, ProduitVendeurSerializer,
+)
+from .views import ProduitPublicListView, StockUpdateView
 
 
 class BaseCatalogueTestCase(APITestCase):
@@ -924,3 +927,228 @@ class CatalogueDebitTests(BaseRefonteCatalogue):
             ).status_code)
             codes.append(self.client.get(URL_P + 'produits/', REMOTE_ADDR='8.8.8.8').status_code)
         self.assertEqual(codes, [200, 200, 200, 429, 429, 200])
+
+
+# =====================================================================
+# VUES SQL LUES PAR FASTAPI (migration 0004) : PARITÉ AVEC DJANGO
+# =====================================================================
+
+#: Colonnes de chaque vue, et rien d'autre : c'est tout ce que FastAPI peut
+#: lire du catalogue. Ajouter une colonne impose de revoir ce qu'elle expose.
+COLONNES_VUES_PUBLIQUES = {
+    'catalogue_produit_public': {
+        'id', 'nom', 'slug', 'prix_base', 'date_creation',
+        'categorie_id', 'categorie_nom', 'categorie_slug', 'categorie_parent_id', 'categorie_parent_slug',
+        'boutique_id', 'boutique_nom', 'boutique_slug',
+        'prix_min', 'en_stock', 'image_principale', 'nom_normalise', 'texte_normalise',
+    },
+    'catalogue_categorie_publique': {'id', 'nom', 'slug', 'parent_id', 'nom_normalise'},
+    'catalogue_boutique_publique': {'id', 'nom', 'slug', 'nom_normalise'},
+}
+
+#: Jamais dans une vue : stock exact et seuil d'alerte, états internes
+#: (désactivation, suspension, SKU), données du propriétaire de la boutique.
+FRAGMENTS_SENSIBLES = (
+    'quantite', 'seuil', 'sku', 'desactive', 'suspendu', 'est_',
+    'proprietaire', 'email', 'telephone', 'adresse', 'ville', 'kyc', 'role', 'password', 'is_',
+)
+
+
+@skipUnless(connection.vendor == 'postgresql', "Vues SQL de la migration 0004 : PostgreSQL uniquement")
+class CatalogueVuesPubliquesTests(BaseRefonteCatalogue):
+    """Chaque test place un cas de visibilité, puis vérifie que la vue et
+    Django donnent les mêmes produits, avec les mêmes prix affichés. Échoue
+    dès qu'une règle change d'un seul côté (modèles ou migration)."""
+
+    def lire_vue(self, vue):
+        self.assertIn(vue, COLONNES_VUES_PUBLIQUES)
+        with connection.cursor() as curseur:
+            curseur.execute(f'SELECT * FROM {vue}')
+            colonnes = [colonne.name for colonne in curseur.description]
+            return {ligne[0]: dict(zip(colonnes, ligne)) for ligne in curseur.fetchall()}
+
+    def liste_publique_django(self):
+        vue = ProduitPublicListView()
+        vue.request = SimpleNamespace(query_params={})
+        return {produit.pk: produit for produit in vue.get_queryset()}
+
+    def verifier_parite(self):
+        """Renvoie les lignes de catalogue_produit_public après avoir vérifié
+        qu'elles correspondent exactement à la liste publique Django."""
+        vue = self.lire_vue('catalogue_produit_public')
+        django = self.liste_publique_django()
+        self.assertEqual(set(vue), set(Produit.objects.visibles_publiquement().values_list('pk', flat=True)))
+        self.assertEqual(set(vue), set(django))
+        for pk, produit in django.items():
+            with self.subTest(produit=produit.nom):
+                ligne, element, categorie = vue[pk], ProduitPublicListSerializer(produit).data, produit.categorie
+                image = ligne['image_principale']
+                self.assertEqual(ligne['prix_min'], min(v.prix_effectif for v in produit.variantes.all() if v.est_active))
+                self.assertEqual({
+                    'nom': ligne['nom'], 'slug': ligne['slug'], 'prix_base': ligne['prix_base'],
+                    'prix_min': ligne['prix_min'], 'en_stock': ligne['en_stock'],
+                    'image_principale': default_storage.url(image) if image else None,
+                    'categorie': ligne['categorie_id'], 'categorie_nom': ligne['categorie_nom'],
+                    'boutique': ligne['boutique_id'], 'boutique_nom': ligne['boutique_nom'],
+                    'boutique_slug': ligne['boutique_slug'], 'date_creation': ligne['date_creation'],
+                    'categorie_slug': ligne['categorie_slug'], 'categorie_parent_id': ligne['categorie_parent_id'],
+                    'categorie_parent_slug': ligne['categorie_parent_slug'],
+                }, {
+                    'nom': element['nom'], 'slug': element['slug'], 'prix_base': Decimal(element['prix_base']),
+                    'prix_min': element['prix_min'], 'en_stock': element['en_stock'],
+                    'image_principale': element['image_principale'],
+                    'categorie': element['categorie'], 'categorie_nom': element.get('categorie_nom'),
+                    'boutique': element['boutique'], 'boutique_nom': element['boutique_nom'],
+                    'boutique_slug': element['boutique_slug'], 'date_creation': produit.date_creation,
+                    # Colonnes du filtre `categorie` (slug du produit ou de son parent).
+                    'categorie_slug': categorie.slug if categorie else None,
+                    'categorie_parent_id': categorie.parent_id if categorie else None,
+                    'categorie_parent_slug': categorie.parent.slug if categorie and categorie.parent else None,
+                })
+        self.assertEqual(
+            set(self.lire_vue('catalogue_boutique_publique')), set(Boutique.objects.publiques().values_list('pk', flat=True)),
+        )
+        self.assertEqual(
+            set(self.lire_vue('catalogue_categorie_publique')), set(Categorie.objects.actives().values_list('pk', flat=True)),
+        )
+        return vue
+
+    def verifier_masque_par(self, produit, changement):
+        self.assertIn(produit.pk, self.verifier_parite())
+        changement()
+        self.assertNotIn(produit.pk, self.verifier_parite())
+
+    def nouveau_produit(self, boutique=None, nom="Produit de test", prix='10000', promo=None, quantite=5, **champs):
+        produit = Produit.objects.create(boutique=boutique or self.boutique1, nom=nom, **champs)
+        variante = VarianteProduit.objects.create(
+            produit=produit, nom="Unique", prix=Decimal(prix), prix_promo=Decimal(promo) if promo else None,
+        )
+        Stock.objects.filter(variante=variante).update(quantite_disponible=quantite)
+        return produit
+
+    def nouvelle_boutique(self, code):
+        vendeur = Utilisateur.objects.create_user(
+            email=f"{code}@vues.anitche.ci", password="MotDePasse123!", nom="Vue", prenom=code,
+            role=Role.VENDEUR, statut_kyc=StatutKYC.VALIDE,
+        )
+        return Boutique.objects.create(proprietaire=vendeur, nom=f"Boutique {code}")
+
+    def test_produits_de_reference(self):
+        vue = self.verifier_parite()
+        self.assertEqual(set(vue), {self.produit1.pk, self.produit2.pk})
+
+    def test_produit_desactive_par_le_vendeur_ou_par_ladministration(self):
+        for origine in Produit.OrigineDesactivation:
+            with self.subTest(origine=origine):
+                produit = self.nouveau_produit()
+                self.verifier_masque_par(produit, lambda: produit.desactiver(par=origine))
+
+    def test_boutique_fermee_suspendue_ou_vendeur_non_valide(self):
+        def boutique(**champs):
+            return lambda b: Boutique.objects.filter(pk=b.pk).update(**champs)
+
+        def vendeur(**champs):
+            return lambda b: Utilisateur.objects.filter(pk=b.proprietaire_id).update(**champs)
+
+        cas = [
+            ('suspendue', boutique(est_suspendue=True)),
+            ('fermee', boutique(est_active=False)),
+            ('kyc-en-attente', vendeur(statut_kyc=StatutKYC.EN_ATTENTE)),
+            ('kyc-refuse', vendeur(statut_kyc=StatutKYC.REFUSE)),
+            ('redevenu-client', vendeur(role=Role.CLIENT)),
+            ('vendeur-inactif', vendeur(is_active=False)),
+        ]
+        for code, changement in cas:
+            with self.subTest(cas=code):
+                nouvelle = self.nouvelle_boutique(code)
+                produit = self.nouveau_produit(nouvelle)
+                self.verifier_masque_par(produit, lambda: changement(nouvelle))
+                self.assertNotIn(nouvelle.pk, self.lire_vue('catalogue_boutique_publique'))
+
+    def test_variantes_inactives(self):
+        toutes_inactives = self.nouveau_produit()
+        self.verifier_masque_par(
+            toutes_inactives, lambda: VarianteProduit.objects.filter(produit=toutes_inactives).update(est_active=False),
+        )
+        sans_variante = Produit.objects.create(boutique=self.boutique1, nom="Sans variante")
+        self.assertNotIn(sans_variante.pk, self.verifier_parite())
+
+        # Une variante inactive, moins chère et seule en stock : ni son prix ni son stock ne comptent.
+        mixte = self.nouveau_produit(prix='20000', quantite=0)
+        retiree = VarianteProduit.objects.create(
+            produit=mixte, nom="Retirée", prix=Decimal('5000'), prix_promo=Decimal('1000'), est_active=False,
+        )
+        Stock.objects.filter(variante=retiree).update(quantite_disponible=50)
+        ligne = self.verifier_parite()[mixte.pk]
+        self.assertEqual((ligne['prix_min'], ligne['en_stock']), (Decimal('20000.00'), False))
+
+    def test_rupture_de_stock(self):
+        # Le stock n'est pas une condition de visibilité : seul `en_stock` change.
+        produit = self.nouveau_produit(quantite=3)
+        self.assertTrue(self.verifier_parite()[produit.pk]['en_stock'])
+        Stock.objects.filter(variante__produit=produit).update(quantite_disponible=0)
+        self.assertFalse(self.verifier_parite()[produit.pk]['en_stock'])
+        Stock.objects.filter(variante__produit=produit).delete()
+        self.assertFalse(self.verifier_parite()[produit.pk]['en_stock'])
+        autre = VarianteProduit.objects.create(produit=produit, nom="Autre", prix=Decimal('12000'))
+        Stock.objects.filter(variante=autre).update(quantite_disponible=1)
+        self.assertTrue(self.verifier_parite()[produit.pk]['en_stock'])
+
+    def test_promotion(self):
+        # Prix affiché = plus petit prix effectif des variantes actives, promo comprise.
+        produit = self.nouveau_produit(prix='10000', promo='7000')
+        VarianteProduit.objects.create(produit=produit, nom="Grande", prix=Decimal('8000'))
+        self.assertEqual(self.verifier_parite()[produit.pk]['prix_min'], Decimal('7000.00'))
+        VarianteProduit.objects.filter(produit=produit).update(prix_promo=None)
+        self.assertEqual(self.verifier_parite()[produit.pk]['prix_min'], Decimal('8000.00'))
+
+    def test_categorie_inactive_ou_absente(self):
+        # Règle Django actuelle (dette, MODULE_CATALOGUE.md § 9) : le produit reste
+        # visible ; seule la catégorie disparaît de catalogue_categorie_publique.
+        Categorie.objects.filter(pk__in=[self.cat_mode.pk, self.cat_chaussures.pk]).update(est_active=False)
+        sans_categorie = self.nouveau_produit()
+        vue = self.verifier_parite()
+        self.assertTrue({self.produit1.pk, sans_categorie.pk} <= set(vue))
+        self.assertEqual(
+            (vue[self.produit1.pk]['categorie_slug'], vue[self.produit1.pk]['categorie_parent_slug']),
+            (self.cat_chaussures.slug, self.cat_mode.slug),
+        )
+        self.assertNotIn(self.cat_chaussures.pk, self.lire_vue('catalogue_categorie_publique'))
+
+    def test_image_principale(self):
+        sans_principale = self.nouveau_produit()
+        ImageProduit.objects.create(produit=sans_principale, image=image_png('b.png'), ordre=2)
+        premiere = ImageProduit.objects.create(produit=sans_principale, image=image_png('a.png'), ordre=1)
+        ImageProduit.objects.create(produit=self.produit1, image=image_png('c.png'), ordre=1)
+        principale = ImageProduit.objects.create(
+            produit=self.produit1, image=image_png('d.png'), ordre=5, est_principale=True,
+        )
+        vue = self.verifier_parite()
+        self.assertEqual(vue[sans_principale.pk]['image_principale'], premiere.image.name)
+        self.assertEqual(vue[self.produit1.pk]['image_principale'], principale.image.name)
+        self.assertIsNone(vue[self.produit2.pk]['image_principale'])
+
+    def test_textes_normalises_sans_accents_ni_majuscules(self):
+        produit = self.nouveau_produit(nom="Écouteurs ÉLÉGANTS", description="Son clair à Abidjan")
+        ligne = self.verifier_parite()[produit.pk]
+        self.assertEqual(ligne['nom_normalise'], "ecouteurs elegants")
+        self.assertEqual(ligne['texte_normalise'], "ecouteurs elegants son clair a abidjan")
+        categories = self.lire_vue('catalogue_categorie_publique')
+        self.assertEqual(categories[self.cat_mode.pk]['nom_normalise'], "mode & vetements")
+
+    def test_aucune_colonne_sensible(self):
+        with connection.cursor() as curseur:
+            curseur.execute(
+                "SELECT table_name, column_name, data_type FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = ANY(%s)",
+                [list(COLONNES_VUES_PUBLIQUES)],
+            )
+            colonnes = curseur.fetchall()
+        for vue, autorisees in COLONNES_VUES_PUBLIQUES.items():
+            with self.subTest(vue=vue):
+                exposees = {colonne for nom_vue, colonne, _ in colonnes if nom_vue == vue}
+                self.assertEqual({c for c in exposees if any(f in c for f in FRAGMENTS_SENSIBLES)}, set())
+                self.assertEqual(exposees, autorisees)
+        # Disponibilité seulement : un booléen, jamais une quantité.
+        types = {(nom_vue, colonne): type_ for nom_vue, colonne, type_ in colonnes}
+        self.assertEqual(types[('catalogue_produit_public', 'en_stock')], 'boolean')

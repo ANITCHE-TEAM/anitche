@@ -49,7 +49,7 @@ Point d'entrée unique des transitions : `apps/vendeurs/services.py`. L'API et l
   - nom **identique** à un nom existant, à la **casse** et aux **espaces répétés ou en bordure** près → « Ce nom de boutique est déjà utilisé. » (ex. « Chez Awa » / « chez  awa » / «  CHEZ AWA  ») ;
   - sinon, même `nom_normalise` (différence d'**accents**, de **ponctuation** ou d'espacement entre les mots) → **trop proche**, message distinct invitant à choisir un nom plus éloigné (ex. « Chez Awa » / « Chéz Awa! » / « Chez-Awa » / « ChezAwa »).
   Une boutique peut changer la casse ou la ponctuation de son propre nom. La contrainte unique en base reste le filet en cas de course (→ 400, jamais 500).
-- `boutique.est_publiable` → `est_active` **et** non `est_suspendue` **et** compte actif **et** vendeur validé. **C'est le seul test à utiliser par les autres modules.** Seule exception assumée : `Produit.objects.publies()` (catalogue) en duplique la traduction SQL et doit suivre toute évolution de cette règle.
+- `boutique.est_publiable` → `est_active` **et** non `est_suspendue` **et** compte actif **et** vendeur validé. **C'est le seul test à utiliser par les autres modules.** Seules exceptions assumées : `Produit.objects.publies()` (catalogue) et les vues SQL `catalogue_produit_public` / `catalogue_boutique_publique` (migration catalogue 0004, lues par FastAPI) en dupliquent la traduction SQL et doivent suivre toute évolution de cette règle (test de parité : `MODULE_CATALOGUE.md` § 11).
 - `Boutique.objects.publiques()` : queryset des boutiques visibles côté client.
 - `DemandeVendeur` : modèle **proxy** de `Utilisateur` filtré sur `statut_kyc = en_attente`. Aucune table, aucune donnée dupliquée — juste une file de traitement.
 
