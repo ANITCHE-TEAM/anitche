@@ -12,11 +12,11 @@
 -- (\getenv, psql 15 ou plus), jamais écrit dans ce fichier ni passé en
 -- argument de commande.
 --
--- Moindre privilège : CONNECT sur la base et USAGE sur le schéma public,
--- AUCUN droit sur les tables à ce stade. Chaque module FastAPI ajoutera
--- ci-dessous, table par table, les GRANT SELECT dont il a besoin (jamais de
--- GRANT sur tout le schéma ni d'ALTER DEFAULT PRIVILEGES) : les tables
--- sensibles (KYC, paiements...) restent illisibles.
+-- Moindre privilège : CONNECT sur la base, USAGE sur le schéma public et
+-- SELECT sur les seules colonnes lues (en fin de fichier). Chaque module
+-- ajoute ses GRANT SELECT par colonne (jamais de GRANT sur tout le schéma ni
+-- d'ALTER DEFAULT PRIVILEGES) : les tables sensibles (KYC, paiements...)
+-- restent illisibles.
 --
 -- La lecture seule côté rôle (default_transaction_read_only) et côté
 -- connexion (app/core/resources.py) protège contre une erreur de code ; la
@@ -50,5 +50,22 @@ ALTER ROLE anitche_fastapi_ro SET statement_timeout = '3s';
 SELECT format('GRANT CONNECT ON DATABASE %I TO anitche_fastapi_ro', current_database()) \gexec
 GRANT USAGE ON SCHEMA public TO anitche_fastapi_ro;
 
--- Tables lues par FastAPI, ajoutées module par module :
--- (module 1, suivi GPS) GRANT SELECT ON TABLE ... TO anitche_fastapi_ro;
+-- Tables lues par FastAPI, ajoutées module par module. Les tables doivent
+-- exister : lancer ce script APRÈS `python manage.py migrate`.
+
+-- Module 1 (suivi GPS, docs/MODULE_SUIVI_GPS.md) : droits PAR COLONNE.
+-- REVOKE ALL retire aussi les droits par colonne : relancer le script
+-- redonne exactement cette liste. Jamais accordés : code_hash, code_chiffre,
+-- adresse_livraison, montants, email, telephone, password, nom, prenom,
+-- adresse texte du groupe... Une colonne ajoutée par une migration Django
+-- n'est pas lisible tant qu'elle n'est pas ajoutée ici.
+REVOKE ALL ON TABLE livraison_livraison FROM anitche_fastapi_ro;
+REVOKE ALL ON TABLE commandes_commande FROM anitche_fastapi_ro;
+REVOKE ALL ON TABLE commandes_groupecommande FROM anitche_fastapi_ro;
+REVOKE ALL ON TABLE utilisateurs_utilisateur FROM anitche_fastapi_ro;
+GRANT SELECT (id, commande_id, livreur_id, status) ON TABLE livraison_livraison TO anitche_fastapi_ro;
+GRANT SELECT (id, client_id, groupe_id) ON TABLE commandes_commande TO anitche_fastapi_ro;
+-- Point GPS facultatif donné par le client au checkout (distance et temps
+-- restants indicatifs).
+GRANT SELECT (id, livraison_latitude, livraison_longitude) ON TABLE commandes_groupecommande TO anitche_fastapi_ro;
+GRANT SELECT (id, role, is_active) ON TABLE utilisateurs_utilisateur TO anitche_fastapi_ro;

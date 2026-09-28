@@ -142,7 +142,8 @@ services:
     # --no-proxy-headers : l'IP du client est lue par app/core/network.py
     # (TRUSTED_PROXY_COUNT). --no-access-log : journal d'accès de l'app, sans
     # chaîne de requête. Plusieurs workers : aucun état en mémoire (Redis).
-    command: uvicorn --factory app.main:create_app --host 0.0.0.0 --port 8001 --workers 2 --no-proxy-headers --no-access-log
+    # --ws-* : messages WebSocket de 8 Kio au plus, ping toutes les 20 s.
+    command: uvicorn --factory app.main:create_app --host 0.0.0.0 --port 8001 --workers 2 --no-proxy-headers --no-access-log --ws-max-size 8192 --ws-ping-interval 20 --ws-ping-timeout 20
     environment:
       # ENVIRONMENT=prod : doc coupée, et refus de démarrer si un réglage
       # ci-dessous est absent ou dangereux (app/core/settings.py).

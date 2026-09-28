@@ -137,8 +137,10 @@ services:
       context: ../backend-fastapi
     # --reload : dev uniquement. --no-proxy-headers : l'IP du client est lue
     # par app/core/network.py. --no-access-log : journal d'accès de l'app,
-    # sans chaîne de requête (jetons WebSocket).
-    command: uvicorn --factory app.main:create_app --host 0.0.0.0 --port 8001 --reload --no-proxy-headers --no-access-log
+    # sans chaîne de requête (jetons WebSocket). --ws-* : messages WebSocket
+    # de 8 Kio au plus (l'app en refuse au-delà de 4 Kio), ping toutes les
+    # 20 s (tient la connexion derrière nginx et Cloudflare).
+    command: uvicorn --factory app.main:create_app --host 0.0.0.0 --port 8001 --reload --no-proxy-headers --no-access-log --ws-max-size 8192 --ws-ping-interval 20 --ws-ping-timeout 20
     environment:
       ENVIRONMENT: dev
       # Nom d'hôte accepté par Django en dev (ALLOWED_HOSTS de dev.py).
