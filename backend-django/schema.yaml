@@ -3546,8 +3546,10 @@ paths:
             par l''en-tête Retry-After.'
     post:
       operationId: paiements_admin_baremes_create
-      description: Barèmes de frais vendeur (plateforme ou offre de lancement d'une
-        boutique).
+      description: 'date_debut maintenant ou plus tard (une date passée de moins d''une
+        minute vaut maintenant, ramenée à l''heure du serveur) ; plus ancienne : 400,
+        errors.code = ["date_debut_passee"]. Absente : le barème commence à l''enregistrement,
+        et ne pourra ensuite qu''être clôturé.'
       tags:
       - Paiements
       requestBody:
@@ -3600,6 +3602,9 @@ paths:
   /api/paiements/admin/baremes/{id}/:
     get:
       operationId: paiements_admin_baremes_retrieve
+      description: |-
+        Un barème commencé a pu s'appliquer à des ventes : il ne se modifie
+        plus, sauf pour le clôturer (date_fin), et ne se supprime pas.
       parameters:
       - in: path
         name: id
@@ -3645,6 +3650,12 @@ paths:
             par l''en-tête Retry-After.'
     put:
       operationId: paiements_admin_baremes_update
+      description: 'Barème pas encore commencé (date_debut future) : tout se modifie,
+        date_debut maintenant ou plus tard (sinon 400, errors.code = ["date_debut_passee"]).
+        Barème commencé : seule date_fin, pour le clôturer maintenant ou plus tard
+        ; toute autre modification, une date_fin passée, une réouverture ou un barème
+        déjà clôturé : 400, errors.code = ["bareme_deja_applique"]. Une date passée
+        de moins d''une minute vaut maintenant (ramenée à l''heure du serveur).'
       parameters:
       - in: path
         name: id
@@ -3709,6 +3720,12 @@ paths:
             par l''en-tête Retry-After.'
     patch:
       operationId: paiements_admin_baremes_partial_update
+      description: 'Barème pas encore commencé (date_debut future) : tout se modifie,
+        date_debut maintenant ou plus tard (sinon 400, errors.code = ["date_debut_passee"]).
+        Barème commencé : seule date_fin, pour le clôturer maintenant ou plus tard
+        ; toute autre modification, une date_fin passée, une réouverture ou un barème
+        déjà clôturé : 400, errors.code = ["bareme_deja_applique"]. Une date passée
+        de moins d''une minute vaut maintenant (ramenée à l''heure du serveur).'
       parameters:
       - in: path
         name: id
@@ -3763,6 +3780,57 @@ paths:
               schema:
                 $ref: '#/components/schemas/Erreur'
           description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+    delete:
+      operationId: paiements_admin_baremes_destroy
+      description: 'Barème commencé : 409, errors.code = ["bareme_deja_applique"]
+        (le clôturer avec date_fin).'
+      summary: Supprimer un barème pas encore commencé
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Paiements
+      security:
+      - jwtAuth: []
+      responses:
+        '204':
+          description: No response body
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Conflit : l''état actuel de la ressource ne permet pas cette
+            action.'
         '429':
           content:
             application/json:
@@ -7576,6 +7644,10 @@ components:
         * `support` - Support ANITCHE
     BaremeFrais:
       type: object
+      description: |-
+        Barème pas encore commencé : tout se modifie, date_debut maintenant ou
+        plus tard. Barème commencé (date_debut passée) : seule sa clôture est
+        possible (PUT et PATCH).
       properties:
         id:
           type: string
@@ -7592,13 +7664,30 @@ components:
           type: string
           format: decimal
           pattern: ^\d{0,3}(?:\.\d{0,2})?$
-          description: Commission en % du prix de vente (avant remise).
-          example: '10.00'
+          description: Commission en % du prix effectif de l'article (promotion comprise,
+            avant coupon), TVA incluse.
+          example: '14.00'
         frais_fixe_article:
           type: integer
           maximum: 2147483647
           minimum: 0
-          description: FCFA par article vendu.
+          description: FCFA par article vendu, TVA incluse.
+        seuil_petit_article:
+          type:
+          - integer
+          - 'null'
+          maximum: 2147483647
+          minimum: 0
+          description: 'Prix effectif (FCFA) jusqu''auquel, inclus, un article paie
+            frais_fixe_petit_article. Vide : un seul frais fixe.'
+        frais_fixe_petit_article:
+          type:
+          - integer
+          - 'null'
+          maximum: 2147483647
+          minimum: 0
+          description: FCFA par article dont le prix effectif ne dépasse pas seuil_petit_article,
+            TVA incluse.
         date_debut:
           type: string
           format: date-time
@@ -7624,6 +7713,10 @@ components:
       - taux_commission
     BaremeFraisRequest:
       type: object
+      description: |-
+        Barème pas encore commencé : tout se modifie, date_debut maintenant ou
+        plus tard. Barème commencé (date_debut passée) : seule sa clôture est
+        possible (PUT et PATCH).
       properties:
         boutique:
           type:
@@ -7636,13 +7729,30 @@ components:
           type: string
           format: decimal
           pattern: ^\d{0,3}(?:\.\d{0,2})?$
-          description: Commission en % du prix de vente (avant remise).
-          example: '10.00'
+          description: Commission en % du prix effectif de l'article (promotion comprise,
+            avant coupon), TVA incluse.
+          example: '14.00'
         frais_fixe_article:
           type: integer
           maximum: 2147483647
           minimum: 0
-          description: FCFA par article vendu.
+          description: FCFA par article vendu, TVA incluse.
+        seuil_petit_article:
+          type:
+          - integer
+          - 'null'
+          maximum: 2147483647
+          minimum: 0
+          description: 'Prix effectif (FCFA) jusqu''auquel, inclus, un article paie
+            frais_fixe_petit_article. Vide : un seul frais fixe.'
+        frais_fixe_petit_article:
+          type:
+          - integer
+          - 'null'
+          maximum: 2147483647
+          minimum: 0
+          description: FCFA par article dont le prix effectif ne dépasse pas seuil_petit_article,
+            TVA incluse.
         date_debut:
           type: string
           format: date-time
@@ -9336,19 +9446,19 @@ components:
           type: string
           format: decimal
           pattern: ^\d{0,3}(?:\.\d{0,2})?$
-          example: '10.00'
+          example: '14.00'
         frais_fixe_unitaire:
           type: integer
         montant_commission:
           type: string
           format: decimal
           pattern: ^\d{0,10}(?:\.\d{0,2})?$
-          example: '1500.00'
+          example: '2100.00'
         montant_frais_fixes:
           type: string
           format: decimal
           pattern: ^\d{0,10}(?:\.\d{0,2})?$
-          example: '100.00'
+          example: '200.00'
         montant_net_vendeur:
           type: string
           format: decimal
@@ -11349,6 +11459,10 @@ components:
       - $ref: '#/components/schemas/PasseportRevoque'
     PatchedBaremeFraisRequest:
       type: object
+      description: |-
+        Barème pas encore commencé : tout se modifie, date_debut maintenant ou
+        plus tard. Barème commencé (date_debut passée) : seule sa clôture est
+        possible (PUT et PATCH).
       properties:
         boutique:
           type:
@@ -11361,13 +11475,30 @@ components:
           type: string
           format: decimal
           pattern: ^\d{0,3}(?:\.\d{0,2})?$
-          description: Commission en % du prix de vente (avant remise).
-          example: '10.00'
+          description: Commission en % du prix effectif de l'article (promotion comprise,
+            avant coupon), TVA incluse.
+          example: '14.00'
         frais_fixe_article:
           type: integer
           maximum: 2147483647
           minimum: 0
-          description: FCFA par article vendu.
+          description: FCFA par article vendu, TVA incluse.
+        seuil_petit_article:
+          type:
+          - integer
+          - 'null'
+          maximum: 2147483647
+          minimum: 0
+          description: 'Prix effectif (FCFA) jusqu''auquel, inclus, un article paie
+            frais_fixe_petit_article. Vide : un seul frais fixe.'
+        frais_fixe_petit_article:
+          type:
+          - integer
+          - 'null'
+          maximum: 2147483647
+          minimum: 0
+          description: FCFA par article dont le prix effectif ne dépasse pas seuil_petit_article,
+            TVA incluse.
         date_debut:
           type: string
           format: date-time
@@ -12426,13 +12557,13 @@ components:
           format: decimal
           pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
-          example: '1500.00'
+          example: '2100.00'
         montant_frais_fixes:
           type: string
           format: decimal
           pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
-          example: '100.00'
+          example: '200.00'
         montant_retours:
           type: string
           format: decimal
@@ -12450,7 +12581,7 @@ components:
           format: decimal
           pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
-          example: '13400.00'
+          example: '12700.00'
         montant_ajustements:
           type: string
           format: decimal
@@ -12571,13 +12702,13 @@ components:
           format: decimal
           pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
-          example: '1500.00'
+          example: '2100.00'
         montant_frais_fixes:
           type: string
           format: decimal
           pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
-          example: '100.00'
+          example: '200.00'
         montant_retours:
           type: string
           format: decimal
@@ -12595,7 +12726,7 @@ components:
           format: decimal
           pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
-          example: '13400.00'
+          example: '12700.00'
         montant_ajustements:
           type: string
           format: decimal

@@ -399,8 +399,9 @@ from apps.catalogue.models import Stock
 from apps.livraison.models import Livraison, TarifLivraison
 from apps.livraison.tests import recreer_tarifs_initiaux
 from apps.notifications.models import Notification
-from apps.paiements.models import BaremeFrais, Paiement
+from apps.paiements.models import Paiement
 from apps.paiements.services import valider_paiement
+from apps.paiements.tests import recreer_bareme_plateforme
 from .services import expirer_commandes_impayees
 
 URL_VALIDER = "/api/commandes/valider-panier/"
@@ -821,7 +822,7 @@ class ConcurrenceCommandesTests(DonneesCycleDeVie, TransactionTestCase):
     def setUp(self):
         # Un TransactionTestCase précédent vide la base, y compris le barème
         # de frais par défaut créé par migration.
-        BaremeFrais.objects.get_or_create(boutique=None, defaults={"taux_commission": 12, "frais_fixe_article": 200})
+        recreer_bareme_plateforme()
         # Idem pour les tarifs de livraison (défauts et communes du district).
         recreer_tarifs_initiaux()
         self.creer_donnees()

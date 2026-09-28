@@ -71,20 +71,45 @@ Réponse d'un paiement (client) : `id`, `reference`, `client`, `client_email`, `
 | GET | `admin/reversements/` | `?statut=disponible` pour les versements à faire |
 | POST | `admin/reversements/<uuid>/verser/` | Versement **manuel** : l'admin a envoyé l'argent, il saisit `reference_externe`. **409** si pas disponible |
 | POST | `admin/reversements/<uuid>/transferer/` | Versement par l'**API de transfert** du fournisseur ; `operateur` facultatif (déduit du numéro : 07 Orange, 05 MTN, 01 Moov ; Wave à préciser). **409** si refus |
-| GET, POST | `admin/baremes/` | Barèmes de frais (§ 5) |
-| GET, PATCH | `admin/baremes/<uuid>/` | Modifier (un changement ne touche jamais une vente passée) |
+| GET, POST | `admin/baremes/` | Barèmes de frais (§ 5), dont `seuil_petit_article` / `frais_fixe_petit_article` (facultatifs, ensemble, sinon **400**) |
+| GET, PUT, PATCH, DELETE | `admin/baremes/<uuid>/` | Selon que le barème a commencé ou non (règle ci-dessous) |
 
-Le Django admin est **en lecture seule** pour tous ces modèles.
+**Règle des barèmes (septembre 2026)** : un barème commencé a pu s'appliquer à des ventes, son historique ne se réécrit donc plus, et un barème ne commence jamais dans le passé (il deviendrait rétroactivement « en vigueur » sur une période déjà vendue). Changer de barème, c'est **clôturer l'actuel puis en créer un nouveau**.
+
+| Barème | `POST` (création) / `PUT` / `PATCH` | `DELETE` |
+|---|---|---|
+| Nouveau ou pas encore commencé (`date_debut` future) | tout se modifie, mais **`date_debut` maintenant ou plus tard**. Plus ancienne → **400**, `errors.code = ["date_debut_passee"]`, `errors.date_debut`. `date_debut` absente : à la création, le barème commence à l'instant de l'enregistrement (comportement conservé) ; en modification, elle ne change pas | **204** |
+| Commencé (`date_debut` ≤ maintenant) | **seule `date_fin`, pour le clôturer** : maintenant ou plus tard, et seulement s'il n'est pas déjà clôturé dans le passé. Toute autre modification (autre champ, `date_fin` passée ou vide, barème déjà clôturé) → **400**, `errors.code = ["bareme_deja_applique"]`, message dans `detail`, champs en cause dans `errors`. Renvoyer une valeur identique n'est pas une modification | **409**, `errors.code = ["bareme_deja_applique"]` |
+
+- **« Maintenant »** : pour `date_debut` comme pour `date_fin`, une date passée de moins d'une minute (latence, horloge du client en retard) est acceptée et **ramenée à l'heure du serveur**, jamais avant.
+- Même contrôle pour `POST`, `PUT` et `PATCH` (`BaremeFraisSerializer`) et pour `DELETE` (`BaremeFraisDetailView.perform_destroy`). `DELETE` n'existait pas avant (405) : il est ouvert pour les seuls barèmes programmés. 409 plutôt que 400 : la requête est correcte, c'est l'état du barème qui l'interdit (comme les autres 409 du module).
+- Un barème créé sans `date_debut` commence immédiatement et ne peut plus qu'être clôturé : pour pouvoir encore le corriger, le créer avec une `date_debut` future.
+- Création sans `date_debut` mais avec une `date_fin` passée : **400** sur `date_fin` (répondait 500, contrainte en base, avant septembre 2026).
+- Les migrations de données (0004, 0008) écrivent directement en base : elles ne passent pas par cette règle.
+
+Le Django admin est **en lecture seule** pour tous ces modèles (aucun ajout, aucune modification, aucune suppression, même pour un superutilisateur : testé pour les barèmes).
 
 ## 5. Frais vendeur
 
-- **Barème** (`BaremeFrais`) : `taux_commission` (%, 0 à 100), `frais_fixe_article` (FCFA), `boutique` (vide = plateforme ; renseignée = offre de lancement), `date_debut`, `date_fin`, `libelle`, `cree_par`. Barème de la plateforme créé par migration : **12 % + 200 FCFA par article**, modifiable par l'administration (API). Aucun taux n'est codé en dur.
-- **Barème appliqué** : celui de la boutique s'il est en vigueur, sinon celui de la plateforme ; le plus récent l'emporte en cas de chevauchement.
-- **Calcul, par ligne, au checkout**, figé dans `CommandeItem` (`taux_commission`, `frais_fixe_unitaire`, `montant_commission`, `montant_frais_fixes`, `montant_net_vendeur`) :
-  - commission = prix × quantité × taux, arrondie au franc (demi-franc au-dessus), sur le prix **avant remise** : **ANITCHE supporte les coupons** ;
-  - frais fixes = frais fixe × quantité ;
-  - net = brut − commission − frais fixes, **jamais négatif** (sur un article à moins de ~230 FCFA, les frais sont plafonnés au prix).
-- Exemple : 2 articles à 5 000 FCFA → brut 10 000, commission 1 200, frais fixes 400, **net 8 400**.
+- **Montants TVA INCLUSE** (décision d'équipe, septembre 2026) : la commission et les frais fixes sont ce que le vendeur paie, **aucune TVA ne s'y ajoute**. La décomposition HT / TVA n'est pas faite (point ouvert, § 15).
+- **Barème** (`BaremeFrais`) : `taux_commission` (%, 0 à 100), `frais_fixe_article` (FCFA), `seuil_petit_article` et `frais_fixe_petit_article` (FCFA, **facultatifs, ensemble** : contrainte en base et 400 à l'API), `boutique` (vide = plateforme ; renseignée = offre de lancement), `date_debut`, `date_fin`, `libelle`, `cree_par`. Seuil vide : un seul frais fixe (`frais_fixe_article`), comme tous les barèmes créés avant la migration 0007. Aucun taux n'est codé en dur : tout est modifiable par l'administration (API).
+- **Barème de la plateforme en vigueur** (migration 0008, 28/09/2026, libellé « Plateforme : 14 % + 100 FCFA/article jusqu'à 3 000 FCFA (200 FCFA au-delà), TVA incluse ») : **14 % du prix de l'article, plus 100 FCFA par article si ce prix est inférieur ou égal à 3 000 FCFA, sinon 200 FCFA**. Il remplace **12 % + 200 FCFA** (migration 0004), clôturé au même instant et jamais modifié : les commandes passées avant gardent 12 % + 200 FCFA.
+- **Barème appliqué** : celui de la boutique s'il est en vigueur (il reste prioritaire sur celui de la plateforme), sinon celui de la plateforme ; le plus récent l'emporte en cas de chevauchement.
+- **Calcul, par ligne, au checkout**, figé dans `CommandeItem` (`taux_commission`, `frais_fixe_unitaire` = frais fixe **réellement appliqué** à l'article, `montant_commission`, `montant_frais_fixes`, `montant_net_vendeur`), puis additionné dans le `Reversement` :
+  - le **prix** est le prix effectif de l'article (`prix_promo` s'il est valide, sinon `prix`) : une promotion qui fait passer l'article sous 3 000 FCFA lui donne le frais fixe réduit ;
+  - commission = prix × quantité × taux, **arrondie au franc sur le total de la ligne, demi-franc au franc supérieur** (`ROUND_HALF_UP`), sur le prix **avant remise** : **ANITCHE supporte les coupons** ;
+  - frais fixes = frais fixe de l'article × quantité ; le seuil porte sur le prix **d'un** article, jamais sur le total de la ligne (3 × 2 000 FCFA : 3 × 100) ;
+  - net = brut − commission − frais fixes, **jamais négatif** (sur un article à moins de ~117 FCFA, les frais sont plafonnés au prix).
+
+| Article (prix effectif) | Quantité | Commission 14 % | Frais fixes | Net vendeur |
+|---|---|---|---|---|
+| 2 999 FCFA | 1 | 420 (419,86) | 100 | 2 479 |
+| 3 000 FCFA | 1 | 420 | 100 | 2 480 |
+| 3 001 FCFA | 1 | 420 (420,14) | 200 | 2 381 |
+| 3 500 FCFA en promotion à 2 800 | 1 | 392 | 100 | 2 308 |
+| 2 000 FCFA | 3 | 840 | 300 | 4 860 |
+| 5 000 FCFA | 2 | 1 400 | 400 | 8 200 |
+
 - **Abonnement selon le volume de ventes** : non implémenté (0 au lancement), voir § 15.
 
 ## 6. Remboursements
@@ -194,8 +219,8 @@ Rien d'autre ne change : commandes, remboursements, reversements et frais ignore
 4. **Changer de moyen.** Nouveau `POST /api/paiements/<id>/annuler/` puis nouvelle initiation. Sans annulation, une seconde initiation renvoie **400** « Un paiement est déjà en cours… ».
 5. **Erreurs à prévoir.** **502** « service de paiement momentanément indisponible » (proposer de réessayer) ; **429** au-delà de 20 initiations/annulations par heure ; **400** montant hors limites (plus de 2 500 000 FCFA).
 6. **Plus de statut `a_rembourser`.** Afficher `remboursements[].statut` (`a_traiter`, `effectue`, `refuse`) sur la commande ou le paiement.
-7. **Espace vendeur.** Nouvel écran « Mes reversements » : `GET /api/paiements/vendeur/reversements/` (ce qui a été vendu, frais déduits, net, date de disponibilité) et le résumé `…/resume/`.
-8. **Back-office.** Écrans remboursements à traiter, reversements disponibles (versement manuel ou transfert), barèmes de frais (§ 4).
+7. **Espace vendeur.** Nouvel écran « Mes reversements » : `GET /api/paiements/vendeur/reversements/` (ce qui a été vendu, frais déduits, net, date de disponibilité) et le résumé `…/resume/`. **Commission 14 % (septembre 2026)** : afficher les frais de chaque ligne tels que l'API les renvoie (`lignes[].taux_commission`, `frais_fixe_unitaire` : 100 ou 200 FCFA selon le prix de l'article, `montant_commission`, `montant_frais_fixes`), avec la mention « TVA incluse » ; ne jamais les recalculer côté interface (une commande passée avant le changement affiche 12 % et 200 FCFA). Détail : [`GUIDE_FRONTEND.md`](./GUIDE_FRONTEND.md) § 13.
+8. **Back-office.** Écrans remboursements à traiter, reversements disponibles (versement manuel ou transfert), barèmes de frais (§ 4), avec les deux champs facultatifs `seuil_petit_article` et `frais_fixe_petit_article` (à remplir ensemble ou pas du tout). Barème commencé : formulaire en lecture seule, avec pour seule action « Clôturer » (`PATCH` de `date_fin`) ; pas de bouton « Supprimer » (409). Création et reprogrammation : sélecteur de `date_debut` sans date passée (« maintenant » ou plus tard). Sur un 400 ou un 409, se fier à `errors.code[0]` (`"bareme_deja_applique"` ou `"date_debut_passee"`), pas au texte.
 9. **KYC.** Retirer `compte_bancaire` du formulaire (ignoré s'il est envoyé).
 10. **Format d'erreur unifié (septembre 2026).** Le **502** (fournisseur indisponible), les **409** (annulation d'un paiement qui n'est plus en attente, remboursement ou reversement déjà traité) et le **404** du résumé des reversements portaient avant un simple `{"detail": …}` : ils suivent désormais le format commun `{success: false, status_code, detail, errors}`, `errors` toujours un objet clé → liste de messages (`{}` si aucun champ n'est en cause). **Exception** : les notifications des fournisseurs (`webhook/<fournisseur>/`, `webhook/<fournisseur>/transfert/`) ne sont pas appelées par le frontend et répondent au format attendu par le fournisseur : `{"message": …}` en 200, `{"erreur": …}` sinon (les 429 de leur limite de débit suivent le format commun).
 
@@ -216,7 +241,7 @@ Rien d'autre ne change : commandes, remboursements, reversements et frais ignore
 | D11 | Webhooks bloqués par la limite anonyme | Limite dédiée par IP | `test_D11_…` |
 | D14 | Initiation sans limite dédiée | Scope `paiements` | `test_D14_…` |
 
-Également : `Paiement.client` en PROTECT ; fausses URL de paiement supprimées (plus rien de factice en production) ; `is_staff` sans pouvoir (API et Django admin en lecture seule) ; montant toujours serveur ; IDOR (initier, consulter, annuler) testés.
+Également : `Paiement.client` en PROTECT ; fausses URL de paiement supprimées (plus rien de factice en production) ; `is_staff` sans pouvoir (API et Django admin en lecture seule) ; montant toujours serveur ; IDOR (initier, consulter, annuler) testés ; barème déjà appliqué ni modifié (sauf sa clôture) ni supprimé, et aucun barème créé ou reprogrammé dans le passé, quel que soit le chemin de l'API (§ 4).
 
 ## 12. Limites de débit et performance
 
@@ -232,10 +257,14 @@ Rien d'autre ne change : commandes, remboursements, reversements et frais ignore
 ## 13. Migrations
 
 - **paiements 0003** : `Paiement.commandes`, `fournisseur` (existants : `simule`), `hash_jeton_notification`, `client` en PROTECT, statuts réduits ; modèles `Remboursement`, `BaremeFrais`, `Reversement`, `AjustementVendeur` ; journal `recu`.
-- **paiements 0004** (données) : reprise de `metadata.commandes_couvertes` dans la relation ; `a_rembourser` → validé + `Remboursement` ; paiements `espece_livraison` encore actifs → annulés ; clés internes retirées de `metadata` ; barème 12 % + 200 FCFA créé.
+- **paiements 0004** (données) : reprise de `metadata.commandes_couvertes` dans la relation ; `a_rembourser` → validé + `Remboursement` ; paiements `espece_livraison` encore actifs → annulés ; clés internes retirées de `metadata` ; barème 12 % + 200 FCFA créé (clôturé par 0008).
 - **commandes 0006** : frais figés sur `CommandeItem` (ventes passées : aucun frais, net = prix de la ligne).
 - **utilisateurs 0009** : suppression de `compte_bancaire`.
 - **paiements 0006** (frais de livraison) : `Reversement.montant_livraison` (0 pour l'existant) ; `AjustementVendeur.nature` (`retour` pour l'existant) et `commande`, contrainte « un ajustement de chaque nature par commande » (hors `retour`).
+- **paiements 0007** : `BaremeFrais.seuil_petit_article` et `frais_fixe_petit_article` (vides pour l'existant : comportement inchangé), contrainte `bareme_frais_petit_article_complet_ou_absent` ; textes d'aide « TVA incluse ».
+- **paiements 0008** (données, 28/09/2026) : le barème de la plateforme en vigueur est clôturé (`date_fin` = maintenant, rien d'autre) et le barème **14 % + 100 / 200 FCFA (seuil 3 000 FCFA), TVA incluse** créé au même instant, avec un identifiant fixe (`3f0c1a52-7d4e-4b8a-9c14-0e5b2d6a8f71`) : rejouée, elle ne fait rien. Barèmes des boutiques non touchés. Retour arrière : le barème 14 % est supprimé (aucune ligne n'y fait référence, les frais sont copiés dans `CommandeItem`) et le barème clôturé retrouve une `date_fin` vide. Limite : si ce barème avait une `date_fin` future avant la migration, le retour arrière la vide (aucun cas en base de dev).
+
+Base de dev (28/09/2026, migrée, ramenée à 0006, puis migrée de nouveau) : 1 barème de plateforme 12 % + 200 FCFA clôturé, 1 barème 14 % en vigueur, aucun barème de boutique ; les 28 articles déjà vendus gardent 12 % + 200 FCFA (40 680 FCFA de commission, 10 200 de frais fixes), les 18 reversements sont inchangés.
 
 Base de dev (26/09/2026) : 6 paiements, tous `annule` après migration (5 `espece_livraison`, 1 `wave`), chacun relié à sa commande ; 1 seul `compte_bancaire` en base, vide (aucune perte).
 
@@ -249,14 +278,14 @@ DJANGO_SETTINGS_MODULE=config.settings.ci DB_NAME=anitche_test DB_USER=postgres 
   python manage.py test apps.paiements -v 2
 ```
 
-`apps/paiements/tests.py` — 62 tests : initiation (montant serveur, moyens acceptés, paiement à la livraison refusé, IDOR, boutique indisponible, fournisseur injoignable, annulation et relance, `is_staff`, N+1), notifications (signature manquante, invalide, expirée, rejeu, fournisseur, montant et devise, vérification non finalisée, 503 puis rejeu, limites), remboursements (paiement après expiration, double paiement, annulation partielle, traitement admin), concurrence (D02, D06), frais (barème par défaut, arrondi, plafond, figés, offre de lancement, coupon, 503 sans barème, non exposés, administration), reversements (cycle de vie, 7 jours, retour ouvert/rejeté, retour remboursé avant et après versement, ajustement imputé, versement manuel, transfert immédiat, en attente puis notifié, échoué, vue vendeur), adaptateur CinetPay (format d'initiation, carte, notification revérifiée, statut de la notification ignoré, identifiants et montant incohérents, jeton expiré, injoignable, limites, transfert), configuration de production (simulé, sandbox, clés, HTTPS).
+`apps/paiements/tests.py` — 99 tests (septembre 2026) : initiation (montant serveur, moyens acceptés, paiement à la livraison refusé, IDOR, boutique indisponible, fournisseur injoignable, annulation et relance, `is_staff`, N+1), notifications (signature manquante, invalide, expirée, rejeu, fournisseur, montant et devise, vérification non finalisée, 503 puis rejeu, limites), remboursements (paiement après expiration, double paiement, annulation partielle, traitement admin), concurrence (D02, D06), frais (barème par défaut 14 % TVA incluse et ancien barème clôturé, arrondi au demi-franc supérieur, plafond, barème sans seuil inchangé, seuil à 2 999 / 3 000 / 3 001 FCFA, promotion qui passe sous le seuil, quantité supérieure à 1 jusqu'au reversement, figés, offre de lancement, barème de boutique prioritaire, seuil et frais réduit ensemble en base et à l'API, coupon, 503 sans barème, non exposés, administration), migration 0008 dans les deux sens (commande d'avant gardant 12 % + 200 FCFA, barème de boutique intact, idempotence), barème déjà appliqué (`PATCH` d'un autre champ refusé avec `bareme_deja_applique` et sans effet, valeur identique acceptée, `PUT` soumis à la même règle, clôture maintenant ou plus tard, horloge du client en retard, clôture passée ou réouverture refusées, barème déjà clôturé figé, `DELETE` refusé en 409, barème programmé modifiable et supprimable, non-administrateur 403 et anonyme 401, Django admin en lecture seule), date de début (création dans le passé refusée avec `date_debut_passee`, « maintenant » ramené à l'heure du serveur, création future, sans date : commence à l'enregistrement, sans date avec `date_fin` passée : 400 et non 500, reprogrammation d'un barème programmé vers le passé refusée par `PATCH` et `PUT`, vers une autre date future ou « maintenant » acceptée), reversements (cycle de vie, 7 jours, retour ouvert/rejeté, retour remboursé avant et après versement, ajustement imputé, versement manuel, transfert immédiat, en attente puis notifié, échoué, vue vendeur), adaptateur CinetPay (format d'initiation, carte, notification revérifiée, statut de la notification ignoré, identifiants et montant incohérents, jeton expiré, injoignable, limites, transfert), configuration de production (simulé, sandbox, clés, HTTPS).
 
-Postman : `postman_paiements.json` (hors dépôt, reconstruite) — mise en place automatique (vendeur, produit, clients, OTP via Mailpit), parcours nominal (checkout → paiement → notification simulée signée → commande confirmée → reversement), scénarios de sécurité (IDOR, signature manquante/fausse/expirée, montant et devise falsifiés, rejeu, autre fournisseur, paiement à la livraison), annulation et relance, vue vendeur, administration (`admin_password` à renseigner). L'ancienne collection est archivée dans `postman_archives/`.
+Postman : `postman_paiements.json` (hors dépôt, reconstruite) — mise en place automatique (vendeur, produit, clients, OTP via Mailpit), parcours nominal (checkout → paiement → notification simulée signée → commande confirmée → reversement), scénarios de sécurité (IDOR, signature manquante/fausse/expirée, montant et devise falsifiés, rejeu, autre fournisseur, paiement à la livraison), annulation et relance, vue vendeur, administration (`admin_password` à renseigner ; dont [SEC] : modifier le taux du barème en vigueur → 400 `bareme_deja_applique`, taux inchangé ensuite). L'ancienne collection est archivée dans `postman_archives/`.
 
 ## 15. Dette connue
 
 - **Abonnement selon le volume de ventes** (modèle Jumia) : non implémenté, **0 FCFA au lancement**. Forme prévue : un barème d'abonnement mensuel par tranche de chiffre d'affaires, prélevé sur les reversements du mois (ajustement négatif). À concevoir quand le volume le justifie.
-- **TVA sur la commission** : Jumia affiche des commissions TTC (TVA 18 %). Le traitement fiscal des 12 % + 200 FCFA (HT ou TTC, facture au vendeur) est à trancher avec le comptable avant le lancement.
+- **TVA sur la commission** : **tranché, TVA incluse** (septembre 2026) : 14 % + 100 / 200 FCFA sont des montants toutes taxes comprises, rien ne s'y ajoute (comme Jumia, qui affiche des commissions TTC). **Point ouvert** : la décomposition HT / TVA (taux de **18 % à confirmer avec un comptable**) le jour où ANITCHE émettra des factures de commission aux vendeurs. Rien n'est calculé ni stocké pour l'instant ; ce jour-là, la TVA se déduira des montants figés (TVA = TTC × taux / (100 + taux)) et la règle d'arrondi sera à fixer avec le comptable.
 - **Compte CinetPay** : à ouvrir (RCCM) ; points à confirmer en sandbox au § 8.
 - **Remboursement et transfert automatiques** : manuels au lancement ; API de remboursement à brancher quand CinetPay la publie.
 - **Notification traitée de façon synchrone** : passer en tâche Celery si le temps de réponse de la vérification CinetPay le justifie (mesure en sandbox).
@@ -278,12 +307,15 @@ Frais relevés en septembre 2026 (sites des fournisseurs et articles qui les rep
 
 Sources : [CinetPay – tarification](https://support.cinetpay.com/d/52-tarifications-des-paiements-entrants-et-sortants), [CinetPay – transferts de masse](https://cinetpay.com/products/mass-payout), [SDK cinetpay-php](https://github.com/cinetpay/cinetpay-php-sdk), [SDK cinetpay-python](https://github.com/cinetpay/cinetpay-python), [GeniusPay – tarifs](https://pay.genius.ci/pricing), [Kolonell – passerelles en Côte d'Ivoire (PayDunya)](https://kolonell.com/fr/blog/passerelle-paiement-cote-divoire-wave-orange-mtn-2026), [Kolonell – Wave marchand en Côte d'Ivoire](https://kolonell.com/fr/blog/wave-cote-ivoire-integration-marchand-abidjan-2026), [Paystack – tarifs Côte d'Ivoire](https://paystack.com/ci/pricing).
 
-### Pourquoi 12 % + 200 FCFA par article
+### Barème : 14 % + 100 FCFA par article jusqu'à 3 000 FCFA, 200 FCFA au-delà, TVA incluse
+
+Décision d'équipe du 28 septembre 2026 ; elle remplace le barème de départ, 12 % + 200 FCFA par article, dont le traitement de la TVA n'avait pas été tranché.
 
 - **Même modèle que Jumia Côte d'Ivoire**, que les vendeurs connaissent : commission en % + frais fixe **par article**, prélevés à la livraison, plus un abonnement par tranche de chiffre d'affaires (5 000 FCFA entre 100 000 et 1 499 999 FCFA, 20 000 FCFA au-delà).
-- **Compétitif** : Jumia prend **15 %** dans son exemple de la catégorie mode (commissions TTC, variables selon la catégorie) plus son frais fixe et son abonnement ; ANITCHE démarre à **12 %**, un frais fixe bas (200 FCFA) et **sans abonnement**.
-- **Couvre les coûts** : l'encaissement CinetPay (jusqu'à 3,5 %) et le transfert au vendeur (1,5 à 2 %) restent sous la commission ; le frais fixe couvre la part fixe de traitement d'une commande. Sur un article à 5 000 FCFA : 800 FCFA de frais pour le vendeur (600 de commission + 200 de frais fixe), contre environ 175 FCFA d'encaissement (3,5 %) et 85 FCFA de transfert (2 % de 4 200) côté ANITCHE.
-- **Réglable sans déploiement** (barème administrable, offre de lancement par boutique) et **figé à la vente** : les vendeurs ne découvrent jamais un taux changé après coup.
+- **Compétitif** : Jumia prend **15 %** dans son exemple de la catégorie mode (commissions TTC, variables selon la catégorie) plus son frais fixe et son abonnement ; ANITCHE prend **14 % TVA incluse**, un frais fixe bas et **sans abonnement**.
+- **Frais fixe réduit pour les petits articles** : un frais fixe pèse d'autant plus que l'article est bon marché (200 FCFA font 10 % d'un article à 2 000 FCFA, 100 FCFA en font 5 %).
+- **Couvre les coûts** : l'encaissement CinetPay (jusqu'à 3,5 %) et le transfert au vendeur (1,5 à 2 %) restent sous la commission ; le frais fixe couvre la part fixe de traitement d'une commande. Sur un article à 5 000 FCFA : 900 FCFA de frais pour le vendeur (700 de commission + 200 de frais fixe), contre environ 175 FCFA d'encaissement (3,5 %) et 82 FCFA de transfert (2 % de 4 100) côté ANITCHE. Sur un article à 2 000 FCFA : 380 FCFA (280 + 100), contre environ 70 et 32 FCFA.
+- **Réglable sans déploiement** (barème administrable, offre de lancement par boutique) et **figé à la vente** : les vendeurs ne découvrent jamais un taux changé après coup ; les ventes passées avant le 28/09/2026 gardent 12 % + 200 FCFA.
 
 Sources : [Jumia VendorHub CI – frais fixes 2026](https://vendorhub.jumia.ci/fr/frais-fixes-2026/), [Jumia VendorHub CI – commissions](https://vendorhub.jumia.ci/commissions/).
 

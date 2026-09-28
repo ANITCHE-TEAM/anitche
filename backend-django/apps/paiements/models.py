@@ -222,10 +222,21 @@ class Remboursement(models.Model):
 class BaremeFrais(models.Model):
     """Frais vendeur (modèle Jumia) : commission en % + frais fixe par article.
 
+    Montants TVA INCLUSE (décision de septembre 2026) : commission et frais
+    fixes sont ce que le vendeur paie, aucune TVA ne s'y ajoute. La
+    décomposition HT / TVA reste à faire le jour des factures de commission
+    (docs/MODULE_PAIEMENTS.md § 15).
+
+    Frais fixe d'un article : frais_fixe_petit_article si son prix effectif
+    (promotion comprise) est inférieur ou égal à seuil_petit_article, sinon
+    frais_fixe_article. Seuil vide : frais_fixe_article pour tout article.
+
     Barème de la plateforme (boutique vide) ou propre à une boutique (offre
     de lancement), valable entre date_debut et date_fin. Appliqué et figé
     dans chaque CommandeItem à la validation du panier : le modifier ne
-    change jamais une vente passée.
+    change jamais une vente passée. Une fois commencé, il ne se modifie
+    plus : seule sa clôture reste possible (BaremeFraisSerializer), pour
+    que l'historique des barèmes reste celui des ventes.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -236,9 +247,18 @@ class BaremeFrais(models.Model):
     taux_commission = models.DecimalField(
         max_digits=5, decimal_places=2,
         validators=[MinValueValidator(0), MaxValueValidator(100)],
-        help_text="Commission en % du prix de vente (avant remise).",
+        help_text="Commission en % du prix effectif de l'article (promotion comprise, avant coupon), TVA incluse.",
     )
-    frais_fixe_article = models.PositiveIntegerField(help_text="FCFA par article vendu.")
+    frais_fixe_article = models.PositiveIntegerField(help_text="FCFA par article vendu, TVA incluse.")
+    seuil_petit_article = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text="Prix effectif (FCFA) jusqu'auquel, inclus, un article paie frais_fixe_petit_article. "
+                  "Vide : un seul frais fixe.",
+    )
+    frais_fixe_petit_article = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text="FCFA par article dont le prix effectif ne dépasse pas seuil_petit_article, TVA incluse.",
+    )
     date_debut = models.DateTimeField(default=timezone.now)
     date_fin = models.DateTimeField(null=True, blank=True)
     cree_par = models.ForeignKey(
@@ -259,11 +279,31 @@ class BaremeFrais(models.Model):
                 condition=Q(taux_commission__gte=0) & Q(taux_commission__lte=100),
                 name="bareme_frais_taux_entre_0_et_100",
             ),
+            # Un seuil sans frais réduit (ou l'inverse) n'a pas de sens.
+            models.CheckConstraint(
+                condition=Q(seuil_petit_article__isnull=True, frais_fixe_petit_article__isnull=True)
+                | Q(seuil_petit_article__isnull=False, frais_fixe_petit_article__isnull=False),
+                name="bareme_frais_petit_article_complet_ou_absent",
+            ),
         ]
+
+    def a_commence(self, moment=None):
+        """En vigueur ou passé : il a pu s'appliquer à des ventes."""
+        return self.date_debut <= (moment or timezone.now())
+
+    def frais_fixe_pour(self, prix_unitaire):
+        """Frais fixe (FCFA) d'un article vendu à ce prix effectif."""
+        if self.seuil_petit_article is not None and prix_unitaire <= self.seuil_petit_article:
+            return self.frais_fixe_petit_article
+        return self.frais_fixe_article
 
     def __str__(self):
         cible = self.boutique.nom if self.boutique_id else "plateforme"
-        return f"{self.taux_commission} % + {self.frais_fixe_article} FCFA/article ({cible})"
+        frais_fixe = f"{self.frais_fixe_article} FCFA/article"
+        if self.seuil_petit_article is not None:
+            frais_fixe = (f"{self.frais_fixe_petit_article} FCFA/article jusqu'à {self.seuil_petit_article} FCFA, "
+                          f"{self.frais_fixe_article} au-delà")
+        return f"{self.taux_commission} % + {frais_fixe} ({cible})"
 
 
 class Reversement(models.Model):

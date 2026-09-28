@@ -1,7 +1,29 @@
+from datetime import timedelta
+
+from django.utils import timezone
 from rest_framework import serializers
 
 from .models import BaremeFrais, Paiement, Remboursement, Reversement
 from .reversements import OPERATEURS
+
+#: Codes machine (errors.code) des refus sur les barèmes. Un barème commencé
+#: a pu s'appliquer à des ventes : il ne se modifie (sauf sa clôture) ni ne
+#: se supprime plus. Un barème ne commence jamais dans le passé : il
+#: deviendrait rétroactivement « en vigueur » sur une période déjà vendue.
+CODE_BAREME_DEJA_APPLIQUE = "bareme_deja_applique"
+CODE_DATE_DEBUT_PASSEE = "date_debut_passee"
+#: « Maintenant » envoyé par un client dont l'horloge retarde un peu (ou
+#: reçu avec retard), pour clôturer ou pour commencer : ramené à l'heure du
+#: serveur, jamais avant.
+TOLERANCE_MAINTENANT = timedelta(minutes=1)
+NON_MODIFIABLE = "Non modifiable : le barème a déjà commencé."
+MAINTENANT_OU_PLUS_TARD = "Maintenant ou plus tard."
+
+
+def refus(code, message, champs):
+    """Erreur au format commun : message dans detail, code machine dans
+    errors.code, message de chaque champ en cause."""
+    return {"detail": message, "code": code, **champs}
 
 
 class InitierPaiementSerializer(serializers.Serializer):
@@ -151,17 +173,79 @@ class TransfererReversementSerializer(serializers.Serializer):
 
 
 class BaremeFraisSerializer(serializers.ModelSerializer):
+    """Barème pas encore commencé : tout se modifie, date_debut maintenant ou
+    plus tard. Barème commencé (date_debut passée) : seule sa clôture est
+    possible (PUT et PATCH)."""
+
     class Meta:
         model = BaremeFrais
         fields = ["id", "boutique", "libelle", "taux_commission", "frais_fixe_article",
+                  "seuil_petit_article", "frais_fixe_petit_article",
                   "date_debut", "date_fin", "cree_par", "date_creation"]
         read_only_fields = ["id", "cree_par", "date_creation"]
 
+    def valider_cloture_seule(self, attrs, maintenant):
+        """Barème commencé : aucun autre champ ne change (une valeur
+        identique n'est pas une modification) ; date_fin ne change que pour
+        clôturer, maintenant ou plus tard, un barème pas déjà clôturé."""
+        bareme = self.instance
+        modifies = [champ for champ, valeur in attrs.items() if champ != "date_fin" and getattr(bareme, champ) != valeur]
+        if modifies:
+            raise serializers.ValidationError(refus(
+                CODE_BAREME_DEJA_APPLIQUE,
+                "Barème déjà appliqué : il ne se modifie plus. Clôturez-le (date_fin) et créez-en un nouveau.",
+                {champ: NON_MODIFIABLE for champ in modifies},
+            ))
+        if "date_fin" not in attrs or attrs["date_fin"] == bareme.date_fin:
+            return attrs
+        if bareme.date_fin is not None and bareme.date_fin <= maintenant:
+            raise serializers.ValidationError(refus(
+                CODE_BAREME_DEJA_APPLIQUE, "Barème déjà clôturé : sa date de fin ne change plus.",
+                {"date_fin": NON_MODIFIABLE},
+            ))
+        fin = attrs["date_fin"]
+        if fin is None or fin < maintenant - TOLERANCE_MAINTENANT:
+            raise serializers.ValidationError(refus(
+                CODE_BAREME_DEJA_APPLIQUE,
+                "Un barème déjà appliqué ne peut être que clôturé : date_fin maintenant ou plus tard.",
+                {"date_fin": MAINTENANT_OU_PLUS_TARD},
+            ))
+        return {**attrs, "date_fin": max(fin, maintenant)}
+
+    def valider_date_debut(self, attrs, maintenant):
+        """Création ou barème programmé : date_debut maintenant ou plus tard.
+        Absente : inchangée (à la création, l'instant de l'enregistrement)."""
+        debut = attrs.get("date_debut")
+        if debut is None:
+            return attrs
+        if debut < maintenant - TOLERANCE_MAINTENANT:
+            raise serializers.ValidationError(refus(
+                CODE_DATE_DEBUT_PASSEE,
+                "date_debut est dans le passé : un barème commence maintenant ou plus tard.",
+                {"date_debut": MAINTENANT_OU_PLUS_TARD},
+            ))
+        return {**attrs, "date_debut": max(debut, maintenant)}
+
     def validate(self, attrs):
-        debut = attrs.get("date_debut", getattr(self.instance, "date_debut", None))
+        maintenant = timezone.now()
+        if self.instance is not None and self.instance.a_commence(maintenant):
+            attrs = self.valider_cloture_seule(attrs, maintenant)
+        else:
+            attrs = self.valider_date_debut(attrs, maintenant)
+        # Création sans date_debut : le modèle prendra l'instant de
+        # l'enregistrement ; la comparaison avec date_fin se fait donc à
+        # maintenant (sinon la contrainte en base répondrait 500).
+        debut = attrs.get("date_debut", getattr(self.instance, "date_debut", maintenant))
         fin = attrs.get("date_fin", getattr(self.instance, "date_fin", None))
         if debut and fin and fin <= debut:
             raise serializers.ValidationError({"date_fin": "Doit être postérieure à date_debut."})
+        seuil = attrs.get("seuil_petit_article", getattr(self.instance, "seuil_petit_article", None))
+        reduit = attrs.get("frais_fixe_petit_article", getattr(self.instance, "frais_fixe_petit_article", None))
+        if (seuil is None) != (reduit is None):
+            champ = "frais_fixe_petit_article" if reduit is None else "seuil_petit_article"
+            raise serializers.ValidationError(
+                {champ: "seuil_petit_article et frais_fixe_petit_article vont ensemble (tous deux vides ou renseignés)."}
+            )
         return attrs
 
 

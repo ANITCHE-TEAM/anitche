@@ -121,15 +121,16 @@ EXEMPLES_DECIMAUX = {
     "montant_livraison": "1500.00",
     "montant_remise": "1500.00",
     "remise": "1500.00",
-    "montant_commission": "1500.00",
-    "montant_frais_fixes": "100.00",
+    # Article à 15 000 FCFA, barème de la plateforme : 14 % + 200 FCFA.
+    "montant_commission": "2100.00",
+    "montant_frais_fixes": "200.00",
     "montant_retours": "0.00",
     "montant_ajustements": "-2500.00",
-    "montant_net": "13400.00",
+    "montant_net": "12700.00",
     "montant_minimum_commande": "10000.00",
     # Hors montants FCFA.
     "poids_kg": "1.50",
-    "taux_commission": "10.00",
+    "taux_commission": "14.00",
     "valeur": "10.00",
 }
 
