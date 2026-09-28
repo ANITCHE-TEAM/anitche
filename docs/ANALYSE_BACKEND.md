@@ -27,7 +27,7 @@ graph TD
 ```
 
 1. **`backend-django`** : Cœur relationnel et transactionnel de la marketplace. Assure l'authentification (JWT SimpleJWT, Google OAuth), le contrôle d'accès strict par rôle, la gestion des boutiques, le catalogue et stocks, les paniers, la création et le fractionnement multi-vendeurs des commandes, la gestion des livraisons avec audit et le support client.
-2. **`backend-fastapi`** : Microservice asynchrone pour la haute performance et les interactions spécialisées (conseiller IA, recherche publique du catalogue — texte sans accents, fautes de frappe tolérées, facettes, autocomplétion —, scan de passeports QR, télémétrie de suivi temps réel).
+2. **`backend-fastapi`** : Microservice asynchrone pour la haute performance et les interactions spécialisées (conseiller IA, recherche publique du catalogue — texte sans accents, fautes de frappe tolérées, facettes, autocomplétion —, décodage des QR des passeports — la certification reste à Django —, télémétrie de suivi temps réel).
 3. **`infra`** : Environnement complet conteneurisé Docker Compose orchestrant Django, FastAPI, PostgreSQL 16, Redis 7, Celery Worker, Celery Beat et le frontend React/Vite.
 
 ---
@@ -323,13 +323,13 @@ graph TD
 * **2. Conseiller Shopping IA ([`routeurs/conseiller_ia.py`](file:///c:/Users/Jordan/Documents/Anitche/backend-fastapi/app/routeurs/conseiller_ia.py))** :
   - `POST /ia/conseil` : Analyse contextuelle (cérémonie, mariage, style, budget) et recommandations argumentées de pièces artisanales et de mode ivoirienne.
   - `POST /ia/recommandations` : Suggestions personnalisées par catégories favorites et budget.
-* **3. Scan & Validation QR ([`routeurs/scan_qr.py`](file:///c:/Users/Jordan/Documents/Anitche/backend-fastapi/app/routeurs/scan_qr.py))** :
-  - `POST /qr/scan` & `GET /qr/passeport/{code}` : Décodage instantané de codes ou URLs QR de passeports et certification d'authenticité.
+* **3. Scan QR ([`routeurs/scan_qr.py`](file:///c:/Users/Jordan/Documents/Anitche/backend-fastapi/app/routeurs/scan_qr.py))** :
+  - `POST /qr/scan` : Décodage d'un code saisi ou d'une URL de QR (seule l'origine de `FRONTEND_BASE_URL` est acceptée, URL piégées refusées avec code machine) → code normalisé et URL de la page de vérification. **Ni base ni appel à Django** : la certification, le comptage et le journal des scans restent à Django (`GET /api/passeports/verifier/<code>/`), appelé par cette page. Contrat : [`MODULE_SCAN_QR.md`](./MODULE_SCAN_QR.md).
 * **4. Suivi GPS & Télémétrie en Direct ([`routeurs/suivi_temps_reel.py`](file:///c:/Users/Jordan/Documents/Anitche/backend-fastapi/app/routeurs/suivi_temps_reel.py))** :
   - `POST /livraison/position` : Position du livreur assigné, pendant `en_cours` seulement (latitude, longitude, vitesse, cap).
   - `GET /livraison/position/{id}` : Dernière position (client de la commande, livreur assigné, administration). Distance restante et ETA **indicatifs**, calculés **seulement si le client a donné son point GPS au checkout** (sinon `null`, jamais de valeur inventée).
   - `WebSocket /livraison/ws/{id}` : Positions en direct, authentification par premier message. Contrat : [`MODULE_SUIVI_GPS.md`](./MODULE_SUIVI_GPS.md).
-* **Validation & Tests (`backend-fastapi/tests/`)** : 862 tests unitaires (ressources simulées) et 34 tests d'intégration (vrais PostgreSQL et Redis, schéma des migrations Django, job CI `integration`) au module 2 de la refonte (septembre 2026).
+* **Validation & Tests (`backend-fastapi/tests/`)** : 1 026 tests unitaires (ressources simulées) et 34 tests d'intégration (vrais PostgreSQL et Redis, schéma des migrations Django, job CI `integration`) au module 3 de la refonte (septembre 2026).
 
 ---
 

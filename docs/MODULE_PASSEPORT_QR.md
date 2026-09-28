@@ -2,6 +2,7 @@
 
 > Périmètre : backend Django, `backend-django/apps/passeport_qr/`.
 > Document vivant : à corriger dès qu'une règle est arbitrée en réunion.
+> Scan dans l'application (décodage d'un QR ou d'un code saisi, par FastAPI, avant l'appel de la vérification publique ci-dessous) : [`MODULE_SCAN_QR.md`](./MODULE_SCAN_QR.md).
 
 ## 1. Ce sur quoi le module s'appuie
 
@@ -13,7 +14,7 @@
 | `adresse_ip_client()` | `apps/core/reseau.py` | IP du client derrière les proxys de confiance (même source que les limites de débit DRF) |
 | `FRONTEND_BASE_URL` | `config/settings/base.py` | Base de l'URL encodée dans le QR |
 
-Aucun autre module n'importe `passeport_qr`. Aucun consommateur n'existe encore dans le dépôt (le frontend n'appelle pas ces routes ; le routeur FastAPI `scan_qr` est vide).
+Aucun autre module n'importe `passeport_qr`. Aucun consommateur n'existe encore dans le dépôt (le frontend n'appelle pas ces routes). Le routeur FastAPI `scan_qr` **décode** seulement (code normalisé et URL de vérification, sans lire la base ni appeler Django) : la certification, le comptage et le journal des scans restent ici ([`MODULE_SCAN_QR.md`](./MODULE_SCAN_QR.md)).
 
 ## 2. Modèle
 
@@ -134,7 +135,7 @@ Avant ce correctif, `X-Forwarded-For` était lu tel quel : IP falsifiable dans l
 
 ## 9. Décisions en attente
 
-- **Domaine et route de la page de vérification** : `FRONTEND_BASE_URL` (prod : `https://anitche.com` par défaut dans `docker-compose.prod.yml`, `http://localhost:5173` en dev) et `CHEMIN_VERIFICATION_PUBLIQUE = "/qr/verifier/{code}"` (`apps/passeport_qr/models.py`). Le dépôt mentionne à la fois `anitche.com` (Nginx, `.env.example`) et `anitche.ci` (ancienne URL, messages de `prod.py`). **À confirmer par l'équipe avant d'imprimer le moindre QR** : l'URL est figée dès l'impression.
+- **Domaine et route de la page de vérification** : `FRONTEND_BASE_URL` (prod : `https://anitche.com` par défaut dans `docker-compose.prod.yml`, `http://localhost:5173` en dev) et `CHEMIN_VERIFICATION_PUBLIQUE = "/qr/verifier/{code}"` (`apps/passeport_qr/models.py`). Le dépôt mentionne à la fois `anitche.com` (Nginx, `.env.example`) et `anitche.ci` (ancienne URL, messages de `prod.py`). **À confirmer par l'équipe avant d'imprimer le moindre QR** : l'URL est figée dès l'impression. La page frontend `/qr/verifier/:code` doit aussi exister avant (c'est elle qu'ouvre l'appareil photo d'un téléphone). Le décodeur FastAPI n'accepte que l'origine de `FRONTEND_BASE_URL` (même variable) : un changement de domaine après impression demandera une liste d'origines acceptées ([`MODULE_SCAN_QR.md`](./MODULE_SCAN_QR.md) § 13).
 
 ## 10. Dette connue
 
@@ -143,7 +144,7 @@ Avant ce correctif, `X-Forwarded-For` était lu tel quel : IP falsifiable dans l
 - Cloudflare n'est matérialisé dans le dépôt que par des commentaires (F-18) ; rien n'empêche d'atteindre l'origine sans passer par lui. Le réglage Nginx reste sûr dans les deux cas. Restreindre l'origine aux IP Cloudflare (pare-feu hôte) relève de l'infrastructure.
 - Le point d'entrée public reste soumis à l'authentification JWT par défaut : un jeton expiré envoyé par un client connecté donne 401 au lieu du certificat.
 - **À faire lors de la reprise du module `utilisateurs`** : la notification de connexion (`apps/utilisateurs/views.py`, envoi de `envoyer_notification_connexion`) lit encore `request.META['REMOTE_ADDR']` directement. Derrière Nginx, c'est l'IP du conteneur Nginx, pas celle de l'utilisateur. Elle doit passer par `adresse_ip_client()` (`apps/core/reseau.py`), seule source de l'IP client du projet.
-- Le routeur FastAPI `scan_qr` est vide, contrairement à ce qu'annonce `ANALYSE_BACKEND.md`.
+- Vérification publique : le 404 recopie la saisie (en majuscules, sans limite de longueur) dans `detail` et dans le journal (`anitche.exceptions`) ; à borner, par exemple en refusant d'emblée ce qui n'a pas le format d'un code. Relevé au module 3 de la refonte FastAPI ([`MODULE_SCAN_QR.md`](./MODULE_SCAN_QR.md) § 13), non modifié.
 
 ## 11. Tests
 

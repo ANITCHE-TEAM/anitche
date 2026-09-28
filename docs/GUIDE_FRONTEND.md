@@ -157,6 +157,7 @@ Chaque module documente les changements de contrat à intégrer côté interface
 | Livraison | [`MODULE_LIVRAISON.md` § 10](./MODULE_LIVRAISON.md#10-impact-frontend) |
 | Suivi GPS (FastAPI) | § 12 ci-dessous et [`MODULE_SUIVI_GPS.md`](./MODULE_SUIVI_GPS.md) |
 | Recherche (FastAPI) | § 12 ci-dessous et [`MODULE_RECHERCHE.md`](./MODULE_RECHERCHE.md) |
+| Scan QR (FastAPI) | § 12 ci-dessous et [`MODULE_SCAN_QR.md`](./MODULE_SCAN_QR.md) |
 | Retours | [`MODULE_RETOURS.md` § 8](./MODULE_RETOURS.md#8-impact-frontend) |
 | Fidélité | [`MODULE_FIDELITE.md` § 6](./MODULE_FIDELITE.md#6-impact-frontend) |
 | Notifications | [`MODULE_NOTIFICATIONS.md` § 5](./MODULE_NOTIFICATIONS.md#5-impact-frontend) |
@@ -223,7 +224,7 @@ const corps = {
 
 ## 12. Service FastAPI (`/fast/`)
 
-Second backend, pour le temps réel et les services rapides. Les modules 3 et 4 de la refonte FastAPI (QR, IA) ajouteront leurs routes ici. Aujourd'hui : **suivi GPS du livreur**, contrat complet dans [`MODULE_SUIVI_GPS.md`](./MODULE_SUIVI_GPS.md), et **recherche du catalogue** (ci-dessous et [`MODULE_RECHERCHE.md`](./MODULE_RECHERCHE.md)).
+Second backend, pour le temps réel et les services rapides. Le module 4 de la refonte FastAPI (IA) ajoutera ses routes ici. Aujourd'hui : **suivi GPS du livreur**, contrat complet dans [`MODULE_SUIVI_GPS.md`](./MODULE_SUIVI_GPS.md), **recherche du catalogue** (ci-dessous et [`MODULE_RECHERCHE.md`](./MODULE_RECHERCHE.md)) et **scan QR des passeports** (ci-dessous et [`MODULE_SCAN_QR.md`](./MODULE_SCAN_QR.md)).
 
 ### Base et authentification
 
@@ -363,3 +364,55 @@ async function listerProduits(params, signal) {
 ```
 
 En repli, Django cherche la phrase exacte avec accents (`karité` trouve, `karite` non) : afficher les résultats sans facettes.
+
+### Scan QR des passeports
+
+Contrat complet : [`MODULE_SCAN_QR.md`](./MODULE_SCAN_QR.md). **FastAPI décode, Django certifie.** Routes publiques (aucun jeton).
+
+Le QR imprimé sur l'étiquette contient `url_verification_publique` (donnée par l'espace vendeur Django) : `FRONTEND_BASE_URL/qr/verifier/{code}`. Deux parcours mènent à la **même page** :
+
+| Parcours | Étapes |
+|---|---|
+| Appareil photo du téléphone (hors application) | Le navigateur ouvre directement la page `/qr/verifier/:code` |
+| Scanner intégré (caméra) ou saisie du code imprimé sous le QR | `POST /fast/qr/scan` avec `{"qr_data": <contenu brut>}` → 200 : ouvrir `url_verification_publique` (la page `/qr/verifier/:code`) |
+
+La page `/qr/verifier/:code` appelle **Django** `GET /api/passeports/verifier/{code}/`, **sans en-tête `Authorization`** (route publique ; un jeton expiré donnerait 401). C'est cet appel qui certifie, compte et journalise le scan : **un seul appel par affichage**. Affichage selon `statut_passeport` (`valide`, `revoque`) et `disponible_a_la_vente` ([`MODULE_PASSEPORT_QR.md`](./MODULE_PASSEPORT_QR.md) § 4) ; 404 : « Ce code ne correspond à aucun passeport ANITCHE » ; 429 : attendre `Retry-After`.
+
+**La page `/qr/verifier/:code` doit exister avant toute impression de QR**, et le domaine (`anitche.com` ou `anitche.ci`) doit être fixé avant : l'URL est figée dès l'impression.
+
+Réponse 200 de `POST /fast/qr/scan` : `{"code_passeport": "PAS-2026-1A2B3C4D", "url_verification_publique": "https://anitche.com/qr/verifier/PAS-2026-1A2B3C4D"}`. Elle **n'atteste pas** que le passeport existe (c'est Django qui le dit). Espaces, tirets et minuscules sont tolérés dans un code saisi ; 512 caractères au plus.
+
+Refus (`errors.code[0]`) :
+
+| Code HTTP | Code | Réaction |
+|---|---|---|
+| 400 | `qr_non_anitche` | Avertir : « Ce QR ne renvoie pas vers ANITCHE : l'étiquette n'est peut-être pas authentique. » **Ne jamais ouvrir l'URL scannée** |
+| 400 | `lien_non_passeport` | « Ce lien ANITCHE n'est pas un passeport produit. » |
+| 400 | `code_passeport_invalide` | Message sous le champ de saisie (format `PAS-AAAA-XXXXXXXX`) |
+| 400 | clé `qr_data` (sans `code`) | Saisie vide ou trop longue |
+| 429 | — | Attendre `Retry-After` |
+| 503 | — | Proposer de scanner avec l'appareil photo du téléphone (le parcours ne dépend pas de FastAPI) |
+
+```js
+// Scanner intégré ou saisie : FastAPI décode, puis la page de vérification appelle Django.
+async function ouvrirPasseport(contenuBrut, naviguer) {
+  const reponse = await fetch(`${FASTAPI_URL}/qr/scan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ qr_data: contenuBrut }),
+  });
+  const corps = await reponse.json();
+  if (reponse.ok) {
+    // Même page que celle ouverte par l'appareil photo : un seul comptage, par Django.
+    return naviguer(new URL(corps.url_verification_publique).pathname);
+  }
+  // Jamais afficher contenuBrut comme du HTML, jamais ouvrir une URL refusée.
+  return { refus: corps.errors?.code?.[0] ?? (reponse.status === 400 ? 'saisie_invalide' : reponse.status) };
+}
+
+// Page /qr/verifier/:code : un seul appel par affichage, sans Authorization.
+async function verifierPasseport(code) {
+  const reponse = await fetch(`${DJANGO_API_URL}/passeports/verifier/${encodeURIComponent(code)}/`);
+  return { statut: reponse.status, corps: await reponse.json() };
+}
+```
