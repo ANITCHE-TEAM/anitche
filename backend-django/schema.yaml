@@ -7592,13 +7592,30 @@ components:
           type: string
           format: decimal
           pattern: ^\d{0,3}(?:\.\d{0,2})?$
-          description: Commission en % du prix de vente (avant remise).
-          example: '10.00'
+          description: Commission en % du prix effectif de l'article (promotion comprise,
+            avant coupon), TVA incluse.
+          example: '14.00'
         frais_fixe_article:
           type: integer
           maximum: 2147483647
           minimum: 0
-          description: FCFA par article vendu.
+          description: FCFA par article vendu, TVA incluse.
+        seuil_petit_article:
+          type:
+          - integer
+          - 'null'
+          maximum: 2147483647
+          minimum: 0
+          description: 'Prix effectif (FCFA) jusqu''auquel, inclus, un article paie
+            frais_fixe_petit_article. Vide : un seul frais fixe.'
+        frais_fixe_petit_article:
+          type:
+          - integer
+          - 'null'
+          maximum: 2147483647
+          minimum: 0
+          description: FCFA par article dont le prix effectif ne dépasse pas seuil_petit_article,
+            TVA incluse.
         date_debut:
           type: string
           format: date-time
@@ -7636,13 +7653,30 @@ components:
           type: string
           format: decimal
           pattern: ^\d{0,3}(?:\.\d{0,2})?$
-          description: Commission en % du prix de vente (avant remise).
-          example: '10.00'
+          description: Commission en % du prix effectif de l'article (promotion comprise,
+            avant coupon), TVA incluse.
+          example: '14.00'
         frais_fixe_article:
           type: integer
           maximum: 2147483647
           minimum: 0
-          description: FCFA par article vendu.
+          description: FCFA par article vendu, TVA incluse.
+        seuil_petit_article:
+          type:
+          - integer
+          - 'null'
+          maximum: 2147483647
+          minimum: 0
+          description: 'Prix effectif (FCFA) jusqu''auquel, inclus, un article paie
+            frais_fixe_petit_article. Vide : un seul frais fixe.'
+        frais_fixe_petit_article:
+          type:
+          - integer
+          - 'null'
+          maximum: 2147483647
+          minimum: 0
+          description: FCFA par article dont le prix effectif ne dépasse pas seuil_petit_article,
+            TVA incluse.
         date_debut:
           type: string
           format: date-time
@@ -9336,19 +9370,19 @@ components:
           type: string
           format: decimal
           pattern: ^\d{0,3}(?:\.\d{0,2})?$
-          example: '10.00'
+          example: '14.00'
         frais_fixe_unitaire:
           type: integer
         montant_commission:
           type: string
           format: decimal
           pattern: ^\d{0,10}(?:\.\d{0,2})?$
-          example: '1500.00'
+          example: '2100.00'
         montant_frais_fixes:
           type: string
           format: decimal
           pattern: ^\d{0,10}(?:\.\d{0,2})?$
-          example: '100.00'
+          example: '200.00'
         montant_net_vendeur:
           type: string
           format: decimal
@@ -11361,13 +11395,30 @@ components:
           type: string
           format: decimal
           pattern: ^\d{0,3}(?:\.\d{0,2})?$
-          description: Commission en % du prix de vente (avant remise).
-          example: '10.00'
+          description: Commission en % du prix effectif de l'article (promotion comprise,
+            avant coupon), TVA incluse.
+          example: '14.00'
         frais_fixe_article:
           type: integer
           maximum: 2147483647
           minimum: 0
-          description: FCFA par article vendu.
+          description: FCFA par article vendu, TVA incluse.
+        seuil_petit_article:
+          type:
+          - integer
+          - 'null'
+          maximum: 2147483647
+          minimum: 0
+          description: 'Prix effectif (FCFA) jusqu''auquel, inclus, un article paie
+            frais_fixe_petit_article. Vide : un seul frais fixe.'
+        frais_fixe_petit_article:
+          type:
+          - integer
+          - 'null'
+          maximum: 2147483647
+          minimum: 0
+          description: FCFA par article dont le prix effectif ne dépasse pas seuil_petit_article,
+            TVA incluse.
         date_debut:
           type: string
           format: date-time
@@ -12426,13 +12477,13 @@ components:
           format: decimal
           pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
-          example: '1500.00'
+          example: '2100.00'
         montant_frais_fixes:
           type: string
           format: decimal
           pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
-          example: '100.00'
+          example: '200.00'
         montant_retours:
           type: string
           format: decimal
@@ -12450,7 +12501,7 @@ components:
           format: decimal
           pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
-          example: '13400.00'
+          example: '12700.00'
         montant_ajustements:
           type: string
           format: decimal
@@ -12571,13 +12622,13 @@ components:
           format: decimal
           pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
-          example: '1500.00'
+          example: '2100.00'
         montant_frais_fixes:
           type: string
           format: decimal
           pattern: ^\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
-          example: '100.00'
+          example: '200.00'
         montant_retours:
           type: string
           format: decimal
@@ -12595,7 +12646,7 @@ components:
           format: decimal
           pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
           readOnly: true
-          example: '13400.00'
+          example: '12700.00'
         montant_ajustements:
           type: string
           format: decimal

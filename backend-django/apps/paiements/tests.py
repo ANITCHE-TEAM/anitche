@@ -1,3 +1,4 @@
+import importlib
 import json
 import os
 import subprocess
@@ -11,9 +12,11 @@ from pathlib import Path
 from unittest import mock
 
 from cryptography.fernet import Fernet
+from django.apps import apps as registre_apps
 from django.conf import settings
 from django.core.cache import cache
-from django.db import connection
+from django.db import IntegrityError, connection, transaction
+from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
@@ -46,6 +49,14 @@ ADRESSE = {"commune": "Cocody", "quartier": "Angré", "point_de_repere": "Pharma
 # Tarif de Cocody (district d'Abidjan, migrations livraison 0004 / 0005), payé par commande.
 FRAIS_ABIDJAN = Decimal("1500")
 EN_TETE = "HTTP_" + EN_TETE_SIGNATURE.upper().replace("-", "_")
+MIGRATION_BAREME_14 = importlib.import_module("apps.paiements.migrations.0008_bareme_plateforme_14_pourcent")
+
+
+def recreer_bareme_plateforme():
+    """Barème de la plateforme créé par migration (0008 : 14 % + 100 ou 200
+    FCFA par article), effacé par le vidage de base d'un TransactionTestCase.
+    Sans effet s'il existe encore."""
+    MIGRATION_BAREME_14.creer_bareme_14(registre_apps, None)
 
 
 def url_webhook(fournisseur="simule", transfert=False):
@@ -454,7 +465,7 @@ class ConcurrenceTests(Donnees, TransactionTestCase):
     def setUp(self):
         # Un TransactionTestCase précédent vide la base, y compris le barème
         # de frais par défaut créé par migration.
-        BaremeFrais.objects.get_or_create(boutique=None, defaults={"taux_commission": 12, "frais_fixe_article": 200})
+        recreer_bareme_plateforme()
         # Idem pour les tarifs de livraison (défauts et communes du district).
         recreer_tarifs_initiaux()
         self.creer_donnees()
@@ -497,33 +508,103 @@ class ConcurrenceTests(Donnees, TransactionTestCase):
 # FRAIS VENDEUR
 # =====================================================================
 
+def frais_figes(article):
+    """Frais figés d'un CommandeItem : taux, frais fixe unitaire appliqué,
+    commission, frais fixes, net vendeur."""
+    return (article.taux_commission, article.frais_fixe_unitaire, article.montant_commission,
+            article.montant_frais_fixes, article.montant_net_vendeur)
+
+
 class FraisTests(Donnees, APITestCase):
+    """Barème de la plateforme en base de test : celui de la migration 0008,
+    14 % + 100 FCFA par article jusqu'à 3 000 FCFA (200 FCFA au-delà)."""
+
     def setUp(self):
         self.creer_donnees()
 
-    def test_bareme_par_defaut_12_pourcent_et_200_fcfa(self):
+    def article_commande(self, prix, quantite=1, prix_promo=None):
+        """Article d'une commande passée par le vrai checkout (boutique 1)."""
+        variante = self.variante(self.boutique1, f"Article à {prix}", Decimal(prix))
+        if prix_promo is not None:
+            VarianteProduit.objects.filter(pk=variante.pk).update(prix_promo=Decimal(prix_promo))
+        (commande,) = self.commander((variante, quantite))
+        return commande.article.get()
+
+    def test_bareme_par_defaut_14_pourcent_et_100_ou_200_fcfa_tva_incluse(self):
         bareme = bareme_en_vigueur(self.boutique1)
-        self.assertEqual((bareme.taux_commission, bareme.frais_fixe_article, bareme.boutique), (Decimal("12"), 200, None))
+        self.assertEqual(
+            (bareme.boutique, bareme.taux_commission, bareme.seuil_petit_article, bareme.frais_fixe_petit_article,
+             bareme.frais_fixe_article, bareme.date_fin),
+            (None, Decimal("14"), 3000, 100, 200, None),
+        )
+        self.assertIn("TVA incluse", bareme.libelle)
+        # L'ancien barème (migration 0004) est clôturé à l'instant où le
+        # nouveau commence, sans aucune autre modification.
+        ancien = BaremeFrais.objects.get(boutique=None, taux_commission=Decimal("12"))
+        self.assertEqual((ancien.frais_fixe_article, ancien.seuil_petit_article, ancien.frais_fixe_petit_article),
+                         (200, None, None))
+        self.assertEqual(ancien.date_fin, bareme.date_debut)
+        self.assertEqual(bareme_en_vigueur(self.boutique1, bareme.date_debut - timedelta(microseconds=1)), ancien)
 
     def test_calcul_arrondi_et_plafond(self):
+        # Barème sans seuil (tous ceux d'avant la migration 0007) : un seul
+        # frais fixe, calcul inchangé.
         bareme = BaremeFrais(taux_commission=Decimal("12"), frais_fixe_article=200)
         frais = calculer_frais_ligne(Decimal("1005"), 2, bareme)
+        self.assertEqual(frais["frais_fixe_unitaire"], 200)
         self.assertEqual(frais["montant_commission"], Decimal("241"))  # 241,2
         self.assertEqual(frais["montant_frais_fixes"], Decimal("400"))
         self.assertEqual(frais["montant_net_vendeur"], Decimal("1369"))
         petit = calculer_frais_ligne(Decimal("150"), 1, bareme)
         self.assertEqual((petit["montant_commission"], petit["montant_frais_fixes"], petit["montant_net_vendeur"]),
                          (Decimal("18"), Decimal("132"), Decimal("0")))
+        # Barème avec seuil : demi-franc arrondi au franc supérieur, frais
+        # réduit plafonné au prix d'un article très bon marché.
+        nouveau = BaremeFrais(taux_commission=Decimal("14"), frais_fixe_article=200, seuil_petit_article=3000,
+                              frais_fixe_petit_article=100)
+        self.assertEqual(calculer_frais_ligne(Decimal("2125"), 1, nouveau)["montant_commission"], Decimal("298"))  # 297,5
+        tres_petit = calculer_frais_ligne(Decimal("100"), 1, nouveau)
+        self.assertEqual((tres_petit["frais_fixe_unitaire"], tres_petit["montant_commission"],
+                          tres_petit["montant_frais_fixes"], tres_petit["montant_net_vendeur"]),
+                         (100, Decimal("14"), Decimal("86"), Decimal("0")))
+
+    def test_cas_limites_du_seuil(self):
+        # 14 % arrondi au franc ; frais fixe de 100 FCFA jusqu'à 3 000 FCFA inclus.
+        cas = {
+            "2999": (100, "420", "2479"),  # commission 419,86
+            "3000": (100, "420", "2480"),
+            "3001": (200, "420", "2381"),  # commission 420,14
+        }
+        for prix, (frais_fixe, commission, net) in cas.items():
+            with self.subTest(prix=prix):
+                article = self.article_commande(prix)
+                self.assertEqual(article.prix_unitaire, Decimal(prix))
+                self.assertEqual(frais_figes(article),
+                                 (Decimal("14"), frais_fixe, Decimal(commission), Decimal(frais_fixe), Decimal(net)))
+
+    def test_promo_qui_fait_passer_sous_le_seuil(self):
+        # Prix 3 500, promotion 2 800 : commission et frais fixe portent sur le prix effectif.
+        article = self.article_commande("3500", prix_promo="2800")
+        self.assertEqual(article.prix_unitaire, Decimal("2800"))
+        self.assertEqual(frais_figes(article), (Decimal("14"), 100, Decimal("392"), Decimal("100"), Decimal("2308")))
+
+    def test_quantite_superieure_a_un(self):
+        # Le seuil porte sur le prix d'un article, pas sur la ligne (3 × 2 000 = 6 000).
+        article = self.article_commande("2000", quantite=3)
+        self.assertEqual(frais_figes(article), (Decimal("14"), 100, Decimal("840"), Decimal("300"), Decimal("4860")))
+        self.notifier_succes(self.payer(article.commande))
+        reversement = Reversement.objects.get(commande=article.commande)
+        self.assertEqual((reversement.montant_brut, reversement.montant_commission, reversement.montant_frais_fixes,
+                          reversement.montant_net),
+                         (Decimal("6000"), Decimal("840"), Decimal("300"), Decimal("4860")))
 
     def test_frais_figes_au_checkout_et_jamais_recalcules(self):
         (commande,) = self.commander((self.variante1, 2))
         article = commande.article.get()
-        self.assertEqual((article.taux_commission, article.frais_fixe_unitaire), (Decimal("12"), 200))
-        self.assertEqual((article.montant_commission, article.montant_frais_fixes, article.montant_net_vendeur),
-                         (Decimal("1200"), Decimal("400"), Decimal("8400")))
+        self.assertEqual(frais_figes(article), (Decimal("14"), 200, Decimal("1400"), Decimal("400"), Decimal("8200")))
         BaremeFrais.objects.update(taux_commission=Decimal("30"), frais_fixe_article=900)
         article.refresh_from_db()
-        self.assertEqual(article.montant_commission, Decimal("1200"))
+        self.assertEqual(frais_figes(article), (Decimal("14"), 200, Decimal("1400"), Decimal("400"), Decimal("8200")))
 
     def test_offre_de_lancement_d_une_boutique(self):
         maintenant = timezone.now()
@@ -531,8 +612,24 @@ class FraisTests(Donnees, APITestCase):
                                    date_debut=maintenant - timedelta(days=1), date_fin=maintenant + timedelta(days=30))
         commande_a, commande_b = self.commander((self.variante1, 1), (self.variante2, 1))
         self.assertEqual(commande_a.article.get().montant_commission, Decimal("250"))
-        self.assertEqual(commande_b.article.get().montant_commission, Decimal("1200"))
+        self.assertEqual(commande_b.article.get().montant_commission, Decimal("1400"))
         self.assertEqual(bareme_en_vigueur(self.boutique1, maintenant + timedelta(days=31)).boutique, None)
+
+    def test_bareme_propre_a_une_boutique_reste_prioritaire(self):
+        # Offre de la boutique 1 (8 %, frais fixe unique de 50 FCFA) : elle
+        # l'emporte sur le barème de la plateforme, seuil compris.
+        BaremeFrais.objects.create(boutique=self.boutique1, taux_commission=Decimal("8"), frais_fixe_article=50)
+        petit_a = self.variante(self.boutique1, "Petit article A", Decimal("2000"))
+        petit_b = self.variante(self.boutique2, "Petit article B", Decimal("2000"))
+        commandes = {commande.boutique_id: commande for commande in self.commander((petit_a, 1), (petit_b, 1))}
+        self.assertEqual(frais_figes(commandes[self.boutique1.pk].article.get()),
+                         (Decimal("8"), 50, Decimal("160"), Decimal("50"), Decimal("1790")))
+        self.assertEqual(frais_figes(commandes[self.boutique2.pk].article.get()),
+                         (Decimal("14"), 100, Decimal("280"), Decimal("100"), Decimal("1620")))
+
+    def test_seuil_et_frais_reduit_vont_ensemble_en_base(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            BaremeFrais.objects.create(taux_commission=Decimal("10"), frais_fixe_article=200, seuil_petit_article=3000)
 
     def test_coupon_supporte_par_anitche(self):
         CouponReduction.objects.create(code="DIX", type_reduction="pourcentage", valeur=Decimal("10"))
@@ -540,7 +637,7 @@ class FraisTests(Donnees, APITestCase):
         # La remise ne porte que sur les articles : les frais de livraison restent dus.
         self.assertEqual(commande.montant_total, Decimal("4500") + FRAIS_ABIDJAN)
         article = commande.article.get()
-        self.assertEqual((article.montant_commission, article.montant_net_vendeur), (Decimal("600"), Decimal("4200")))
+        self.assertEqual((article.montant_commission, article.montant_net_vendeur), (Decimal("700"), Decimal("4100")))
 
     def test_sans_bareme_le_checkout_est_refuse_proprement(self):
         BaremeFrais.objects.all().delete()
@@ -567,6 +664,121 @@ class FraisTests(Donnees, APITestCase):
                                      format="json").status_code, 400)
         self.assertEqual(admin.patch(f"{url}{r.data['id']}/", {"taux_commission": "9"}, format="json").status_code, 200)
         self.assertEqual(bareme_en_vigueur(self.boutique1).taux_commission, Decimal("9"))
+        self.assertEqual((r.data["seuil_petit_article"], r.data["frais_fixe_petit_article"]), (None, None))
+
+    def test_administration_du_seuil_petit_article(self):
+        url = "/api/paiements/admin/baremes/"
+        admin = self.api(self.admin)
+        r = admin.post(url, {"boutique": self.boutique2.pk, "libelle": "Petits articles", "taux_commission": "10",
+                             "frais_fixe_article": 150, "seuil_petit_article": 5000, "frais_fixe_petit_article": 50},
+                       format="json")
+        self.assertEqual((r.status_code, r.data["seuil_petit_article"], r.data["frais_fixe_petit_article"]),
+                         (201, 5000, 50))
+        self.assertEqual(bareme_en_vigueur(self.boutique2).frais_fixe_pour(Decimal("5000")), 50)
+        # L'un sans l'autre : 400 sur le champ manquant, jamais une erreur de contrainte (500).
+        seul = admin.post(url, {"taux_commission": "10", "frais_fixe_article": 150, "seuil_petit_article": 5000},
+                          format="json")
+        self.assertEqual((seul.status_code, list(seul.data["errors"])), (400, ["frais_fixe_petit_article"]))
+        detail = f"{url}{r.data['id']}/"
+        vide_un = admin.patch(detail, {"frais_fixe_petit_article": None}, format="json")
+        self.assertEqual((vide_un.status_code, list(vide_un.data["errors"])), (400, ["frais_fixe_petit_article"]))
+        vide_tout = admin.patch(detail, {"seuil_petit_article": None, "frais_fixe_petit_article": None}, format="json")
+        self.assertEqual((vide_tout.status_code, vide_tout.data["seuil_petit_article"]), (200, None))
+        self.assertEqual(bareme_en_vigueur(self.boutique2).frais_fixe_pour(Decimal("5000")), 150)
+
+
+class MigrationBaremeQuatorzePourcentTests(Donnees, TransactionTestCase):
+    """Migration 0008 : l'ancien barème de la plateforme est clôturé, jamais
+    modifié ; les ventes passées et les barèmes des boutiques ne bougent pas ;
+    retour arrière propre ; idempotente."""
+
+    AVANT = [("paiements", "0007_bareme_frais_petit_article")]
+    APRES = [("paiements", "0008_bareme_plateforme_14_pourcent")]
+
+    def setUp(self):
+        recreer_tarifs_initiaux()
+        self.creer_donnees()
+
+    def tearDown(self):
+        executeur = MigrationExecutor(connection)
+        executeur.migrate(executeur.loader.graph.leaf_nodes())
+
+    def migrer(self, cible):
+        executeur = MigrationExecutor(connection)
+        executeur.migrate(cible)
+
+    def test_migration_aller_retour(self):
+        # Avant 0008 : un seul barème de la plateforme, celui de la migration 0004.
+        self.migrer(self.AVANT)
+        BaremeFrais.objects.filter(boutique__isnull=True).delete()
+        ancien = BaremeFrais.objects.create(libelle="Barème par défaut de la plateforme", taux_commission=Decimal("12.00"),
+                                            frais_fixe_article=200, date_debut=timezone.now() - timedelta(days=30))
+        offre = BaremeFrais.objects.create(boutique=self.boutique2, libelle="Offre de lancement",
+                                           taux_commission=Decimal("5"), frais_fixe_article=0,
+                                           date_debut=timezone.now() - timedelta(days=1))
+        (commande_avant,) = self.commander((self.variante1, 1))
+        self.notifier_succes(self.payer(commande_avant))
+        article_avant = commande_avant.article.get()
+        reversement_avant = Reversement.objects.get(commande=commande_avant)
+        self.assertEqual(frais_figes(article_avant), (Decimal("12"), 200, Decimal("600"), Decimal("200"), Decimal("4200")))
+
+        def montants(reversement):
+            reversement.refresh_from_db()
+            return (reversement.montant_brut, reversement.montant_commission, reversement.montant_frais_fixes,
+                    reversement.montant_net)
+
+        self.assertEqual(montants(reversement_avant), (Decimal("5000"), Decimal("600"), Decimal("200"), Decimal("4200")))
+
+        self.migrer(self.APRES)
+        nouveau = BaremeFrais.objects.get(pk=MIGRATION_BAREME_14.ID_BAREME_14)
+        self.assertEqual(
+            (nouveau.boutique, nouveau.taux_commission, nouveau.seuil_petit_article, nouveau.frais_fixe_petit_article,
+             nouveau.frais_fixe_article, nouveau.date_fin),
+            (None, Decimal("14"), 3000, 100, 200, None),
+        )
+        self.assertIn("TVA incluse", nouveau.libelle)
+        # Ancien barème clôturé à l'instant où le nouveau commence, rien d'autre.
+        cloture = BaremeFrais.objects.get(pk=ancien.pk)
+        self.assertEqual(
+            (cloture.libelle, cloture.taux_commission, cloture.frais_fixe_article, cloture.seuil_petit_article,
+             cloture.frais_fixe_petit_article, cloture.date_debut, cloture.date_fin),
+            (ancien.libelle, Decimal("12"), 200, None, None, ancien.date_debut, nouveau.date_debut),
+        )
+        self.assertEqual(bareme_en_vigueur(self.boutique1, nouveau.date_debut - timedelta(microseconds=1)), cloture)
+        self.assertEqual(bareme_en_vigueur(self.boutique1), nouveau)
+        # Barème propre à une boutique : intact et toujours prioritaire.
+        self.assertEqual(BaremeFrais.objects.get(pk=offre.pk).date_fin, None)
+        self.assertEqual(bareme_en_vigueur(self.boutique2), offre)
+        # Commande passée avant le changement : 12 % + 200 FCFA, figés.
+        article_avant.refresh_from_db()
+        self.assertEqual(frais_figes(article_avant), (Decimal("12"), 200, Decimal("600"), Decimal("200"), Decimal("4200")))
+        self.assertEqual(montants(reversement_avant), (Decimal("5000"), Decimal("600"), Decimal("200"), Decimal("4200")))
+        # Commande suivante : nouveau barème.
+        (commande_apres,) = self.commander((self.variante1, 1))
+        article_apres = commande_apres.article.get()
+        self.assertEqual(frais_figes(article_apres), (Decimal("14"), 200, Decimal("700"), Decimal("200"), Decimal("4100")))
+
+        # Idempotente : rejouée, elle ne crée ni ne clôture rien de plus.
+        MIGRATION_BAREME_14.creer_bareme_14(registre_apps, None)
+        self.assertEqual(BaremeFrais.objects.filter(boutique__isnull=True).count(), 2)
+        self.assertEqual(BaremeFrais.objects.get(pk=ancien.pk).date_fin, nouveau.date_debut)
+
+        # Retour arrière : nouveau barème supprimé, ancien rouvert ; ventes et
+        # barème de la boutique intacts.
+        self.migrer(self.AVANT)
+        self.assertFalse(BaremeFrais.objects.filter(pk=nouveau.pk).exists())
+        self.assertIsNone(BaremeFrais.objects.get(pk=ancien.pk).date_fin)
+        self.assertEqual(bareme_en_vigueur(self.boutique1), ancien)
+        self.assertEqual(bareme_en_vigueur(self.boutique2), offre)
+        article_avant.refresh_from_db()
+        article_apres.refresh_from_db()
+        self.assertEqual(frais_figes(article_avant), (Decimal("12"), 200, Decimal("600"), Decimal("200"), Decimal("4200")))
+        self.assertEqual(frais_figes(article_apres), (Decimal("14"), 200, Decimal("700"), Decimal("200"), Decimal("4100")))
+
+        # De nouveau vers l'avant : un seul barème à 14 %, en vigueur.
+        self.migrer(self.APRES)
+        self.assertEqual(BaremeFrais.objects.filter(boutique__isnull=True, taux_commission=Decimal("14")).count(), 1)
+        self.assertEqual(bareme_en_vigueur(self.boutique1).pk, MIGRATION_BAREME_14.ID_BAREME_14)
 
 
 # =====================================================================
@@ -576,7 +788,7 @@ class FraisTests(Donnees, APITestCase):
 class ReversementTests(Donnees, APITestCase):
     def setUp(self):
         self.creer_donnees()
-        (self.commande,) = self.commander((self.variante1, 2))  # 10 000 : 1 200 + 400 → net 8 400
+        (self.commande,) = self.commander((self.variante1, 2))  # 10 000 : 1 400 + 400 → net 8 200
         self.notifier_succes(self.payer(self.commande))
         self.reversement = Reversement.objects.get(commande=self.commande)
 
@@ -604,7 +816,7 @@ class ReversementTests(Donnees, APITestCase):
     def test_montants_et_cycle_de_vie(self):
         self.assertEqual((self.reversement.montant_brut, self.reversement.montant_commission,
                           self.reversement.montant_frais_fixes, self.reversement.montant_net),
-                         (Decimal("10000"), Decimal("1200"), Decimal("400"), Decimal("8400")))
+                         (Decimal("10000"), Decimal("1400"), Decimal("400"), Decimal("8200")))
         self.livrer()
         self.assertEqual(self.reversement.statut, Reversement.Statut.EN_RETRACTATION)
         attendu = self.reversement.date_livraison + timedelta(days=7)
@@ -642,21 +854,21 @@ class ReversementTests(Donnees, APITestCase):
         self.assertEqual((remboursement.motif, remboursement.statut, remboursement.montant),
                          ("retour", "a_traiter", Decimal("5000")))
         self.reversement.refresh_from_db()
-        # 5 000 − 600 de commission rendue ; le frais fixe (200) reste à ANITCHE.
-        self.assertEqual(self.reversement.montant_retours, Decimal("4400"))
-        self.assertEqual(self.reversement.montant_net, Decimal("4000"))
+        # 5 000 − 700 de commission rendue ; le frais fixe (200) reste à ANITCHE.
+        self.assertEqual(self.reversement.montant_retours, Decimal("4300"))
+        self.assertEqual(self.reversement.montant_net, Decimal("3900"))
         self.assertEqual(self.reversement.statut, Reversement.Statut.EN_RETRACTATION)
 
     def test_retour_apres_versement_ajustement_sur_le_suivant(self):
         self.livrer(il_y_a_jours=8)
         admin = self.api(self.admin)
         r = admin.post(f"/api/paiements/admin/reversements/{self.reversement.pk}/verser/", {"reference_externe": "OM-1"})
-        self.assertEqual((r.status_code, r.data["statut"], Decimal(r.data["montant_a_verser"])), (200, "verse", Decimal("8400")))
+        self.assertEqual((r.status_code, r.data["statut"], Decimal(r.data["montant_a_verser"])), (200, "verse", Decimal("8200")))
         demande = self.retour(statut=DemandeRetour.Statut.RECEPTIONNE)
         self.api(self.vendeur1).patch(f"/api/retours/{demande.pk}/traiter/", {"action": "rembourser"}, format="json")
-        self.assertEqual(AjustementVendeur.objects.get().montant, Decimal("-4400"))
+        self.assertEqual(AjustementVendeur.objects.get().montant, Decimal("-4300"))
         self.assertEqual(self.api(self.vendeur1).get("/api/paiements/vendeur/reversements/resume/").data[
-            "ajustements_en_attente"], -4400)
+            "ajustements_en_attente"], -4300)
 
         (suivante,) = self.commander((self.variante1, 2))
         self.notifier_succes(self.payer(suivante))
@@ -664,7 +876,7 @@ class ReversementTests(Donnees, APITestCase):
         suivant = Reversement.objects.get(commande=suivante)
         r = admin.post(f"/api/paiements/admin/reversements/{suivant.pk}/verser/", {"reference_externe": "OM-2"})
         self.assertEqual((Decimal(r.data["montant_ajustements"]), Decimal(r.data["montant_a_verser"])),
-                         (Decimal("-4400"), Decimal("4000")))
+                         (Decimal("-4300"), Decimal("3900")))
         self.assertEqual(AjustementVendeur.objects.get().reversement_impute, suivant)
 
     def test_versement_manuel_reserve_admin_et_disponible(self):
@@ -704,7 +916,7 @@ class ReversementTests(Donnees, APITestCase):
                                       {"operateur": "wave"})
         self.reversement.refresh_from_db()
         self.assertEqual((self.reversement.statut, self.reversement.operateur), ("en_cours", "wave"))
-        r = self.notifier(self.reversement.reference, montant=8400, transfert=True)
+        r = self.notifier(self.reversement.reference, montant=8200, transfert=True)
         self.assertEqual(r.status_code, 200)
         self.reversement.refresh_from_db()
         self.assertEqual(self.reversement.statut, Reversement.Statut.VERSE)
@@ -717,12 +929,13 @@ class ReversementTests(Donnees, APITestCase):
         donnees = api.get("/api/paiements/vendeur/reversements/").data
         self.assertEqual(donnees["count"], 1)  # jamais ceux d'une autre boutique
         ligne = donnees["results"][0]["lignes"][0]
-        self.assertEqual((ligne["montant_commission"], ligne["montant_frais_fixes"]), ("1200.00", "400.00"))
+        self.assertEqual((ligne["taux_commission"], ligne["frais_fixe_unitaire"]), ("14.00", 200))
+        self.assertEqual((ligne["montant_commission"], ligne["montant_frais_fixes"]), ("1400.00", "400.00"))
         resume = api.get("/api/paiements/vendeur/reversements/resume/").data
-        self.assertEqual((resume["en_retractation"], resume["disponible"], resume["verse"]), (8400, 0, 0))
+        self.assertEqual((resume["en_retractation"], resume["disponible"], resume["verse"]), (8200, 0, 0))
         self.assertEqual(resume["delai_retractation_jours"], 7)
         self.assertEqual(self.api(self.vendeur2).get("/api/paiements/vendeur/reversements/resume/").data[
-            "en_attente_livraison"], 8600)
+            "en_attente_livraison"], 8400)
         self.assertEqual(self.api(self.client1).get("/api/paiements/vendeur/reversements/").status_code, 403)
         (encore,) = self.commander((self.variante1, 1))
         self.notifier_succes(self.payer(encore))
@@ -917,8 +1130,9 @@ class ConfigurationProductionTests(APITestCase):
 # =====================================================================
 
 class FraisDeLivraisonFinancesTests(Donnees, APITestCase):
-    """Produit A : 5 000 FCFA, barème 12 % + 200 par article ; tarif
-    Abidjan : 1 500. Deux articles : brut 10 000, net vendeur 8 400."""
+    """Produit A : 5 000 FCFA, barème de la plateforme 14 % + 200 par article
+    (prix au-dessus de 3 000 FCFA) ; tarif Abidjan : 1 500. Deux articles :
+    brut 10 000, net vendeur 8 200."""
 
     def setUp(self):
         self.creer_donnees()
@@ -958,29 +1172,29 @@ class FraisDeLivraisonFinancesTests(Donnees, APITestCase):
     def test_frais_payes_par_le_client_jamais_reverses_au_vendeur(self):
         commande, reversement = self.commande_payee()
         self.assertEqual(Paiement.objects.get().montant, Decimal("10000") + FRAIS_ABIDJAN)
-        self.assertEqual((reversement.montant_livraison, reversement.montant_net), (Decimal("0"), Decimal("8400")))
+        self.assertEqual((reversement.montant_livraison, reversement.montant_net), (Decimal("0"), Decimal("8200")))
 
     def test_livraison_offerte_deduite_du_reversement(self):
         self.offrir_la_livraison()
         commande, reversement = self.commande_payee()
         self.assertEqual(Paiement.objects.get().montant, Decimal("10000"))
-        self.assertEqual((reversement.montant_livraison, reversement.montant_net), (FRAIS_ABIDJAN, Decimal("6900")))
+        self.assertEqual((reversement.montant_livraison, reversement.montant_net), (FRAIS_ABIDJAN, Decimal("6700")))
         self.livrer(commande)
         self.assertFalse(AjustementVendeur.objects.exists())  # couverte par la vente
         ligne = self.api(self.vendeur1).get("/api/paiements/vendeur/reversements/").data["results"][0]
-        self.assertEqual((ligne["montant_livraison"], ligne["montant_net"]), ("1500.00", "6900.00"))
+        self.assertEqual((ligne["montant_livraison"], ligne["montant_net"]), ("1500.00", "6700.00"))
 
     def test_livraison_offerte_superieure_au_net_reste_du_apres_livraison(self):
         self.offrir_la_livraison(tarif=9000)
         commande, reversement = self.commande_payee()
-        # Plafonnée au net (8 400) : jamais de reversement négatif.
-        self.assertEqual((reversement.montant_livraison, reversement.montant_net), (Decimal("8400"), Decimal("0")))
+        # Plafonnée au net (8 200) : jamais de reversement négatif.
+        self.assertEqual((reversement.montant_livraison, reversement.montant_net), (Decimal("8200"), Decimal("0")))
         self.assertFalse(AjustementVendeur.objects.exists())  # rien de dû avant la livraison
         self.livrer(commande)
         reversements.ouvrir_retractation(commande)  # rejoué : idempotent
         ajustement = AjustementVendeur.objects.get()
         self.assertEqual((ajustement.nature, ajustement.montant, ajustement.commande, ajustement.boutique),
-                         (AjustementVendeur.Nature.LIVRAISON_OFFERTE, Decimal("-600"), commande, self.boutique1))
+                         (AjustementVendeur.Nature.LIVRAISON_OFFERTE, Decimal("-800"), commande, self.boutique1))
 
     def test_livraison_offerte_annulee_avant_livraison_rien_n_est_du(self):
         self.offrir_la_livraison(tarif=9000)
@@ -1013,8 +1227,8 @@ class FraisDeLivraisonFinancesTests(Donnees, APITestCase):
         self.rembourser(premiere)
         self.assertEqual(Remboursement.objects.get(retour=premiere).montant, Decimal("6500"))
         reversement.refresh_from_db()
-        # Part du vendeur réduite des seuls articles (5 000 − 600 de commission rendue).
-        self.assertEqual(reversement.montant_retours, Decimal("4400"))
+        # Part du vendeur réduite des seuls articles (5 000 − 700 de commission rendue).
+        self.assertEqual(reversement.montant_retours, Decimal("4300"))
         ajustement = AjustementVendeur.objects.get(nature=AjustementVendeur.Nature.FRAIS_LIVRAISON_RETOUR)
         self.assertEqual((ajustement.montant, ajustement.commande, ajustement.boutique),
                          (-FRAIS_ABIDJAN, commande, self.boutique1))

@@ -154,6 +154,7 @@ class BaremeFraisSerializer(serializers.ModelSerializer):
     class Meta:
         model = BaremeFrais
         fields = ["id", "boutique", "libelle", "taux_commission", "frais_fixe_article",
+                  "seuil_petit_article", "frais_fixe_petit_article",
                   "date_debut", "date_fin", "cree_par", "date_creation"]
         read_only_fields = ["id", "cree_par", "date_creation"]
 
@@ -162,6 +163,13 @@ class BaremeFraisSerializer(serializers.ModelSerializer):
         fin = attrs.get("date_fin", getattr(self.instance, "date_fin", None))
         if debut and fin and fin <= debut:
             raise serializers.ValidationError({"date_fin": "Doit être postérieure à date_debut."})
+        seuil = attrs.get("seuil_petit_article", getattr(self.instance, "seuil_petit_article", None))
+        reduit = attrs.get("frais_fixe_petit_article", getattr(self.instance, "frais_fixe_petit_article", None))
+        if (seuil is None) != (reduit is None):
+            champ = "frais_fixe_petit_article" if reduit is None else "seuil_petit_article"
+            raise serializers.ValidationError(
+                {champ: "seuil_petit_article et frais_fixe_petit_article vont ensemble (tous deux vides ou renseignés)."}
+            )
         return attrs
 
 
