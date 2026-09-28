@@ -22,8 +22,8 @@ GPS_PAYLOAD = {"livraison_id": LIVRAISON_ID, "latitude": 5.33, "longitude": -4.0
 ROUTES = [
     ("get", "/recherche/produits", {}, "search"),
     ("get", "/recherche/suggestions?recherche=wax", {}, "suggestions"),
-    ("post", "/qr/scan", {"json": {"qr_data": "PAS-2026-TIASSALE01"}}, "qr_scan"),
-    ("get", "/qr/passeport/PAS-2026-MASQUE03", {}, "qr_scan"),
+    # Module 3 : code au format de Django ; GET /qr/passeport/{code} supprimée.
+    ("post", "/qr/scan", {"json": {"qr_data": "PAS-2026-1A2B3C4D"}}, "qr_scan"),
     ("post", "/ia/conseil", {"json": {"messages": [{"role": "user", "contenu": "Bonjour"}]}}, "ai_advice"),
     ("post", "/ia/recommandations", {"json": {}}, "ai_advice"),
     ("post", "/livraison/position", {"json": GPS_PAYLOAD, "headers": AUTH_HEADERS}, "gps_publish"),

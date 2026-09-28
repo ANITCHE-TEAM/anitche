@@ -61,7 +61,9 @@ class Settings(BaseSettings):
 
     # Même variable et même format (CSV) que Django.
     cors_allowed_origins: Annotated[list[str], NoDecode] = ["http://localhost:5173"]
-    # Même variable que Django : base des liens vers le frontend (QR).
+    # Même variable et même valeur que Django : base de l'URL imprimée dans
+    # les QR des passeports. Scan QR (docs/MODULE_SCAN_QR.md) : seule
+    # origine acceptée au décodage, base de url_verification_publique.
     frontend_base_url: str = "http://localhost:5173"
     # Recherche (docs/MODULE_RECHERCHE.md). Adresse publique de ce service,
     # préfixe nginx compris (« https://anitche.com/fast » en prod) : liens
@@ -168,10 +170,21 @@ class Settings(BaseSettings):
                 raise ValueError(f"{name} invalide (schéma attendu : {', '.join(sorted(allowed))})")
         # Adresses publiques recopiées dans les réponses : ni paramètres ni
         # fragment, qui se retrouveraient au milieu des liens construits.
-        for name, url in (("PUBLIC_BASE_URL", self.public_base_url), ("MEDIA_BASE_URL", self.media_base_url)):
+        public_urls = (
+            ("FRONTEND_BASE_URL", self.frontend_base_url),
+            ("PUBLIC_BASE_URL", self.public_base_url),
+            ("MEDIA_BASE_URL", self.media_base_url),
+        )
+        for name, url in public_urls:
             parts = urlsplit(url)
-            if parts.query or parts.fragment or parts.username or parts.password:
+            if parts.query or parts.fragment or "@" in parts.netloc:
                 raise ValueError(f"{name} invalide (ni paramètres, ni fragment, ni identifiants)")
+        # Origine lue à chaque décodage QR : un port invalide y lèverait une
+        # erreur (500) au lieu d'un refus au démarrage.
+        try:
+            urlsplit(self.frontend_base_url).port
+        except ValueError:
+            raise ValueError("FRONTEND_BASE_URL invalide (port)") from None
         return self
 
     @model_validator(mode="after")

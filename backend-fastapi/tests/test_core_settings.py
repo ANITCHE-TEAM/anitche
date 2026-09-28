@@ -133,6 +133,16 @@ def test_invalid_rate_limits_are_refused(rates):
         {"public_base_url": "https://anitche.com/fast#ancre"},
         {"media_base_url": "javascript:alert(1)"},
         {"media_base_url": "https://user:secret@anitche.com/media/"},
+        {"media_base_url": "https://@anitche.com/media/"},
+        # Module 3 : origine acceptée au décodage QR et base des liens de
+        # vérification.
+        {"frontend_base_url": "anitche.com"},
+        {"frontend_base_url": "javascript:alert(1)"},
+        {"frontend_base_url": "https://anitche.com?x=1"},
+        {"frontend_base_url": "https://anitche.com/#ancre"},
+        {"frontend_base_url": "https://evil.example@anitche.com"},
+        {"frontend_base_url": "https://anitche.com:abc"},
+        {"frontend_base_url": "https://anitche.com:99999"},
     ],
 )
 def test_malformed_urls_are_refused_in_every_environment(overrides):

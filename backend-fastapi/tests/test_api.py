@@ -115,45 +115,54 @@ def test_ia_recommandations_personnalisees(client):
 
 
 # ==========================================
-# 3. Tests Scan & Certification QR
+# 3. Tests Scan QR (décodage)
 # ==========================================
 
+# Module 3 : changement de contrat assumé (rapport module 3, option A).
+# Les 3 passeports inventés et le compteur en mémoire sont supprimés.
+# FastAPI décode seulement : code normalisé et URL de la page de
+# vérification (FRONTEND_BASE_URL, http://localhost:5173 en test), sans
+# certificat ; Django certifie, compte et journalise. Contenu refusé : 400
+# avec code machine, plus de 200 `valide: false`. Détail :
+# tests/test_scan_qr.py.
+
 def test_scan_qr_code_direct_valide(client):
-    payload = {"qr_data": "PAS-2026-TIASSALE01"}
+    payload = {"qr_data": "PAS-2026-1A2B3C4D"}
     response = client.post("/qr/scan", json=payload)
     assert response.status_code == 200
-    data = response.json()
-    assert data["valide"] is True
-    assert data["code_passeport"] == "PAS-2026-TIASSALE01"
-    assert data["produit_nom"] == "Robe Baoulé Traditionnelle"
-    assert data["statut_certification"] == "certifie_authentique"
-    assert data["nb_scans"] >= 13
+    assert response.json() == {
+        "code_passeport": "PAS-2026-1A2B3C4D",
+        "url_verification_publique": "http://localhost:5173/qr/verifier/PAS-2026-1A2B3C4D",
+    }
 
 
 def test_scan_qr_url_complete(client):
-    payload = {"qr_data": "https://anitche.ci/qr/verifier/PAS-2026-BASSAM02"}
+    # L'ancien domaine anitche.ci n'est plus accepté : seule l'origine de
+    # FRONTEND_BASE_URL l'est (ici celle de dev).
+    payload = {"qr_data": "http://localhost:5173/qr/verifier/PAS-2026-0A1B2C3D"}
     response = client.post("/qr/scan", json=payload)
     assert response.status_code == 200
-    data = response.json()
-    assert data["valide"] is True
-    assert data["code_passeport"] == "PAS-2026-BASSAM02"
-    assert data["boutique_nom"] == "Maroquinerie Bassam"
+    assert response.json()["code_passeport"] == "PAS-2026-0A1B2C3D"
+
+    other_domain = client.post("/qr/scan", json={"qr_data": "https://anitche.ci/qr/verifier/PAS-2026-0A1B2C3D"})
+    assert other_domain.status_code == 400
+    assert other_domain.json()["errors"] == {"code": ["qr_non_anitche"]}
 
 
 def test_scan_qr_code_invalide(client):
     payload = {"qr_data": "QR-INVALIDE-RANDOM"}
     response = client.post("/qr/scan", json=payload)
-    assert response.status_code == 200
+    assert response.status_code == 400
     data = response.json()
-    assert data["valide"] is False
+    assert data["errors"] == {"code": ["code_passeport_invalide"]}
+    assert "QR-INVALIDE-RANDOM" not in response.text
 
 
 def test_consulter_passeport_get(client):
-    response = client.get("/qr/passeport/PAS-2026-MASQUE03")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["valide"] is True
-    assert data["produit_nom"] == "Masque Baoulé en Bois d'Iroko"
+    # Route supprimée (décision 5) : la consultation d'un passeport par son
+    # code est celle de Django, GET /api/passeports/verifier/{code}/.
+    response = client.get("/qr/passeport/PAS-2026-1A2B3C4D")
+    assert response.status_code == 404
 
 
 # ==========================================

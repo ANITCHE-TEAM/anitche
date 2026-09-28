@@ -81,7 +81,7 @@ def create_app(settings: Settings | None = None, *, resources: Resources | None 
         version=settings.app_version,
         description=(
             "Microservice haute performance ANITCHE : recherche, conseiller shopping IA, "
-            "vérification des passeports QR et suivi GPS temps réel (WebSockets)."
+            "décodage des QR des passeports (certifiés par Django) et suivi GPS temps réel (WebSockets)."
         ),
         debug=settings.debug,
         docs_url="/docs" if settings.docs_enabled else None,
