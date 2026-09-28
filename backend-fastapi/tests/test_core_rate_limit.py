@@ -21,7 +21,7 @@ GPS_PAYLOAD = {"livraison_id": LIVRAISON_ID, "latitude": 5.33, "longitude": -4.0
 # Chaque route existante et son scope (rapport module 0, §2 d).
 ROUTES = [
     ("get", "/recherche/produits", {}, "search"),
-    ("get", "/recherche/suggestions?q=wax", {}, "suggestions"),
+    ("get", "/recherche/suggestions?recherche=wax", {}, "suggestions"),
     ("post", "/qr/scan", {"json": {"qr_data": "PAS-2026-TIASSALE01"}}, "qr_scan"),
     ("get", "/qr/passeport/PAS-2026-MASQUE03", {}, "qr_scan"),
     ("post", "/ia/conseil", {"json": {"messages": [{"role": "user", "contenu": "Bonjour"}]}}, "ai_advice"),

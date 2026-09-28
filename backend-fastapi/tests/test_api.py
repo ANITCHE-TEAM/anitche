@@ -1,4 +1,5 @@
 from app.core.auth import CurrentUser, get_current_user
+from tests.fakes import product_row
 
 # Module 0 (socle) : plus d'application globale. Chaque test reçoit la
 # fixture `client` (tests/conftest.py) : application neuve créée par
@@ -32,42 +33,51 @@ def test_root(client):
 # 1. Tests Moteur de Recherche
 # ==========================================
 
-def test_recherche_produits_catalogue_complet(client):
+# Module 2 : la maquette CATALOGUE_INDEX est supprimée. La recherche lit
+# les vues publiques du catalogue (PostgreSQL) ; ici, le pool simulé renvoie
+# les lignes de la vue (tests/fakes.py). Nouveau contrat : paramètres et
+# réponse de la liste Django (count/next/previous/results) plus les
+# facettes. Comportement réel (accents, fautes, visibilité) :
+# tests/integration/test_recherche_vues.py ; détail : tests/test_recherche.py.
+
+def test_recherche_produits_catalogue_complet(client, db):
+    db.search_rows = [product_row(), product_row(id=42, nom="Savon noir", slug="savon-noir-fbf0ea")]
     response = client.get("/recherche/produits")
     assert response.status_code == 200
     data = response.json()
-    assert data["total"] >= 5
-    assert len(data["resultats"]) > 0
-    assert "facettes" in data
-    assert len(data["facettes"]["categories"]) > 0
+    assert data["count"] == 2
+    assert [p["id"] for p in data["results"]] == [41, 42]
+    assert data["next"] is None and data["previous"] is None
+    assert set(data["facettes"]) == {"categories", "boutiques", "prix"}
 
 
-def test_recherche_produits_filtre_mot_cle(client):
-    response = client.get("/recherche/produits?q=baoule")
+def test_recherche_produits_filtre_mot_cle(client, db):
+    db.search_rows = [product_row(id=1, nom="Robe Baoulé Traditionnelle")]
+    response = client.get("/recherche/produits?recherche=baoule")
     assert response.status_code == 200
-    data = response.json()
-    assert data["total"] >= 2
-    for p in data["resultats"]:
-        texte = f"{p['nom']} {p['description']} {p['categorie_nom']}".lower()
-        assert "baoulé" in texte or "baoule" in texte
+    assert [p["nom"] for p in response.json()["results"]] == ["Robe Baoulé Traditionnelle"]
+    # Texte transmis en paramètre, normalisé par PostgreSQL (accents).
+    (sql, params), = db.search_calls("page")
+    assert params[0] == "baoule" and "baoule" not in sql
+    assert "catalogue_normaliser($1::text)" in sql
 
 
-def test_recherche_produits_filtre_prix_et_tri(client):
+def test_recherche_produits_filtre_prix_et_tri(client, db):
     response = client.get("/recherche/produits?prix_max=20000&tri=prix_asc")
     assert response.status_code == 200
-    data = response.json()
-    prix_list = [p["prix"] for p in data["resultats"]]
-    assert all(p <= 20000.0 for p in prix_list)
-    assert prix_list == sorted(prix_list)
+    (sql, params), = db.search_calls("page")
+    assert "p.prix_min <= $1" in sql
+    assert "ORDER BY p.prix_min ASC, p.date_creation DESC, p.id DESC" in sql
+    assert params == (20000, 0)
 
 
-def test_recherche_suggestions_autocompletion(client):
-    response = client.get("/recherche/suggestions?q=wax")
+def test_recherche_suggestions_autocompletion(client, db):
+    db.suggestion_rows = [{"type": "produit", "texte": "Chemise en wax", "id": 32, "slug": "chemise-en-wax-a9808e"}]
+    response = client.get("/recherche/suggestions?recherche=wax")
     assert response.status_code == 200
     data = response.json()
     assert data["requete"] == "wax"
-    assert len(data["suggestions"]) > 0
-    assert any("wax" in s["texte"].lower() for s in data["suggestions"])
+    assert data["suggestions"] == [{"type": "produit", "texte": "Chemise en wax", "id": 32, "slug": "chemise-en-wax-a9808e"}]
 
 
 # ==========================================

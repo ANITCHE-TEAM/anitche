@@ -23,6 +23,8 @@ PROD = {
     "redis_url": "redis://redis:6379/2",
     "trusted_proxy_count": 1,
     "root_path": "/fast",
+    "public_base_url": "https://anitche.com/fast",
+    "media_base_url": "https://anitche.com/media/",
 }
 
 
@@ -63,6 +65,13 @@ def test_valid_production_settings_are_accepted():
         {"redis_url": "redis://localhost:6379/2"},
         {"trusted_proxy_count": 0},
         {"trusted_proxy_count": 2},
+        # Module 2 : liens next/previous et URL des images.
+        {"public_base_url": "http://anitche.com/fast"},
+        {"public_base_url": "https://localhost:8001"},
+        {"public_base_url": "http://localhost:8001"},
+        {"media_base_url": "http://anitche.com/media/"},
+        {"media_base_url": "https://127.0.0.1/media/"},
+        {"media_base_url": "http://localhost:8000/media/"},
     ],
 )
 def test_production_refuses_dangerous_settings(overrides):
@@ -113,11 +122,49 @@ def test_invalid_rate_limits_are_refused(rates):
 
 @pytest.mark.parametrize(
     "overrides",
-    [{"database_url": "mysql://u:p@db/anitche"}, {"redis_url": "http://redis:6379"}, {"root_path": "fast/"}],
+    [
+        {"database_url": "mysql://u:p@db/anitche"},
+        {"redis_url": "http://redis:6379"},
+        {"root_path": "fast/"},
+        # Module 2 : recopiées dans les réponses, donc strictes.
+        {"public_base_url": ""},
+        {"public_base_url": "ftp://anitche.com"},
+        {"public_base_url": "https://anitche.com/fast?x=1"},
+        {"public_base_url": "https://anitche.com/fast#ancre"},
+        {"media_base_url": "javascript:alert(1)"},
+        {"media_base_url": "https://user:secret@anitche.com/media/"},
+    ],
 )
 def test_malformed_urls_are_refused_in_every_environment(overrides):
     with pytest.raises(ValidationError):
         make_settings(**overrides)
+
+
+def test_search_defaults_and_url_forms():
+    """Module 2 (décision 10) : adresses de dev par défaut ; PUBLIC_BASE_URL
+    sans « / » final, MEDIA_BASE_URL avec, quelle que soit la saisie ;
+    cache de 60 s."""
+    settings = Settings(_env_file=None)
+    assert settings.public_base_url == "http://localhost:8001"
+    assert settings.media_base_url == "http://localhost:8000/media/"
+    assert settings.search_cache_ttl == 60
+    custom = make_settings(public_base_url="https://anitche.com/fast/", media_base_url="https://cdn.anitche.com/media")
+    assert custom.public_base_url == "https://anitche.com/fast"
+    assert custom.media_base_url == "https://cdn.anitche.com/media/"
+
+
+def test_production_requires_search_urls_explicitly():
+    """Obligatoires en prod : les valeurs par défaut (localhost) sont refusées."""
+    values = {key: value for key, value in PROD.items() if key not in {"public_base_url", "media_base_url"}}
+    with pytest.raises(ValidationError) as error:
+        Settings(_env_file=None, **values)
+    assert "PUBLIC_BASE_URL" in str(error.value) and "MEDIA_BASE_URL" in str(error.value)
+
+
+@pytest.mark.parametrize("ttl", [-1, 301])
+def test_search_cache_ttl_is_bounded(ttl):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, search_cache_ttl=ttl)
 
 
 def _client_for(settings: Settings) -> TestClient:

@@ -1,5 +1,8 @@
 """Doubles de test partagés : Django simulé, pool PostgreSQL simulé,
 réglages de test."""
+from datetime import UTC, datetime
+from decimal import Decimal
+
 import httpx
 
 from app.core.settings import Settings
@@ -43,25 +46,57 @@ class FakePool:
 
     - fetchval("SELECT 1") : /health ;
     - fetchrow(requête d'accès, livraison, utilisateur) : émule la jointure
-      de app/services/delivery_access.py sur `deliveries` et `users`.
+      de app/services/delivery_access.py sur `deliveries` et `users` ;
+    - recherche (app/services/search.py) : requête reconnue à sa première
+      ligne « -- recherche:<nom> », réponse lue dans `search_rows` (page),
+      `search_summary` (total et facettes, calculés depuis `search_rows`
+      s'il vaut None), `search_count` (total seul) et `suggestion_rows`.
+      Aucun SQL n'est exécuté ici : il l'est sur PostgreSQL dans
+      tests/integration/test_recherche_vues.py.
+
+    `queries` : texte de chaque requête ; `calls` : (texte, paramètres).
     """
 
     def __init__(self):
         self.error: Exception | None = None
         self.queries: list[str] = []
+        self.calls: list[tuple[str, tuple]] = []
         self.deliveries: dict[str, dict] = {}
         self.users: dict[int, dict] = {}
+        self.search_rows: list[dict] = []
+        self.search_summary: dict | None = None
+        self.search_count: int | None = None
+        self.suggestion_rows: list[dict] = []
 
-    async def fetchval(self, query: str):
+    def _record(self, query: str, args: tuple) -> str | None:
         self.queries.append(query)
+        self.calls.append((query, args))
         if self.error is not None:
             raise self.error
+        first_line = query.lstrip().split("\n", 1)[0]
+        return first_line.removeprefix("-- recherche:") if first_line.startswith("-- recherche:") else None
+
+    def search_calls(self, name: str) -> list[tuple[str, tuple]]:
+        return [call for call in self.calls if call[0].lstrip().startswith(f"-- recherche:{name}\n")]
+
+    async def fetchval(self, query: str, *args):
+        if self._record(query, args) == "total":
+            return len(self.search_rows) if self.search_count is None else self.search_count
         return 1
 
-    async def fetchrow(self, query: str, delivery_id, user_id):
-        self.queries.append(query)
-        if self.error is not None:
-            raise self.error
+    async def fetch(self, query: str, *args):
+        kind = self._record(query, args)
+        if kind == "page":
+            return list(self.search_rows)
+        if kind == "suggestions":
+            return list(self.suggestion_rows)
+        raise AssertionError(f"requête inattendue : {query[:80]}")
+
+    async def fetchrow(self, query: str, *args):
+        kind = self._record(query, args)
+        if kind == "resume":
+            return self.search_summary if self.search_summary is not None else self._summary_from_rows()
+        delivery_id, user_id = args
         delivery = self.deliveries.get(str(delivery_id))
         if delivery is None:
             return None
@@ -77,6 +112,17 @@ class FakePool:
             "livraison_longitude": destination[1],
         }
 
+    def _summary_from_rows(self) -> dict:
+        prices = [row["prix_min"] for row in self.search_rows]
+        return {
+            "total": len(self.search_rows),
+            "prix_min": min(prices, default=None),
+            "prix_max": max(prices, default=None),
+            "tranches": "[]",
+            "categories": "[]",
+            "boutiques": "[]",
+        }
+
     def add_delivery(self, delivery_id: str, *, status="en_cours", courier_id=42, client_id=7, destination=None):
         self.deliveries[str(delivery_id)] = {
             "status": status,
@@ -90,6 +136,27 @@ class FakePool:
 
     async def close(self):
         pass
+
+
+def product_row(**overrides) -> dict:
+    """Ligne de la vue catalogue_produit_public, telle qu'asyncpg la
+    renvoie (Decimal, datetime avec fuseau)."""
+    row = {
+        "id": 41,
+        "nom": "Beurre de karité pur",
+        "slug": "beurre-de-karite-pur-3d85cf",
+        "prix_base": Decimal("3500.00"),
+        "prix_min": Decimal("3500.00"),
+        "image_principale": "catalogue/produits/2026/09/produit_GJzjrY5.png",
+        "categorie_id": 8,
+        "categorie_nom": "Beauté",
+        "boutique_id": 14,
+        "boutique_nom": "Karité Doré",
+        "boutique_slug": "karite-dore",
+        "en_stock": True,
+        "date_creation": datetime(2026, 9, 27, 20, 27, 3, 31043, tzinfo=UTC),
+    }
+    return {**row, **overrides}
 
 
 def make_settings(**overrides) -> Settings:

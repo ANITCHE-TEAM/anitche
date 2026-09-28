@@ -38,23 +38,26 @@ def test_405_same_text_as_django(client):
 
 
 def test_query_validation_is_400_with_field_key_and_french_message(client):
-    """Faille 5 : 400 (et non 422), clé « q » (sans « query »), message
-    DRF en français, detail « champ: message »."""
-    body = assert_common_format(client.get("/recherche/suggestions?q=a"), 400)
-    message = "Assurez-vous que ce champ comporte au moins 2\xa0caractères."
-    assert body["errors"] == {"q": [message]}
-    assert body["detail"] == f"q: {message}"
+    """Faille 5 : 400 (et non 422), clé du paramètre (sans « query »),
+    message DRF en français, detail « champ: message ». Module 2 : `q`
+    devient `recherche`, 3 caractères au moins pour les suggestions."""
+    body = assert_common_format(client.get("/recherche/suggestions?recherche=ab"), 400)
+    message = "Assurez-vous que ce champ comporte au moins 3\xa0caractères."
+    assert body["errors"] == {"recherche": [message]}
+    assert body["detail"] == f"recherche: {message}"
 
 
 def test_missing_query_parameter_message(client):
     body = assert_common_format(client.get("/recherche/suggestions"), 400)
-    assert body["errors"] == {"q": ["Ce champ est obligatoire."]}
+    assert body["errors"] == {"recherche": ["Ce champ est obligatoire."]}
 
 
 def test_numeric_bounds_and_parsing_messages(client):
-    body = assert_common_format(client.get("/recherche/produits?par_page=500&page=abc"), 400)
-    assert body["errors"]["par_page"] == ["Assurez-vous que cette valeur est inférieure ou égale à 50."]
-    assert body["errors"]["page"] == ["Un nombre entier valide est requis."]
+    # Module 2 : `par_page` n'existe plus (20 par page, comme Django) ; la
+    # borne est portée par `page` (50 au plus).
+    body = assert_common_format(client.get("/recherche/produits?page=500&prix_min=abc"), 400)
+    assert body["errors"]["page"] == ["Assurez-vous que cette valeur est inférieure ou égale à 50."]
+    assert body["errors"]["prix_min"] == ["Un nombre entier valide est requis."]
 
 
 def test_nested_body_validation_uses_dotted_keys(client):
@@ -164,7 +167,7 @@ def test_security_and_timing_headers_are_no_longer_set_by_fastapi(client):
 
 def test_access_log_has_path_status_duration_but_no_query_string(client, caplog):
     with caplog.at_level(logging.INFO, logger="anitche.fastapi.access"):
-        client.get("/recherche/suggestions?q=wax&token=secret-token")
+        client.get("/recherche/suggestions?recherche=wax&token=secret-token")
     records = [record.getMessage() for record in caplog.records if record.name == "anitche.fastapi.access"]
     assert len(records) == 1
     assert records[0].startswith("GET /recherche/suggestions 200 ")

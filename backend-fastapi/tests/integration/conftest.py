@@ -18,6 +18,8 @@ import asyncio
 import os
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
+from decimal import Decimal
 from urllib.parse import urlsplit
 
 import asyncpg
@@ -240,8 +242,7 @@ def django_users(seed) -> FakeDjango:
     return django
 
 
-@pytest.fixture
-def make_app(monkeypatch, django_users, ro_database_url, clean_redis):
+def _app_factory(monkeypatch, django: FakeDjango, database_url: str, redis_url: str):
     """Applications FastAPI avec les VRAIES ressources (pool asyncpg du rôle
     en lecture seule, client Redis), ouvertes par le lifespan dans la boucle
     de chaque application ; seul Django est simulé."""
@@ -250,14 +251,195 @@ def make_app(monkeypatch, django_users, ro_database_url, clean_redis):
     async def open_with_fake_django(settings):
         opened = await real_open_resources(settings)
         await opened.http.aclose()
-        opened.http = httpx.AsyncClient(
-            base_url=settings.django_api_base_url, transport=httpx.MockTransport(django_users)
-        )
+        opened.http = httpx.AsyncClient(base_url=settings.django_api_base_url, transport=httpx.MockTransport(django))
         return opened
 
     monkeypatch.setattr(resources_module, "open_resources", open_with_fake_django)
 
     def factory(**overrides):
-        return create_app(make_settings(database_url=ro_database_url, redis_url=clean_redis, **overrides))
+        return create_app(make_settings(database_url=database_url, redis_url=redis_url, **overrides))
 
     return factory
+
+
+@pytest.fixture
+def make_app(monkeypatch, django_users, ro_database_url, clean_redis):
+    return _app_factory(monkeypatch, django_users, ro_database_url, clean_redis)
+
+
+@pytest.fixture
+def make_search_app(monkeypatch, ro_database_url, clean_redis):
+    """Recherche (routes publiques) : aucun compte nécessaire."""
+    return _app_factory(monkeypatch, FakeDjango(), ro_database_url, clean_redis)
+
+
+# ------------------------------------------------------------ catalogue
+
+
+@dataclass
+class CatalogueSeed:
+    """Catalogue inséré par le compte administrateur dans les VRAIES tables
+    Django, lu par FastAPI à travers les vues de la migration catalogue
+    0004 ; supprimé après le test. `marker` : mot unique à mettre dans les
+    noms pour isoler une recherche des autres données de la base."""
+
+    admin_url: str
+    marker: str = field(default_factory=lambda: "zq" + uuid.uuid4().hex[:10])
+    user_ids: list[int] = field(default_factory=list)
+    shop_ids: list[int] = field(default_factory=list)
+    category_ids: list[int] = field(default_factory=list)
+    product_ids: list[int] = field(default_factory=list)
+
+    async def _fetchval(self, query: str, *args):
+        connection = await asyncpg.connect(self.admin_url)
+        try:
+            return await connection.fetchval(query, *args)
+        finally:
+            await connection.close()
+
+    def execute(self, query: str, *args):
+        return run(self._fetchval(query, *args))
+
+    def vendor(self, *, role: str = "vendeur", kyc: str = "valide", active: bool = True) -> int:
+        user_id = self.execute(
+            """
+            INSERT INTO utilisateurs_utilisateur
+                (password, is_superuser, email, nom, prenom, role, statut_kyc,
+                 email_verifie, telephone_verifie, is_active, is_staff,
+                 date_creation, date_mise_a_jour)
+            VALUES ('!', false, $1, 'Integration', 'Vendeur', $2, $3, true, false, $4, false, now(), now())
+            RETURNING id
+            """,
+            f"it-{uuid.uuid4().hex}@integration.test", role, kyc, active,
+        )
+        self.user_ids.append(user_id)
+        return user_id
+
+    def shop(self, name: str, *, owner: int | None = None, active: bool = True, suspended: bool = False) -> dict:
+        suffix = uuid.uuid4().hex
+        owner = owner if owner is not None else self.vendor()
+        slug = f"it-{suffix}"
+        shop_id = self.execute(
+            """
+            INSERT INTO vendeurs_boutique
+                (nom, slug, description, telephone_contact, email_contact, adresse, ville,
+                 est_active, date_creation, date_mise_a_jour, proprietaire_id,
+                 est_suspendue, nom_normalise, livraison_offerte)
+            VALUES ($1, $2, '', '', '', '', 'Abidjan', $3, now(), now(), $4, $5, $2, false)
+            RETURNING id
+            """,
+            name, slug, active, owner, suspended,
+        )
+        self.shop_ids.append(shop_id)
+        return {"id": shop_id, "slug": slug, "nom": name}
+
+    def category(self, name: str, *, parent: dict | None = None, active: bool = True) -> dict:
+        slug = f"it-{uuid.uuid4().hex}"
+        category_id = self.execute(
+            """
+            INSERT INTO catalogue_categorie
+                (nom, slug, description, est_active, ordre, date_creation, date_mise_a_jour, parent_id)
+            VALUES ($1, $2, '', $3, 0, now(), now(), $4)
+            RETURNING id
+            """,
+            name, slug, active, parent["id"] if parent else None,
+        )
+        self.category_ids.append(category_id)
+        return {"id": category_id, "slug": slug, "nom": name}
+
+    def product(
+        self,
+        name: str,
+        *,
+        shop: dict,
+        description: str = "",
+        category: dict | None = None,
+        active: bool = True,
+        base_price: int = 10000,
+        variants=((10000, None, True, 5),),
+        images=(),
+        created: datetime | None = None,
+    ) -> int:
+        """`variants` : (prix, prix promo, active, stock ou None sans ligne de
+        stock) ; `images` : (chemin, principale, ordre)."""
+        product_id = run(self._insert_product(
+            name, shop, description, category, active, base_price, variants, images, created,
+        ))
+        self.product_ids.append(product_id)
+        return product_id
+
+    async def _insert_product(self, name, shop, description, category, active, base_price, variants, images, created):
+        connection = await asyncpg.connect(self.admin_url)
+        try:
+            async with connection.transaction():
+                product_id = await connection.fetchval(
+                    """
+                    INSERT INTO catalogue_produit
+                        (nom, slug, description, prix_base, est_actif, date_creation, date_mise_a_jour,
+                         boutique_id, categorie_id, desactive_par)
+                    VALUES ($1, $2, $3, $4, $5, coalesce($6, now()), now(), $7, $8, $9)
+                    RETURNING id
+                    """,
+                    name, f"it-{uuid.uuid4().hex}", description, Decimal(base_price), active, created,
+                    shop["id"], category["id"] if category else None, "" if active else "vendeur",
+                )
+                for price, promo, variant_active, stock in variants:
+                    variant_id = await connection.fetchval(
+                        """
+                        INSERT INTO catalogue_varianteproduit
+                            (sku, nom, prix, prix_promo, est_active, date_creation, date_mise_a_jour, produit_id)
+                        VALUES ($1, 'Standard', $2, $3, $4, now(), now(), $5)
+                        RETURNING id
+                        """,
+                        f"IT-{uuid.uuid4().hex}", Decimal(price), None if promo is None else Decimal(promo),
+                        variant_active, product_id,
+                    )
+                    if stock is not None:
+                        await connection.execute(
+                            """
+                            INSERT INTO catalogue_stock (quantite_disponible, seuil_alerte, date_mise_a_jour, variante_id)
+                            VALUES ($1, 3, now(), $2)
+                            """,
+                            stock, variant_id,
+                        )
+                for path, principal, order in images:
+                    await connection.execute(
+                        """
+                        INSERT INTO catalogue_imageproduit (image, est_principale, ordre, date_creation, produit_id)
+                        VALUES ($1, $2, $3, now(), $4)
+                        """,
+                        path, principal, order, product_id,
+                    )
+                return product_id
+        finally:
+            await connection.close()
+
+    async def _cleanup(self):
+        connection = await asyncpg.connect(self.admin_url)
+        try:
+            async with connection.transaction():
+                products = self.product_ids
+                await connection.execute("DELETE FROM catalogue_imageproduit WHERE produit_id = ANY($1::bigint[])", products)
+                await connection.execute(
+                    "DELETE FROM catalogue_stock WHERE variante_id IN "
+                    "(SELECT id FROM catalogue_varianteproduit WHERE produit_id = ANY($1::bigint[]))",
+                    products,
+                )
+                await connection.execute("DELETE FROM catalogue_varianteproduit WHERE produit_id = ANY($1::bigint[])", products)
+                await connection.execute("DELETE FROM catalogue_produit WHERE id = ANY($1::bigint[])", products)
+                # Sous-catégories d'abord (clé étrangère vers le parent).
+                await connection.execute(
+                    "DELETE FROM catalogue_categorie WHERE id = ANY($1::bigint[]) AND parent_id IS NOT NULL", self.category_ids
+                )
+                await connection.execute("DELETE FROM catalogue_categorie WHERE id = ANY($1::bigint[])", self.category_ids)
+                await connection.execute("DELETE FROM vendeurs_boutique WHERE id = ANY($1::bigint[])", self.shop_ids)
+                await connection.execute("DELETE FROM utilisateurs_utilisateur WHERE id = ANY($1::bigint[])", self.user_ids)
+        finally:
+            await connection.close()
+
+
+@pytest.fixture
+def catalogue(admin_database_url):
+    data = CatalogueSeed(admin_database_url)
+    yield data
+    run(data._cleanup())

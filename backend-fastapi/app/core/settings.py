@@ -63,6 +63,17 @@ class Settings(BaseSettings):
     cors_allowed_origins: Annotated[list[str], NoDecode] = ["http://localhost:5173"]
     # Même variable que Django : base des liens vers le frontend (QR).
     frontend_base_url: str = "http://localhost:5173"
+    # Recherche (docs/MODULE_RECHERCHE.md). Adresse publique de ce service,
+    # préfixe nginx compris (« https://anitche.com/fast » en prod) : liens
+    # next/previous. Jamais déduite de l'en-tête Host (forgeable, et uvicorn
+    # tourne avec --no-proxy-headers : le schéma lu serait http).
+    public_base_url: str = "http://localhost:8001"
+    # Adresse publique des fichiers média de Django (MEDIA_URL servi) : la
+    # vue du catalogue ne donne que le chemin relatif des images.
+    media_base_url: str = "http://localhost:8000/media/"
+    # Durée du cache Redis des totaux, facettes et suggestions (secondes).
+    # 0 : pas de cache. Jamais de cache sur la page de résultats.
+    search_cache_ttl: int = Field(default=60, ge=0, le=300)
     # Appels internes à Django (vérification du jeton). Dans Docker (dev) :
     # http://anitche-backend:8000/api, fixé par le compose.
     django_api_base_url: str = "http://localhost:8000/api"
@@ -128,6 +139,19 @@ class Settings(BaseSettings):
             raise ValueError("ROOT_PATH doit commencer par « / » et ne pas finir par « / » (ex. /fast)")
         return value
 
+    # Formes uniques, pour construire les liens par simple concaténation :
+    # PUBLIC_BASE_URL sans « / » final (suivi du chemin de la route),
+    # MEDIA_BASE_URL avec (suivi du chemin relatif de l'image).
+    @field_validator("public_base_url")
+    @classmethod
+    def _strip_public_base_url(cls, value: str) -> str:
+        return value.rstrip("/")
+
+    @field_validator("media_base_url")
+    @classmethod
+    def _slash_media_base_url(cls, value: str) -> str:
+        return value.rstrip("/") + "/"
+
     @model_validator(mode="after")
     def _check_urls(self):
         schemes = {
@@ -135,11 +159,19 @@ class Settings(BaseSettings):
             "DATABASE_URL": (self.database_url, {"postgresql", "postgres"}),
             "REDIS_URL": (self.redis_url, {"redis", "rediss"}),
             "FRONTEND_BASE_URL": (self.frontend_base_url, {"http", "https"}),
+            "PUBLIC_BASE_URL": (self.public_base_url, {"http", "https"}),
+            "MEDIA_BASE_URL": (self.media_base_url, {"http", "https"}),
         }
         for name, (url, allowed) in schemes.items():
             parts = urlsplit(url)
             if parts.scheme not in allowed or not parts.hostname:
                 raise ValueError(f"{name} invalide (schéma attendu : {', '.join(sorted(allowed))})")
+        # Adresses publiques recopiées dans les réponses : ni paramètres ni
+        # fragment, qui se retrouveraient au milieu des liens construits.
+        for name, url in (("PUBLIC_BASE_URL", self.public_base_url), ("MEDIA_BASE_URL", self.media_base_url)):
+            parts = urlsplit(url)
+            if parts.query or parts.fragment or parts.username or parts.password:
+                raise ValueError(f"{name} invalide (ni paramètres, ni fragment, ni identifiants)")
         return self
 
     @model_validator(mode="after")
@@ -160,6 +192,12 @@ class Settings(BaseSettings):
 
         if not self.frontend_base_url.startswith("https://") or _host(self.frontend_base_url) in LOCAL_HOSTS:
             problems.append("FRONTEND_BASE_URL doit être l'adresse https:// publique du frontend")
+
+        if not self.public_base_url.startswith("https://") or _host(self.public_base_url) in LOCAL_HOSTS:
+            problems.append("PUBLIC_BASE_URL doit être l'adresse https:// publique de FastAPI (ex. https://anitche.com/fast)")
+
+        if not self.media_base_url.startswith("https://") or _host(self.media_base_url) in LOCAL_HOSTS:
+            problems.append("MEDIA_BASE_URL doit être l'adresse https:// publique des fichiers média de Django")
 
         if _host(self.django_api_base_url) in LOCAL_HOSTS:
             problems.append("DJANGO_API_BASE_URL doit pointer vers le service Django (pas localhost)")

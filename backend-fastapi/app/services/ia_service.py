@@ -1,4 +1,5 @@
-from typing import List, Dict, Any
+from types import MappingProxyType
+from typing import List
 from app.modeles.conseiller_ia import (
     DemandeConseilIA,
     ReponseConseilIA,
@@ -6,7 +7,29 @@ from app.modeles.conseiller_ia import (
     DemandeRecommandations,
     ReponseRecommandations,
 )
-from app.services.recherche_service import CATALOGUE_INDEX
+
+# Maquette PROPRE au conseiller IA, en attendant le module 4 (qui lira les
+# vues publiques du catalogue, comme la recherche). Reprise de l'ancienne
+# maquette de la recherche (module 2), limitée aux champs lus ici.
+# Immuable (tuple de dictionnaires en lecture seule) : aucun état partagé ni
+# modifié entre requêtes. Aucun lien avec la recherche.
+MOCK_PRODUCTS = tuple(
+    MappingProxyType(product)
+    for product in (
+        {"id": 1, "nom": "Robe Baoulé Traditionnelle", "boutique_nom": "Atelier Baoulé Tiassalé",
+         "prix": 25000.0, "categorie_nom": "Mode & Vêtements"},
+        {"id": 2, "nom": "Chemise Wax Homme Motifs Éléphant", "boutique_nom": "Wax & Style Abidjan",
+         "prix": 15000.0, "categorie_nom": "Mode & Vêtements"},
+        {"id": 3, "nom": "Masque Baoulé en Bois d'Iroko", "boutique_nom": "Atelier Baoulé Tiassalé",
+         "prix": 35000.0, "categorie_nom": "Artisanat & Déco"},
+        {"id": 4, "nom": "Sac à Main Cuir et Pagne Kita", "boutique_nom": "Maroquinerie Bassam",
+         "prix": 28000.0, "categorie_nom": "Maroquinerie & Accessoires"},
+        {"id": 5, "nom": "Beurre de Karité Bio Brut 500g", "boutique_nom": "Cosmétiques du Nord",
+         "prix": 4500.0, "categorie_nom": "Beauté & Bien-être"},
+        {"id": 6, "nom": "Collier Perles Traditionnelles Akwaba", "boutique_nom": "Maroquinerie Bassam",
+         "prix": 12000.0, "categorie_nom": "Bijoux & Parures"},
+    )
+)
 
 
 class ServiceConseillerIA:
@@ -25,7 +48,7 @@ class ServiceConseillerIA:
         # Analyse des intentions et thématiques
         if any(w in dernier_message or w in occasion for w in ["mariage", "ceremonie", "fete", "dot", "chic"]):
             # Cérémonies traditionnelles ou chics : valorisation du pagne Baoulé et parures Akan
-            for p in CATALOGUE_INDEX:
+            for p in MOCK_PRODUCTS:
                 if p["id"] in [1, 6]:  # Robe Baoulé, Collier Akan
                     if not budget or p["prix"] <= budget:
                         produits_selectionnes.append(
@@ -44,7 +67,7 @@ class ServiceConseillerIA:
 
         elif any(w in dernier_message or w in style for w in ["homme", "chemise", "travail", "bureau", "wax"]):
             # Mode masculine / casual chic
-            for p in CATALOGUE_INDEX:
+            for p in MOCK_PRODUCTS:
                 if p["id"] == 2:  # Chemise Wax Homme
                     if not budget or p["prix"] <= budget:
                         produits_selectionnes.append(
@@ -62,7 +85,7 @@ class ServiceConseillerIA:
 
         elif any(w in dernier_message or w in style for w in ["cadeau", "deco", "souvenir", "sculpture", "maison"]):
             # Décoration & Objets d'art
-            for p in CATALOGUE_INDEX:
+            for p in MOCK_PRODUCTS:
                 if p["id"] in [3, 4]:  # Masque Iroko, Sac Kita
                     if not budget or p["prix"] <= budget:
                         produits_selectionnes.append(
@@ -79,7 +102,7 @@ class ServiceConseillerIA:
             ])
 
         elif any(w in dernier_message or w in style for w in ["beaute", "soin", "cheveux", "peau", "karite"]):
-            for p in CATALOGUE_INDEX:
+            for p in MOCK_PRODUCTS:
                 if p["id"] == 5:
                     if not budget or p["prix"] <= budget:
                         produits_selectionnes.append(
@@ -97,7 +120,7 @@ class ServiceConseillerIA:
 
         # Si aucun filtre spécifique n'a matché, sélection des coups de cœur selon le budget
         if not produits_selectionnes:
-            for p in CATALOGUE_INDEX[:3]:
+            for p in MOCK_PRODUCTS[:3]:
                 if not budget or p["prix"] <= budget:
                     produits_selectionnes.append(
                         ProduitConseil(
@@ -126,7 +149,7 @@ class ServiceConseillerIA:
         resultats: List[ProduitConseil] = []
         budget = demande.budget_max
 
-        for p in CATALOGUE_INDEX:
+        for p in MOCK_PRODUCTS:
             if budget and p["prix"] > budget:
                 continue
 

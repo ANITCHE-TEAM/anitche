@@ -20,6 +20,19 @@ from app.core.settings import Settings
 
 logger = logging.getLogger("anitche.fastapi")
 
+DATABASE_SERVER_SETTINGS = {
+    "default_transaction_read_only": "on",
+    "statement_timeout": "3000",
+    "application_name": "anitche-fastapi",
+    # asyncpg prépare chaque requête ; après 5 exécutions, PostgreSQL peut
+    # garder un plan « générique », établi sans connaître le texte cherché.
+    # Pour la recherche, le bon plan dépend du texte (mot rare : index
+    # trigramme ; mot courant et tri par date : index de date). Plan
+    # recalculé à chaque exécution : environ 1 ms, contre un parcours
+    # complet du catalogue dans le mauvais cas (docs/MODULE_RECHERCHE.md).
+    "plan_cache_mode": "force_custom_plan",
+}
+
 
 @dataclass
 class Resources:
@@ -52,11 +65,7 @@ async def open_resources(settings: Settings) -> Resources:
             min_size=1,
             max_size=settings.db_pool_max_size,
             timeout=5,
-            server_settings={
-                "default_transaction_read_only": "on",
-                "statement_timeout": "3000",
-                "application_name": "anitche-fastapi",
-            },
+            server_settings=DATABASE_SERVER_SETTINGS,
         )
     except BaseException:
         await http.aclose()
