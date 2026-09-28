@@ -218,3 +218,25 @@ const corps = {
 - Pour changer de lieu, redemander la position ou retirer le point (bouton « Ne pas utiliser ma position »).
 
 > **Vie privée.** Ce point est l'emplacement précis du domicile du client. L'API ne le montre qu'**au client**, **au livreur assigné pendant la livraison** (masqué une fois la livraison livrée ou annulée) et **à l'administration** ; **jamais au vendeur**. Côté interface : ne pas l'afficher aux autres rôles, ne pas le garder dans `localStorage` au-delà du checkout, ne pas l'envoyer à un service tiers (analytics, logs).
+
+## 12. Frais vendeur (« Mes reversements »)
+
+Règle de la plateforme depuis le **28 septembre 2026** ([`MODULE_PAIEMENTS.md`](./MODULE_PAIEMENTS.md) § 5) :
+
+- **14 % du prix de l'article** (prix effectif, promotion comprise ; un coupon du client ne réduit jamais la part du vendeur) ;
+- **plus un frais fixe par article** : **100 FCFA** si ce prix est inférieur ou égal à **3 000 FCFA**, **200 FCFA** au-delà ;
+- montants **TVA incluse** : aucune TVA ne s'y ajoute. Écrire « TVA incluse » à côté des frais ; ne pas afficher de montant HT ni de TVA séparée (la décomposition n'existe pas encore : elle viendra avec les factures de commission).
+
+Ce que voit le vendeur (`GET /api/paiements/vendeur/reversements/`) : les frais **figés à la commande**, ligne par ligne, et leur total sur le reversement. Exemple, 3 savons à 2 000 FCFA :
+
+```json
+{
+  "nom_produit": "Savon noir", "quantite": 3, "prix_unitaire": "2000.00",
+  "taux_commission": "14.00", "frais_fixe_unitaire": 100,
+  "montant_commission": "840.00", "montant_frais_fixes": "300.00", "montant_net_vendeur": "4860.00"
+}
+```
+
+- **Ne jamais recalculer les frais côté interface** : afficher ceux de l'API. Une commande passée avant le 28/09/2026 garde `"12.00"` et `200` ; une boutique peut avoir une offre propre (autre taux, autre frais fixe), prioritaire sur la règle de la plateforme.
+- La commission est arrondie au franc sur le total de la ligne (un demi-franc au franc supérieur) : 2 999 FCFA → 420 FCFA de commission, pas 419,86.
+- Le texte de la règle (page d'aide, inscription vendeur) : « Frais ANITCHE : 14 % du prix de l'article + 100 FCFA par article jusqu'à 3 000 FCFA (200 FCFA au-delà), TVA incluse. »
