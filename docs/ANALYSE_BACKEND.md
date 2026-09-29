@@ -317,19 +317,19 @@ graph TD
     FastAPI --> R4[4. Suivi GPS Temps Réel WebSockets /livraison]
 ```
 
-* **1. Recherche Rapide & Suggestions ([`routeurs/recherche.py`](file:///c:/Users/Jordan/Documents/Anitche/backend-fastapi/app/routeurs/recherche.py))** :
+* **1. Recherche Rapide & Suggestions ([`routeurs/recherche.py`](../backend-fastapi/app/routeurs/recherche.py))** :
   - `GET /recherche/produits` : Recherche dans les produits **visibles selon Django** (vues SQL publiques de la migration `catalogue/0004`, seules lisibles par le rôle en lecture seule), sans accents ni majuscules, fautes de frappe tolérées (`pg_trgm`), aussi dans les noms de boutique et de catégorie ; filtres, tris et pagination de la liste Django (`GET /api/catalogue/produits/`, mêmes champs, jamais de stock exact) ; facettes (catégories, boutiques, tranches de prix) sur l'ensemble filtré, total et facettes en cache Redis 60 s, résultats jamais.
   - `GET /recherche/suggestions` : Autocomplétion à partir de 3 caractères (catégories actives, boutiques publiques, produits visibles), en cache 60 s. Contrat : [`MODULE_RECHERCHE.md`](./MODULE_RECHERCHE.md).
-* **2. Conseiller Shopping IA ([`routeurs/conseiller_ia.py`](file:///c:/Users/Jordan/Documents/Anitche/backend-fastapi/app/routeurs/conseiller_ia.py))** :
-  - `POST /ia/conseil` : Analyse contextuelle (cérémonie, mariage, style, budget) et recommandations argumentées de pièces artisanales et de mode ivoirienne.
-  - `POST /ia/recommandations` : Suggestions personnalisées par catégories favorites et budget.
-* **3. Scan QR ([`routeurs/scan_qr.py`](file:///c:/Users/Jordan/Documents/Anitche/backend-fastapi/app/routeurs/scan_qr.py))** :
+* **2. Conseiller Shopping IA ([`routeurs/conseiller_ia.py`](../backend-fastapi/app/routeurs/conseiller_ia.py))** : routes **authentifiées** (tout rôle), limitées par utilisateur. Produits choisis **uniquement dans le vrai catalogue** (vues publiques, par la recherche du point 1), visibles, en stock et dans le budget ; toute sortie de fournisseur est revalidée (identifiants limités aux candidats, doublons, nombre maximal, textes nettoyés). **Aucune vraie IA intégrée** (décision d'équipe) : fournisseur **simulé** par règles (`AI_PROVIDER=simule`), déterministe, sans réseau ni clé ; un futur fournisseur (Gemini, OpenAI, Anthropic, Mistral, modèle local…) s'ajoute par un adaptateur, une ligne de registre et une configuration, avec délai, repli sur le simulé et garde-fou de budget déjà en place. Contrat : [`MODULE_IA.md`](./MODULE_IA.md).
+  - `POST /ia/conseil` : conseil argumenté selon la conversation (tenue par le frontend), l'occasion (cérémonie, mariage…), le style, le budget et les catégories : message, 4 produits au plus avec leur justification, conseils généraux.
+  - `POST /ia/recommandations` : 8 produits au plus selon les catégories et le budget envoyés par le client (aucun identifiant d'utilisateur dans le corps).
+* **3. Scan QR ([`routeurs/scan_qr.py`](../backend-fastapi/app/routeurs/scan_qr.py))** :
   - `POST /qr/scan` : Décodage d'un code saisi ou d'une URL de QR (seule l'origine de `FRONTEND_BASE_URL` est acceptée, URL piégées refusées avec code machine) → code normalisé et URL de la page de vérification. **Ni base ni appel à Django** : la certification, le comptage et le journal des scans restent à Django (`GET /api/passeports/verifier/<code>/`), appelé par cette page. Contrat : [`MODULE_SCAN_QR.md`](./MODULE_SCAN_QR.md).
-* **4. Suivi GPS & Télémétrie en Direct ([`routeurs/suivi_temps_reel.py`](file:///c:/Users/Jordan/Documents/Anitche/backend-fastapi/app/routeurs/suivi_temps_reel.py))** :
+* **4. Suivi GPS & Télémétrie en Direct ([`routeurs/suivi_temps_reel.py`](../backend-fastapi/app/routeurs/suivi_temps_reel.py))** :
   - `POST /livraison/position` : Position du livreur assigné, pendant `en_cours` seulement (latitude, longitude, vitesse, cap).
   - `GET /livraison/position/{id}` : Dernière position (client de la commande, livreur assigné, administration). Distance restante et ETA **indicatifs**, calculés **seulement si le client a donné son point GPS au checkout** (sinon `null`, jamais de valeur inventée).
   - `WebSocket /livraison/ws/{id}` : Positions en direct, authentification par premier message. Contrat : [`MODULE_SUIVI_GPS.md`](./MODULE_SUIVI_GPS.md).
-* **Validation & Tests (`backend-fastapi/tests/`)** : 1 026 tests unitaires (ressources simulées) et 34 tests d'intégration (vrais PostgreSQL et Redis, schéma des migrations Django, job CI `integration`) au module 3 de la refonte (septembre 2026).
+* **Validation & Tests (`backend-fastapi/tests/`)** : 1 198 tests unitaires (ressources simulées) et 39 tests d'intégration (vrais PostgreSQL et Redis, schéma des migrations Django, job CI `integration`) au module 4 de la refonte (septembre 2026).
 
 ---
 

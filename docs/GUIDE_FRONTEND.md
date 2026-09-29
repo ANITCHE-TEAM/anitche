@@ -224,7 +224,7 @@ const corps = {
 
 ## 12. Service FastAPI (`/fast/`)
 
-Second backend, pour le temps réel et les services rapides. Le module 4 de la refonte FastAPI (IA) ajoutera ses routes ici. Aujourd'hui : **suivi GPS du livreur**, contrat complet dans [`MODULE_SUIVI_GPS.md`](./MODULE_SUIVI_GPS.md), **recherche du catalogue** (ci-dessous et [`MODULE_RECHERCHE.md`](./MODULE_RECHERCHE.md)) et **scan QR des passeports** (ci-dessous et [`MODULE_SCAN_QR.md`](./MODULE_SCAN_QR.md)).
+Second backend, pour le temps réel et les services rapides : **suivi GPS du livreur**, contrat complet dans [`MODULE_SUIVI_GPS.md`](./MODULE_SUIVI_GPS.md), **recherche du catalogue** (ci-dessous et [`MODULE_RECHERCHE.md`](./MODULE_RECHERCHE.md)), **scan QR des passeports** (ci-dessous et [`MODULE_SCAN_QR.md`](./MODULE_SCAN_QR.md)) et **conseiller IA** (ci-dessous et [`MODULE_IA.md`](./MODULE_IA.md)).
 
 ### Base et authentification
 
@@ -236,6 +236,7 @@ Second backend, pour le temps réel et les services rapides. Le module 4 de la r
 - **HTTP** : le **même jeton `access` que Django** (§ 4), en-tête `Authorization: Bearer <access>`. Sur **401**, rafraîchir le jeton auprès de Django (§ 4) puis rejouer : l'intercepteur axios de Django convient.
 - **Format d'erreur** : identique à Django (§ 5). Les refus du suivi portent un **code machine** : se fier à `errors.code[0]`, **jamais au texte** de `detail`.
 - **429** : en-tête `Retry-After`, exposé par CORS (§ 7).
+- **413** `errors.code[0] = "corps_trop_volumineux"` : corps de requête au-delà de 128 Kio, sur toutes les routes FastAPI (aucune requête légitime n'en approche).
 
 ### Suivi GPS : qui fait quoi
 
@@ -414,6 +415,59 @@ async function ouvrirPasseport(contenuBrut, naviguer) {
 async function verifierPasseport(code) {
   const reponse = await fetch(`${DJANGO_API_URL}/passeports/verifier/${encodeURIComponent(code)}/`);
   return { statut: reponse.status, corps: await reponse.json() };
+}
+```
+
+### Conseiller IA
+
+Contrat complet : [`MODULE_IA.md`](./MODULE_IA.md). Routes **authentifiées** (tout rôle, jeton de Django). Aucune vraie IA n'est branchée aujourd'hui : un conseiller **par règles** (`source: "regles"`) répond avec les **vrais produits** du catalogue ; le contrat ne changera pas le jour où une IA sera ajoutée (`source: "ia"`).
+
+| Écran | Appel | Limite |
+|---|---|---|
+| Conversation « conseiller shopping » | `POST /fast/ia/conseil` | 20/h par utilisateur |
+| Bloc « sélection pour vous » (catégories, budget) | `POST /fast/ia/recommandations` | 120/h par utilisateur |
+| Fiche d'un produit proposé | **Django** `GET /api/catalogue/produits/<slug>/` | — |
+
+- **Historique tenu par le frontend** : le serveur ne garde aucune conversation. Envoyer à chaque appel les derniers échanges (**10 messages au plus**, le dernier du client), en renvoyant les réponses précédentes avec `role: "assistant"` (le texte de `reponse`). Au-delà de 10 : ne garder que les plus récents.
+- **Corps** : `messages` (1 000 caractères au plus par message), `occasion` et `style` (texte libre, 60 caractères), `budget_max` (**entier** FCFA, 1 ou plus : ne pas envoyer 0 ni un décimal), `categories` (0 à 5 **slugs** de `GET /api/catalogue/categories/`). Aucun autre champ : un champ inconnu (ancien `utilisateur_id`, `categories_preferees`…) donne **400**.
+- **Réponse** : `reponse` (message), `produits_suggeres` (4 au plus ; 8 pour `recommandations`), `conseils_style`, `source`. Chaque produit a **les champs d'un résultat de recherche** : réutiliser la carte produit, avec `justification` en plus. Liste vide possible (200) : afficher `reponse`, qui explique pourquoi (budget trop bas…).
+- **Afficher tous les textes comme du texte brut** (jamais `innerHTML`) ; ils ne contiennent aucun lien.
+- `source` : `"regles"` → libellé « Sélection automatique » ; `"ia"` → « Conseil IA » (affichage conseillé pour être transparent avec le client).
+
+Erreurs (`errors.code[0]` quand il existe) :
+
+| Code HTTP | Code | Réaction |
+|---|---|---|
+| 400 | clé du champ (`messages.0.contenu`, `budget_max`…) | Message sous le champ ; `detail` sinon |
+| 401 | — | Rafraîchir le jeton puis rejouer (§ 4) |
+| 413 | `corps_trop_volumineux` | Raccourcir l'historique |
+| 429 | — | Attendre `Retry-After`, bouton désactivé |
+| 503 | `conseiller_desactive` | **Masquer** l'entrée du conseiller (coupé par l'équipe) |
+| 503 | `conseiller_indisponible` ou sans code | « Le conseiller est momentanément indisponible, réessayez plus tard. » |
+
+```js
+// Conversation : le frontend garde l'historique et le renvoie à chaque message.
+async function demanderConseil(historique, texte, { occasion, style, budgetMax, categories } = {}, jeton) {
+  const messages = [...historique, { role: 'user', contenu: texte }].slice(-10);
+  const corps = { messages };
+  if (occasion) corps.occasion = occasion;
+  if (style) corps.style = style;
+  if (Number.isInteger(budgetMax) && budgetMax > 0) corps.budget_max = budgetMax;
+  if (categories?.length) corps.categories = categories.slice(0, 5);
+
+  const reponse = await fetch(`${FASTAPI_URL}/ia/conseil`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jeton}` },
+    body: JSON.stringify(corps),
+  });
+  const donnees = await reponse.json();
+  if (!reponse.ok) return { erreur: donnees.errors?.code?.[0] ?? reponse.status, detail: donnees.detail };
+  return {
+    historique: [...messages, { role: 'assistant', contenu: donnees.reponse }].slice(-10),
+    produits: donnees.produits_suggeres, // carte produit de la recherche + justification
+    conseils: donnees.conseils_style,
+    libelle: donnees.source === 'ia' ? 'Conseil IA' : 'Sélection automatique',
+  };
 }
 ```
 

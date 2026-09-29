@@ -23,7 +23,7 @@ core/cache.py           cache JSON Redis avec durée de vie, facultatif (panne :
 modeles/recherche.py    schémas de réponse (OpenAPI)
 ```
 
-Plus aucune donnée en dur ni état global : l'ancienne maquette `CATALOGUE_INDEX` (6 produits inventés, modifiée à chaque recherche) est supprimée. Le conseiller IA (module 4, pas encore refait) garde **sa propre** maquette immuable (`services/ia_service.py`, `MOCK_PRODUCTS`), sans lien avec la recherche.
+Plus aucune donnée en dur ni état global : l'ancienne maquette `CATALOGUE_INDEX` (6 produits inventés, modifiée à chaque recherche) est supprimée. Le conseiller IA (module 4, [`MODULE_IA.md`](./MODULE_IA.md)) n'a plus de maquette non plus : il choisit ses produits parmi ceux que renvoie `fetch_page` (mêmes vues, mêmes règles), sans modifier ce service.
 
 ## 3. Contrat HTTP
 
