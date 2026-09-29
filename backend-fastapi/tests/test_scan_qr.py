@@ -325,9 +325,12 @@ def test_maximum_length_is_512_characters_after_stripping(client):
 
 
 def test_huge_body_is_refused_without_being_processed(client):
-    """Diagnostic 5 : 1 Mo donnait une réponse de 3 Mo."""
+    """Diagnostic 5 : 1 Mo donnait une réponse de 3 Mo. Module 4 : refusé
+    dès l'en-tête Content-Length (413, MAX_REQUEST_BODY_BYTES), sans lire
+    le corps ; au-dessous de la limite, 400 (test précédent)."""
     response = scan(client, "PAS-" + "A" * 1_000_000)
-    assert response.status_code == 400
+    assert response.status_code == 413
+    assert response.json()["errors"] == {"code": ["corps_trop_volumineux"]}
     assert len(response.content) < 300
 
 

@@ -36,6 +36,7 @@ DEFAULT_MESSAGES = {
     401: NOT_AUTHENTICATED_MESSAGE,
     403: "Vous n'avez pas la permission d'effectuer cette action.",
     404: NOT_FOUND_MESSAGE,
+    413: "Le corps de la requête est trop volumineux.",
     429: "Requête ralentie.",
     503: SERVICE_UNAVAILABLE_MESSAGE,
 }
@@ -59,6 +60,7 @@ VALIDATION_MESSAGES = {
     "finite_number": "Un nombre valide est requis.",
     "int_parsing": "Un nombre entier valide est requis.",
     "int_type": "Un nombre entier valide est requis.",
+    "int_from_float": "Un nombre entier valide est requis.",
     "float_parsing": "Un nombre valide est requis.",
     "float_type": "Un nombre valide est requis.",
     "uuid_parsing": "Doit être un UUID valide.",
@@ -67,6 +69,11 @@ VALIDATION_MESSAGES = {
     "bool_parsing": "Doit être un booléen valide.",
     "string_type": "Chaîne de caractère invalide.",
     "list_type": "Attendait une liste d'éléments.",
+    "too_short": "Assurez-vous que cette liste comporte au moins {min_length}\xa0élément(s).",
+    "too_long": "Assurez-vous que cette liste comporte au plus {max_length}\xa0éléments.",
+    # Corps à champs fixes (conseiller IA) : un champ inconnu est refusé,
+    # jamais ignoré en silence.
+    "extra_forbidden": "Ce champ n'est pas autorisé.",
     "model_attributes_type": "Donnée non valide. Attendait un dictionnaire.",
     "dict_type": "Donnée non valide. Attendait un dictionnaire.",
     "json_invalid": "Le corps de la requête n'est pas un JSON valide.",
@@ -85,7 +92,7 @@ class Error(BaseModel):
 
 ERROR_RESPONSES = {
     code: {"model": Error, "description": HTTPStatus(code).phrase}
-    for code in (400, 401, 403, 404, 429, 500, 503)
+    for code in (400, 401, 403, 404, 413, 429, 500, 503)
 }
 
 

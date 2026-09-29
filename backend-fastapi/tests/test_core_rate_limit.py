@@ -24,8 +24,10 @@ ROUTES = [
     ("get", "/recherche/suggestions?recherche=wax", {}, "suggestions"),
     # Module 3 : code au format de Django ; GET /qr/passeport/{code} supprimée.
     ("post", "/qr/scan", {"json": {"qr_data": "PAS-2026-1A2B3C4D"}}, "qr_scan"),
-    ("post", "/ia/conseil", {"json": {"messages": [{"role": "user", "contenu": "Bonjour"}]}}, "ai_advice"),
-    ("post", "/ia/recommandations", {"json": {}}, "ai_advice"),
+    # Module 4 : conseiller authentifié, limité par utilisateur, un scope par route.
+    ("post", "/ia/conseil", {"json": {"messages": [{"role": "user", "contenu": "Bonjour"}]}, "headers": AUTH_HEADERS},
+     "ai_advice"),
+    ("post", "/ia/recommandations", {"json": {}, "headers": AUTH_HEADERS}, "ai_recommendations"),
     ("post", "/livraison/position", {"json": GPS_PAYLOAD, "headers": AUTH_HEADERS}, "gps_publish"),
 ]
 # La lecture de la position (module 1) a son propre scope, testé seul : la

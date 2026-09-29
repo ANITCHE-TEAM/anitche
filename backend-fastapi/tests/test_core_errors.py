@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.errors import INTERNAL_ERROR_MESSAGE
+from tests.fakes import AUTH_HEADERS
 
 
 def assert_common_format(response, status_code: int) -> dict:
@@ -61,9 +62,10 @@ def test_numeric_bounds_and_parsing_messages(client):
 
 
 def test_nested_body_validation_uses_dotted_keys(client):
-    """Faille 6 : clé à points « messages.0.role », comme Django."""
+    """Faille 6 : clé à points « messages.0.role », comme Django. Module 4 :
+    route authentifiée (sans jeton, 401 avant la validation)."""
     payload = {"messages": [{"role": "pirate", "contenu": "Bonjour"}]}
-    body = assert_common_format(client.post("/ia/conseil", json=payload), 400)
+    body = assert_common_format(client.post("/ia/conseil", json=payload, headers=AUTH_HEADERS), 400)
     assert body["errors"] == {"messages.0.role": ["«\xa0pirate\xa0» n'est pas un choix valide."]}
     assert body["detail"].startswith("messages.0.role: ")
 

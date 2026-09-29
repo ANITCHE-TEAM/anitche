@@ -12,7 +12,6 @@ suggestions), A-C (description, tri par défaut, profondeur de page).
 """
 import logging
 import re
-from types import MappingProxyType
 
 import asyncpg
 import fakeredis
@@ -23,9 +22,9 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app.core.resources import DATABASE_SERVER_SETTINGS, Resources
 from app.main import create_app
-from app.services import ia_service, search
+from app.services import search
 from app.services.search import SearchFilters
-from tests.fakes import FakeDjango, FakePool, make_settings, product_row
+from tests.fakes import AUTH_HEADERS, FakeDjango, FakePool, make_settings, product_row
 
 VIEWS = {"catalogue_produit_public", "catalogue_categorie_publique", "catalogue_boutique_publique"}
 DJANGO_LIST_FIELDS = {
@@ -562,23 +561,26 @@ def test_pool_forces_custom_plans_and_stays_read_only():
 
 
 def test_no_hardcoded_catalogue_nor_global_state():
-    """Diagnostic 1-2 : maquette CATALOGUE_INDEX supprimée ; le conseiller IA
-    (module 4) garde sa propre maquette, immuable."""
-    with pytest.raises(ModuleNotFoundError):
-        __import__("app.services.recherche_service")
-    assert not hasattr(search, "CATALOGUE_INDEX") and not hasattr(ia_service, "CATALOGUE_INDEX")
-    assert isinstance(ia_service.MOCK_PRODUCTS, tuple)
-    assert all(isinstance(product, MappingProxyType) for product in ia_service.MOCK_PRODUCTS)
-    with pytest.raises(TypeError):
-        ia_service.MOCK_PRODUCTS[0]["_score"] = 1
+    """Diagnostic 1-2 : maquette CATALOGUE_INDEX supprimée. Module 4 : la
+    maquette du conseiller IA (ia_service.MOCK_PRODUCTS) l'est aussi ; le
+    conseiller lit le catalogue par cette recherche."""
+    for module in ("app.services.recherche_service", "app.services.ia_service"):
+        with pytest.raises(ModuleNotFoundError):
+            __import__(module)
+    assert not hasattr(search, "CATALOGUE_INDEX")
 
 
-def test_ai_advisor_still_works_after_searches(client):
+def test_ai_advisor_still_works_after_searches(client, db):
+    """Aucun état partagé : le conseiller reçoit les mêmes lignes du
+    catalogue avant et après des recherches."""
+    db.search_rows = [product_row()]
+    before = client.post("/ia/recommandations", json={"budget_max": 40000}, headers=AUTH_HEADERS)
     client.get("/recherche/produits")
-    response = client.post("/ia/recommandations", json={"budget_max": 40000.0})
-    assert response.status_code == 200
-    assert len(response.json()["recommandations"]) == 4
-    assert all("_score" not in product for product in ia_service.MOCK_PRODUCTS)
+    client.get("/recherche/produits?recherche=karite")
+    after = client.post("/ia/recommandations", json={"budget_max": 40000}, headers=AUTH_HEADERS)
+    assert before.status_code == after.status_code == 200
+    assert before.json() == after.json()
+    assert [product["id"] for product in after.json()["recommandations"]] == [41]
 
 
 def _app_with(db: FakePool):

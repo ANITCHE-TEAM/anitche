@@ -1,5 +1,7 @@
+from decimal import Decimal
+
 from app.core.auth import CurrentUser, get_current_user
-from tests.fakes import product_row
+from tests.fakes import AUTH_HEADERS, product_row
 
 # Module 0 (socle) : plus d'application globale. Chaque test reçoit la
 # fixture `client` (tests/conftest.py) : application neuve créée par
@@ -84,34 +86,40 @@ def test_recherche_suggestions_autocompletion(client, db):
 # 2. Tests Conseiller Shopping IA
 # ==========================================
 
-def test_ia_conseil_mariage_ceremonie(client):
+# Module 4 : routes authentifiées, produits du vrai catalogue (lus par la
+# recherche ; ici le pool simulé), maquette de 6 produits supprimée.
+# Contrat complet : tests/test_conseiller_ia.py.
+
+def test_ia_conseil_mariage_ceremonie(client, db):
+    db.search_rows = [
+        product_row(id=33, nom="Robe en bazin brodé", categorie_nom="Mode", prix_min=Decimal("22000.00")),
+        product_row(id=41),
+    ]
     payload = {
         "messages": [
             {"role": "user", "contenu": "Je cherche une tenue d'apparat pour un mariage traditionnel à Yamoussoukro."}
         ],
         "occasion": "mariage traditionnel",
-        "budget_max": 50000.0,
+        "budget_max": 50000,
     }
-    response = client.post("/ia/conseil", json=payload)
+    response = client.post("/ia/conseil", json=payload, headers=AUTH_HEADERS)
     assert response.status_code == 200
     data = response.json()
-    assert len(data["produits_suggeres"]) > 0
+    assert [p["id"] for p in data["produits_suggeres"]] == [33]  # le karité n'est pas proposé
     assert len(data["conseils_style"]) > 0
-    # Vérification de suggestion du pagne Baoulé
-    noms = [p["nom"].lower() for p in data["produits_suggeres"]]
-    assert any("baoulé" in n or "baoule" in n for n in noms)
+    assert "bazin" in data["produits_suggeres"][0]["justification"].lower()
+    assert data["source"] == "regles"
 
 
-def test_ia_recommandations_personnalisees(client):
-    payload = {
-        "categories_preferees": ["Artisanat & Déco", "Bijoux & Parures"],
-        "budget_max": 40000.0,
-    }
-    response = client.post("/ia/recommandations", json=payload)
+def test_ia_recommandations_personnalisees(client, db):
+    db.search_rows = [product_row(id=41), product_row(id=42, nom="Savon noir", prix_min=Decimal("1500.00"))]
+    payload = {"categories": ["beaute"], "budget_max": 40000}
+    response = client.post("/ia/recommandations", json=payload, headers=AUTH_HEADERS)
     assert response.status_code == 200
     data = response.json()
-    assert len(data["recommandations"]) > 0
-    assert all(r["prix"] <= 40000.0 for r in data["recommandations"])
+    assert [r["id"] for r in data["recommandations"]] == [41, 42]
+    ((query, args),) = db.search_calls("page")
+    assert "beaute" in args and 40000 in args  # catégorie et budget filtrés par le SQL
 
 
 # ==========================================

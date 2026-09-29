@@ -27,7 +27,9 @@ DEFAULT_RATE_LIMITS = {
     # Lecture de la position en repli du WebSocket : une toutes les 5 s.
     "gps_read": "720/hour",
     "ws_connect": "60/hour",
+    # Conseiller IA (docs/MODULE_IA.md), par utilisateur authentifié.
     "ai_advice": "20/hour",
+    "ai_recommendations": "120/hour",
 }
 
 DEV_DATABASE_PASSWORD = "fastapi_ro_dev"
@@ -115,6 +117,25 @@ class Settings(BaseSettings):
     # arrêts compris, sans trafic en temps réel (hypothèse à mesurer).
     eta_detour_factor: float = Field(default=1.4, ge=1.0, le=3.0)
     eta_average_speed_kmh: float = Field(default=20.0, gt=0, le=120)
+
+    # Taille maximale du corps d'une requête (octets), toutes routes : 413
+    # au-delà (app/core/body_limit.py). Le plus gros corps légitime est celui
+    # du conseiller IA (10 messages de 1 000 caractères, jusqu'à 12 octets
+    # par caractère une fois échappés en JSON).
+    max_request_body_bytes: int = Field(default=131_072, ge=1024, le=1_048_576)
+
+    # Conseiller IA (docs/MODULE_IA.md). AI_PROVIDER : clé du registre
+    # app/services/conseiller/fournisseurs/__init__.py, vérifiée au
+    # démarrage (create_app). « simule » : aucun appel réseau, en dev comme
+    # en prod. AI_ENABLED=false : 503 conseiller_desactive.
+    ai_enabled: bool = True
+    ai_provider: str = Field(default="simule", min_length=1, max_length=40)
+    # Délai maximal d'un appel au fournisseur (secondes) ; au-delà, repli sur
+    # le fournisseur simulé.
+    ai_timeout_seconds: float = Field(default=10.0, gt=0, le=30)
+    # Appels à un fournisseur PAYANT par jour (UTC), tous utilisateurs ; au-delà,
+    # repli sur le simulé. 0 : aucun appel payant. Sans effet sur le simulé.
+    ai_daily_call_limit: int = Field(default=1000, ge=0, le=1_000_000)
 
     @field_validator("cors_allowed_origins", mode="before")
     @classmethod
