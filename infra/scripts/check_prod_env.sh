@@ -8,6 +8,8 @@
 #     et adresses publiques ;
 #   - infra/postgres/fastapi_readonly.sql : mot de passe du rôle en lecture
 #     seule de FastAPI ;
+#   - infra/scripts/backup.sh : dépôt de sauvegarde hors du serveur, mot de
+#     passe du dépôt ;
 # plus les valeurs de infra/.env.example laissées telles quelles.
 # Affiche toutes les erreurs, puis sort en 1. N'affiche aucune valeur : le
 # nom de la variable et la règle seulement (un secret ne sort jamais).
@@ -136,6 +138,7 @@ REQUIS=(
     PAIEMENT_FOURNISSEUR CINETPAY_API_KEY CINETPAY_API_PASSWORD BACKEND_BASE_URL
     PUBLIC_BASE_URL MEDIA_BASE_URL
     EMAIL_BACKEND EMAIL_HOST EMAIL_HOST_USER EMAIL_HOST_PASSWORD DEFAULT_FROM_EMAIL
+    BACKUP_REPOSITORY BACKUP_PASSWORD BACKUP_S3_ACCESS_KEY_ID BACKUP_S3_SECRET_ACCESS_KEY
 )
 for var in "${REQUIS[@]}"; do
     [ -n "$(nettoyer "${!var:-}")" ] || erreur "$var : absente ou vide."
@@ -261,6 +264,29 @@ if [ -n "${DB_PASSWORD:-}" ]; then
         postgres|change-me-too) erreur "DB_PASSWORD : valeur d'exemple, à remplacer par un mot de passe aléatoire." ;;
         *) [ "${#DB_PASSWORD}" -ge 12 ] || erreur "DB_PASSWORD : 12 caractères au moins." ;;
     esac
+fi
+
+# --- Sauvegardes (infra/scripts/backup.sh, docs/SAUVEGARDES.md) --------------
+# Dépôt restic sur un stockage S3 : un chemin local garderait les
+# sauvegardes sur le disque qu'elles doivent protéger.
+if [ -n "$(nettoyer "${BACKUP_REPOSITORY:-}")" ]; then
+    if [[ "$BACKUP_REPOSITORY" != s3:https://* ]]; then
+        erreur "BACKUP_REPOSITORY : dépôt S3 hors du serveur attendu, de la forme s3:https://<endpoint>/<bucket> (jamais un chemin local)."
+    else
+        analyser_url "${BACKUP_REPOSITORY#s3:}"
+        if [ -z "$URL_HOTE" ] || est_local "$URL_HOTE" || [ -z "${URL_CHEMIN#/}" ] \
+                || [ "$URL_IDENTIFIANTS" = 1 ] || [ -n "$URL_SUITE" ] \
+                || { [ "$URL_A_PORT" = 1 ] && ! port_valide "$URL_PORT"; }; then
+            erreur "BACKUP_REPOSITORY : hôte public et bucket attendus (s3:https://<endpoint>/<bucket>), sans identifiants (@), paramètres (?) ni fragment (#) : les clés vont dans BACKUP_S3_ACCESS_KEY_ID et BACKUP_S3_SECRET_ACCESS_KEY."
+        fi
+    fi
+fi
+if [ -n "$(nettoyer "${BACKUP_PASSWORD:-}")" ] && [ "${#BACKUP_PASSWORD}" -lt 32 ]; then
+    erreur "BACKUP_PASSWORD : 32 caractères au moins (openssl rand -base64 32)."
+fi
+# Facultative ; l'adresse contient l'identifiant secret du contrôle.
+if [ -n "${BACKUP_PING_URL:-}" ] && [[ "$BACKUP_PING_URL" != https://* ]]; then
+    erreur "BACKUP_PING_URL : adresse https:// attendue (elle contient l'identifiant du contrôle de surveillance)."
 fi
 
 # --- Droits de infra/.env (avertissement seulement) -------------------------

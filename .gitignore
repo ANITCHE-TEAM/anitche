@@ -39,3 +39,7 @@ staticfiles/
 
 # Logs
 *.log
+
+# Journal et fichiers locaux des sauvegardes (infra/scripts/backup.sh) :
+# jamais une sauvegarde dans le dépôt
+infra/backups/
