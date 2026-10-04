@@ -20,6 +20,7 @@ Ce dossier centralise la documentation vivante du projet ANITCHE :
 - [`MODULE_NOTIFICATIONS.md`](./MODULE_NOTIFICATIONS.md) — notifications en base, emails asynchrones, préférences, contrat des endpoints `/api/notifications/`.
 - [`MODULE_SUPPORT.md`](./MODULE_SUPPORT.md) — tickets, messages, pièces jointes, file de l'équipe support, contrat des endpoints `/api/support/`.
 - [`GUIDE_FRONTEND.md`](./GUIDE_FRONTEND.md) — brancher le frontend sur l'API : démarrage local, Swagger, JWT, format d'erreur, pagination, 429, comptes de démo (`seed_demo`), Mailpit, types TypeScript, index des « Impact frontend ».
+- [`SAUVEGARDES.md`](./SAUVEGARDES.md) — sauvegardes chiffrées hors serveur de la base et des médias (restic, chaque nuit), surveillance, restauration, exercice mensuel, reprise après sinistre, garde des clés.
 - [`PASSATION_BACKEND_DJANGO.md`](./PASSATION_BACKEND_DJANGO.md) — état du backend Django, conventions transverses, tests, règles à ne pas casser, dette : pour la personne qui reprend ou rejoint le backend.
 - Ajoutez ici le backlog détaillé des 18 epics, les specs fonctionnelles, les maquettes exportées, etc.
 

@@ -91,7 +91,7 @@ Déconnexion : le refresh fourni va en liste noire. Mot de passe oublié confirm
 
 **Où la garder.** Les clés de `FIELD_ENCRYPTION_KEYS` vivent dans un gestionnaire de secrets (ou un coffre équivalent), injectées en variable d'environnement (`infra/.env` → `docker-compose.prod.yml`, services Django, celery-worker, celery-beat). **Jamais** :
 - dans la base, ni au même endroit que la base ;
-- dans les sauvegardes produites par `infra/scripts/backup_db.sh`, ni sur le même support ou le même compte de stockage que ces sauvegardes ;
+- dans les sauvegardes produites par `infra/scripts/backup.sh` ([`SAUVEGARDES.md`](./SAUVEGARDES.md)), ni sur le même support ou le même compte de stockage que ces sauvegardes ;
 - dans le dépôt Git (seule la clé de **dev**, publique, y figure ; `prod.py` refuse de démarrer avec elle, sans clé, ou avec une clé mal formée ; `check_prod_env.sh` exige la variable).
 
 Sinon, une seule fuite (serveur de sauvegarde, dump) livre à la fois les données et la clé : le chiffrement ne protège plus rien.
@@ -107,7 +107,7 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 3. Contrôler : `python manage.py rechiffrer_donnees_sensibles --simulation` (compte sans rien écrire).
 4. Re-chiffrer : `python manage.py rechiffrer_donnees_sensibles`. Le rapport doit indiquer **0 illisible**.
 5. Mettre `FIELD_ENCRYPTION_KEYS=NOUVELLE` et redéployer.
-6. Vérifier qu'un dossier KYC s'affiche correctement, puis révoquer l'ancienne clé dans le gestionnaire de secrets. Les **anciennes sauvegardes** de la base restent chiffrées avec l'ancienne clé : la conserver (archivée, hors ligne) aussi longtemps que ces sauvegardes, ou accepter qu'elles deviennent illisibles.
+6. Vérifier qu'un dossier KYC s'affiche correctement, puis révoquer l'ancienne clé dans le gestionnaire de secrets. Les **anciennes sauvegardes** de la base restent chiffrées avec l'ancienne clé : la conserver (archivée, hors ligne) jusqu'à la date de retrait + 7 mois notée dans le registre des clés ([`SAUVEGARDES.md`](./SAUVEGARDES.md) § 7.2), ou accepter qu'elles deviennent illisibles.
 
 Ne jamais passer à l'étape 5 tant que l'étape 4 signale des valeurs illisibles.
 

@@ -68,7 +68,8 @@ anitche/
 │   ├── docker-compose.yml
 │   ├── docker-compose.prod.yml
 │   ├── nginx/nginx.conf
-│   └── scripts/{deploy.sh, backup_db.sh}
+│   ├── backup/                   # image de sauvegarde (restic + pg_dump)
+│   └── scripts/{deploy.sh, backup.sh, restore.sh}
 │
 ├── .github/workflows/               # Tests automatiques (CI/CD)
 │
@@ -178,7 +179,7 @@ Variables de `infra/.env` (modèle commenté : `infra/.env.example`), transmises
 - **PostgreSQL managé** si possible (Neon, Supabase, Railway) plutôt que self-hosté au début.
 - **Redis** pour Celery + cache.
 - `infra/scripts/deploy.sh` enchaîne contrôle, construction, migrations, rôle FastAPI et redémarrage (étapes ci-dessus).
-- `infra/scripts/backup_db.sh` sauvegarde la base (à brancher sur un cron).
+- `infra/scripts/backup.sh` sauvegarde chaque nuit (cron, 3 h UTC) la base et les médias, chiffrés, sur un stockage S3 hors du serveur ; `infra/scripts/restore.sh` les restaure dans une base et un dossier vides. Mise en place, surveillance, exercice mensuel et garde des clés : [`SAUVEGARDES.md`](./SAUVEGARDES.md).
 
 ## 6. Aide-mémoire — où je mets quoi
 

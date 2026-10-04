@@ -271,9 +271,40 @@ services:
         sleep 12h & wait $${!};
       done"
 
+  # Sauvegarde chiffrée hors serveur de la base et des médias, et
+  # restauration (restic, dépôt S3 ; docs/SAUVEGARDES.md). Profil « backup » :
+  # jamais démarré par « up -d ». Conteneur à usage unique (run --rm) lancé
+  # par infra/scripts/backup.sh (cron, chaque nuit) et
+  # infra/scripts/restore.sh. Reçoit seulement les variables de la base et
+  # de la sauvegarde : ni SECRET_KEY, ni FIELD_ENCRYPTION_KEYS, ni les clés
+  # CinetPay ; aucun autre service ne reçoit les variables BACKUP_*.
+  backup:
+    build:
+      context: ./backup
+    profiles: ["backup"]
+    environment:
+      RESTIC_REPOSITORY: ${BACKUP_REPOSITORY}
+      RESTIC_PASSWORD: ${BACKUP_PASSWORD}
+      AWS_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_ACCESS_KEY}
+      # Vide : aucune région (même effet qu'une variable absente pour restic).
+      AWS_DEFAULT_REGION: ${BACKUP_S3_REGION:-}
+      RESTIC_CACHE_DIR: /cache
+      PGHOST: db
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      PGPASSWORD: ${DB_PASSWORD}
+    volumes:
+      # Lecture seule : la sauvegarde ne modifie jamais les médias.
+      - anitche_media:/sauvegarde/media:ro
+      # Cache de restic (index et métadonnées du dépôt, chiffrés comme
+      # lui) : évite de les retélécharger chaque nuit.
+      - anitche_backup_cache:/cache
+
 volumes:
   anitche_pgdata:
   anitche_media:
   anitche_static:
   certbot_conf:
   certbot_www:
+  anitche_backup_cache:
