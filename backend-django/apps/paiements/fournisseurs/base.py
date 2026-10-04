@@ -29,6 +29,14 @@ class MontantHorsLimites(ErreurFournisseur):
     """Le montant sort des limites acceptées par le fournisseur."""
 
 
+class TransactionIntrouvable(Exception):
+    """Le fournisseur répond, mais refuse de renvoyer l'état de CETTE
+    transaction : inconnue (404) ou référence refusée (400).
+
+    N'hérite pas d'ErreurFournisseur : le fournisseur n'est pas injoignable,
+    la réconciliation passe au paiement suivant au lieu de s'arrêter."""
+
+
 class NotificationInvalide(Exception):
     """Notification non authentique, incomplète ou incohérente."""
 
@@ -119,7 +127,9 @@ class FournisseurPaiement:
             raise NotificationInvalide("Jeton de notification invalide.")
 
     def verifier_transaction(self, paiement, notification=None):
-        """Redemande au fournisseur l'état réel de la transaction → EtatTransaction."""
+        """Redemande au fournisseur l'état réel de la transaction → EtatTransaction.
+        Lève TransactionIntrouvable si le fournisseur ne connaît pas (ou
+        refuse) cette transaction précise."""
         raise NotImplementedError
 
     def rembourser(self, remboursement):

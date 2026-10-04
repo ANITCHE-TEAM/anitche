@@ -526,6 +526,23 @@ def compter_verifications():
                              side_effect=FournisseurSimule.verifier_transaction)
 
 
+def attendre_transactions_bloquees(nombre=1, delai=10):
+    """Depuis la connexion du fil appelant : attend que `nombre` autres
+    connexions à cette base soient bloquées sur un verrou (pg_locks)."""
+    fin = time.monotonic() + delai
+    with connection.cursor() as curseur:
+        while time.monotonic() < fin:
+            curseur.execute("SELECT pg_stat_clear_snapshot()")
+            curseur.execute(
+                "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid "
+                "WHERE NOT l.granted AND a.datname = current_database() AND l.pid <> pg_backend_pid()"
+            )
+            if curseur.fetchone()[0] >= nombre:
+                return True
+            time.sleep(0.02)
+    return False
+
+
 class DonneesReconciliation(Donnees):
     def preparer(self):
         self.creer_donnees()
@@ -662,6 +679,29 @@ class ReconciliationPlanifieeTests(DonneesReconciliation, APITestCase):
         self.paiement.refresh_from_db()
         self.assertIsNone(self.paiement.date_derniere_reconciliation)
 
+    def test_transaction_introuvable_refusee_sans_interrompre(self):
+        """Fournisseur simulé, même règle que CinetPay
+        (ReconciliationReponsesCinetPayTests) : refus pour ce paiement,
+        journalisé et daté ; les suivants sont vérifiés."""
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        (autre,) = self.commander((self.variante2, 1))
+        autre_paiement = self.payer(autre)
+        call_command("simuler_etat_paiement", self.paiement.reference, "introuvable", stdout=StringIO())
+        self.etat_distant("succes", autre_paiement)
+        vieillir_paiement(self.paiement, 20)
+        vieillir_paiement(autre_paiement, 16)
+        with self.assertLogs("securite", "ERROR") as journaux, compter_verifications() as verifier:
+            self.assertEqual(reconcilier_paiements_en_suspens(), (2, 1, False))
+        self.assertEqual(verifier.call_count, 2)
+        self.assertIn(f"Réconciliation de {self.paiement.reference} : transaction refusée par le fournisseur simule",
+                      journaux.output[0])
+        self.assertEqual(self.statuts(), ("en_attente", "creee"))
+        self.assertIsNotNone(self.paiement.date_derniere_reconciliation)
+        self.assertEqual(self.statuts(autre_paiement, autre), ("valide", "confirmee"))
+
     def test_paiement_annule_puis_succes_constate_un_seul_remboursement(self):
         vieillir_commandes(self.commande, minutes=61)
         expirer_commandes_impayees()
@@ -765,23 +805,6 @@ class ReconciliationConcurrenceTests(DonneesReconciliation, TransactionTestCase)
         self.assertEqual(erreurs, [])
         return [resultats[i] for i in range(len(fonctions))]
 
-    @staticmethod
-    def attendre_une_transaction_bloquee(delai=10):
-        """Dans la transaction du fil appelant : attend qu'une autre connexion
-        à cette base soit bloquée sur un verrou (pg_locks)."""
-        fin = time.monotonic() + delai
-        with connection.cursor() as curseur:
-            while time.monotonic() < fin:
-                curseur.execute("SELECT pg_stat_clear_snapshot()")
-                curseur.execute(
-                    "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid "
-                    "WHERE NOT l.granted AND a.datname = current_database() AND l.pid <> pg_backend_pid()"
-                )
-                if curseur.fetchone()[0]:
-                    return True
-                time.sleep(0.02)
-        return False
-
     def verifier_invariant(self):
         """Webhook de succès reçu (argent encaissé) : paiement validé, et
         commande confirmée OU remboursement créé ; stock restitué une fois
@@ -809,7 +832,7 @@ class ReconciliationConcurrenceTests(DonneesReconciliation, TransactionTestCase)
 
         def traiter_apres_annulation(commande):
             commande_verrouillee.set()
-            self.assertTrue(self.attendre_une_transaction_bloquee())  # le webhook attend la commande
+            self.assertTrue(attendre_transactions_bloquees())  # le webhook attend la commande
             return vraie(commande)
 
         with mock.patch.object(services, "traiter_paiements_apres_annulation", side_effect=traiter_apres_annulation):
@@ -835,7 +858,7 @@ class ReconciliationConcurrenceTests(DonneesReconciliation, TransactionTestCase)
 
         def controler_etat(paiement, etat):
             verrous_tenus.set()
-            self.assertTrue(self.attendre_une_transaction_bloquee())  # l'expiration attend la commande
+            self.assertTrue(attendre_transactions_bloquees())  # l'expiration attend la commande
             return vrai_controle(paiement, etat)
 
         with mock.patch.object(services, "_controler_etat", side_effect=controler_etat), \
@@ -847,6 +870,51 @@ class ReconciliationConcurrenceTests(DonneesReconciliation, TransactionTestCase)
             )
         self.assertEqual((webhook, expiration), (200, "0 commande(s) non payée(s) annulée(s)."))
         self.assertEqual(self.verifier_invariant(), "confirmee")
+
+    def test_annulation_par_le_client_pendant_la_validation_du_paiement(self):
+        """L'annulation lit la fiche de livraison (aucune encore), puis son
+        UPDATE attend la commande, que le webhook verrouille pour la
+        confirmer et créer la fiche. Réévalué après le commit du webhook,
+        l'UPDATE annule la commande confirmée (motif client). La fiche créée
+        entre-temps doit être annulée avec elle : sinon elle resterait « en
+        attente » sur une commande annulée, sans action de l'API pour
+        l'annuler."""
+        import apps.livraison.services as services_livraison
+        import apps.paiements.services as services
+
+        vraie_lecture = services_livraison.annuler_livraison_de
+        vrai_controle = services._controler_etat
+        lecture_faite, verrous_tenus = threading.Event(), threading.Event()
+
+        def annuler_livraison_de(commande, **options):
+            livraison = vraie_lecture(commande, **options)
+            if not lecture_faite.is_set():  # la première lecture seulement
+                lecture_faite.set()
+                self.assertTrue(verrous_tenus.wait(10))  # le webhook tient la commande et le paiement
+            return livraison
+
+        def controler_etat(paiement, etat):
+            verrous_tenus.set()
+            self.assertTrue(attendre_transactions_bloquees())  # l'UPDATE de l'annulation attend la commande
+            return vrai_controle(paiement, etat)
+
+        with mock.patch.object(services_livraison, "annuler_livraison_de", side_effect=annuler_livraison_de), \
+                mock.patch.object(services, "_controler_etat", side_effect=controler_etat):
+            annulation, webhook = self.lancer(
+                lambda: self.api(self.client1).post(f"/api/commandes/{self.commande.pk}/annuler/").status_code,
+                lambda: self.notifier_succes(self.paiement).status_code,
+                entre=lambda: self.assertTrue(lecture_faite.wait(10)),
+            )
+        self.assertEqual((annulation, webhook), (200, 200))
+        # Paiement validé, un seul remboursement, stock restitué une fois (50).
+        self.assertEqual(self.verifier_invariant(), "annulee")
+        self.assertEqual((self.commande.motif_annulation, Remboursement.objects.get().motif), ("client", "commande_annulee"))
+        self.assertEqual(Reversement.objects.get(commande=self.commande).statut, Reversement.Statut.ANNULE)
+        livraison = Livraison.objects.get(commande=self.commande)
+        self.assertEqual(livraison.status, Livraison.Status.ANNULEE)
+        ligne = livraison.historique.get()
+        self.assertEqual((ligne.ancien_status, ligne.nouveau_status, ligne.effectue_par),
+                         (Livraison.Status.EN_ATTENTE, Livraison.Status.ANNULEE, self.client1))
 
     def test_reconciliation_et_webhook_simultanes_un_seul_effet(self):
         self.etat_distant("succes")
@@ -1587,14 +1655,21 @@ class ReponseHTTP:
         return self.donnees
 
 
-class CinetPayTests(Donnees, APITestCase):
-    def setUp(self):
-        self.creer_donnees()
-        (self.commande,) = self.commander((self.variante1, 3))
-        self.reglages = self.settings(PAIEMENT_FOURNISSEUR="cinetpay", CINETPAY_API_KEY="sk_test_cle",
-                                      CINETPAY_API_PASSWORD="mdp", CINETPAY_API_URL="")
-        self.reglages.enable()
-        self.addCleanup(self.reglages.disable)
+class ReponseIllisible(ReponseHTTP):
+    """Corps non JSON (page HTML d'un proxy, par exemple)."""
+
+    def json(self):
+        raise ValueError("Expecting value")
+
+
+class ReponsesCinetPay:
+    """CinetPay en sandbox, réponses HTTP simulées : aucun appel au vrai CinetPay."""
+
+    def configurer_cinetpay(self):
+        reglages = self.settings(PAIEMENT_FOURNISSEUR="cinetpay", CINETPAY_API_KEY="sk_test_cle",
+                                 CINETPAY_API_PASSWORD="mdp", CINETPAY_API_URL="")
+        reglages.enable()
+        self.addCleanup(reglages.disable)
         self.appels = []
         self.reponses = {}
 
@@ -1606,14 +1681,27 @@ class CinetPayTests(Donnees, APITestCase):
             return reponse()
         return reponse or ReponseHTTP({"access_token": "jwt"} if chemin == "/v1/oauth/login" else {}, 200)
 
-    def initier_cinetpay(self):
+    def initier_cinetpay(self, commande=None, client=None, transaction_id="CP-TX-1"):
         self.reponses[("POST", "/v1/payment")] = ReponseHTTP({
             "code": 200, "status": "OK", "payment_token": "pt", "notify_token": "jeton-secret",
-            "transaction_id": "CP-TX-1", "merchant_transaction_id": "x", "payment_url": "https://pay.cinetpay.co/p/1",
+            "transaction_id": transaction_id, "merchant_transaction_id": "x",
+            "payment_url": "https://pay.cinetpay.co/p/1",
         })
         with mock.patch("requests.request", side_effect=self.repondre):
-            paiement = self.payer(self.commande, methode="orange_money")
+            paiement = self.payer(commande or self.commande, client=client, methode="orange_money")
         return paiement
+
+    def verifications(self):
+        """Références vérifiées par GET /v1/payment/{référence}, dans l'ordre."""
+        return [url.rsplit("/", 1)[1] for methode, url, _, _ in self.appels
+                if methode == "GET" and "/v1/payment/" in url]
+
+
+class CinetPayTests(ReponsesCinetPay, Donnees, APITestCase):
+    def setUp(self):
+        self.creer_donnees()
+        (self.commande,) = self.commander((self.variante1, 3))
+        self.configurer_cinetpay()
 
     def notification(self, paiement, jeton="jeton-secret", transaction_id="CP-TX-1"):
         return self.api().post(url_webhook("cinetpay"), {
@@ -1696,6 +1784,72 @@ class CinetPayTests(Donnees, APITestCase):
         with mock.patch("requests.request", side_effect=requests.Timeout()):
             self.assertEqual(self.notification(paiement).status_code, 503)
 
+    def test_classement_des_reponses_a_la_verification(self):
+        """Un 400 ou un 404 sur la vérification vise CE paiement
+        (TransactionIntrouvable, qui n'est pas une ErreurFournisseur). Tout
+        le reste est une panne du fournisseur, y compris un 4xx de
+        l'authentification ou d'un transfert."""
+        import requests
+
+        from .fournisseurs.base import TransactionIntrouvable
+
+        paiement = self.initier_cinetpay()
+        adaptateur = FournisseurCinetPay()
+        verification = ("GET", f"/v1/payment/{paiement.reference}")
+
+        def lever(erreur):
+            def reponse():
+                raise erreur
+            return reponse
+
+        cas = {
+            "404": (ReponseHTTP({"code": 404, "status": "TRANSACTION_NOT_FOUND"}, 404), TransactionIntrouvable),
+            "400": (ReponseHTTP({"code": 400, "status": "INVALID_REQUEST"}, 400), TransactionIntrouvable),
+            "500": (ReponseHTTP({"code": 500, "status": "INTERNAL_ERROR"}, 500), ErreurFournisseur),
+            "503": (ReponseHTTP({"code": 503, "status": "SERVICE_UNAVAILABLE"}, 503), ErreurFournisseur),
+            "429": (ReponseHTTP({"code": 429, "status": "TOO_MANY_REQUESTS"}, 429), ErreurFournisseur),
+            "401 hors jeton": (ReponseHTTP({"code": 401, "status": "UNAUTHORIZED"}, 401), ErreurFournisseur),
+            "403": (ReponseHTTP({"code": 403, "status": "FORBIDDEN"}, 403), ErreurFournisseur),
+            "jeton refusé après renouvellement": (ReponseHTTP({"code": 1003, "status": "EXPIRED_TOKEN"}, 401),
+                                                  ErreurFournisseur),
+            "404 illisible": (ReponseIllisible(None, 404), ErreurFournisseur),
+            "200 illisible": (ReponseIllisible(None, 200), ErreurFournisseur),
+            "délai dépassé": (lever(requests.Timeout()), ErreurFournisseur),
+            "connexion": (lever(requests.ConnectionError()), ErreurFournisseur),
+        }
+        with mock.patch("requests.request", side_effect=self.repondre):
+            for libelle, (reponse, attendue) in cas.items():
+                with self.subTest(libelle):
+                    self.reponses[verification] = reponse
+                    with self.assertRaises(attendue) as contexte:
+                        adaptateur.verifier_transaction(paiement)
+                    if attendue is TransactionIntrouvable:
+                        self.assertNotIsInstance(contexte.exception, ErreurFournisseur)
+
+            with self.subTest("4xx de l'authentification"):
+                cache.clear()
+                self.reponses[("POST", "/v1/oauth/login")] = ReponseHTTP({"code": 400, "status": "INVALID_CREDENTIALS"},
+                                                                         400)
+                with self.assertRaises(ErreurFournisseur):
+                    adaptateur.verifier_transaction(paiement)
+                del self.reponses[("POST", "/v1/oauth/login")]
+
+            with self.subTest("404 d'un transfert"):
+                self.reponses[("GET", "/v1/transfer/REV-2026-A")] = ReponseHTTP({"code": 404, "status": "NOT_FOUND"}, 404)
+                with self.assertRaises(ErreurFournisseur):
+                    adaptateur.verifier_transfert(Reversement(reference="REV-2026-A"))
+
+    def test_webhook_transaction_inconnue_toujours_503(self):
+        # Webhook : vérification impossible → 503, CinetPay rejoue la notification.
+        paiement = self.initier_cinetpay()
+        self.reponses[("GET", f"/v1/payment/{paiement.reference}")] = ReponseHTTP(
+            {"code": 404, "status": "TRANSACTION_NOT_FOUND"}, 404)
+        with mock.patch("requests.request", side_effect=self.repondre):
+            self.assertEqual(self.notification(paiement).status_code, 503)
+        self.assertEqual(JournalWebhook.objects.get().statut_traitement, JournalWebhook.StatutTraitement.ERREUR)
+        paiement.refresh_from_db()
+        self.assertEqual(paiement.statut, Paiement.Statut.EN_ATTENTE)
+
     def test_montant_hors_limites(self):
         Commande.objects.filter(pk=self.commande.pk).update(montant_total=Decimal("3000000"))
         self.assertEqual(self.initier(commande_id=str(self.commande.pk)).status_code, 400)
@@ -1711,6 +1865,92 @@ class CinetPayTests(Donnees, APITestCase):
         corps = self.appels[-1][2]
         self.assertEqual((corps["payment_method"], corps["amount"], corps["phone_number"]),
                          ("WAVE_CI", 8400, "+2250707070707"))
+
+
+class ReconciliationReponsesCinetPayTests(ReponsesCinetPay, DonneesReconciliation, TransactionTestCase):
+    """Un 4xx de CinetPay pour UN paiement P1 (transaction inconnue) est un
+    refus pour P1, pas une panne du fournisseur : la réconciliation vérifie
+    ensuite P2, encaissé et placé derrière. Une vraie panne (5xx, délai
+    dépassé) arrête l'exécution. PostgreSQL, vraies transactions ; réponses
+    HTTP simulées."""
+
+    def setUp(self):
+        recreer_bareme_plateforme()
+        recreer_tarifs_initiaux()
+        self.creer_donnees()
+        self.configurer_cinetpay()
+        (premiere,) = self.commander((self.variante1, 1))
+        (seconde,) = self.commander((self.variante2, 1), client=self.client2)
+        # P1 passe toujours en premier : plus petite clé de commande
+        # (expiration, triée par pk) et paiement le plus ancien (tâche).
+        self.c1, self.c2 = sorted((premiere, seconde), key=lambda commande: commande.pk)
+        self.p1 = self.initier_cinetpay(self.c1, self.c1.client, "CP-TX-1")
+        self.p2 = self.initier_cinetpay(self.c2, self.c2.client, "CP-TX-2")
+        vieillir_paiement(self.p1, 20)
+        vieillir_paiement(self.p2, 16)
+        self.repondre_a(self.p1, ReponseHTTP({"code": 404, "status": "TRANSACTION_NOT_FOUND"}, 404))
+        self.repondre_a(self.p2, ReponseHTTP({"code": 100, "status": "SUCCESS", "transaction_id": "CP-TX-2",
+                                              "merchant_transaction_id": self.p2.reference}))
+        self.appels.clear()
+
+    def repondre_a(self, paiement, reponse):
+        self.reponses[("GET", f"/v1/payment/{paiement.reference}")] = reponse
+
+    def reconcilier(self):
+        with mock.patch("requests.request", side_effect=self.repondre):
+            return reconcilier_paiements()
+
+    def expirer(self):
+        from apps.commandes.tasks import expirer_commandes_non_payees
+
+        with mock.patch("requests.request", side_effect=self.repondre):
+            return expirer_commandes_non_payees()
+
+    def test_404_sur_p1_n_empeche_plus_la_tache_de_valider_p2(self):
+        with self.assertLogs("securite", "ERROR") as journaux:
+            self.assertEqual(self.reconcilier(), "2 paiement(s) vérifié(s), 1 statut(s) changé(s).")
+        self.assertEqual(self.verifications(), [self.p1.reference, self.p2.reference])
+        self.assertEqual(self.statuts(self.p2, self.c2), ("valide", "confirmee"))
+        self.assertEqual(self.statuts(self.p1, self.c1), ("en_attente", "creee"))
+        # Daté : P1 passe ensuite après les paiements jamais vérifiés.
+        self.assertIsNotNone(self.p1.date_derniere_reconciliation)
+        self.assertIn(f"Réconciliation de {self.p1.reference} : transaction refusée par le fournisseur cinetpay",
+                      journaux.output[0])
+
+    def test_404_sur_p1_n_empeche_plus_l_expiration_de_valider_p2(self):
+        vieillir_commandes(self.c1, self.c2, minutes=31)
+        with self.assertLogs("securite", "ERROR"):
+            self.assertEqual(self.expirer(), "0 commande(s) non payée(s) annulée(s).")
+        self.assertEqual(self.verifications(), [self.p1.reference, self.p2.reference])
+        self.assertEqual(self.statuts(self.p2, self.c2), ("valide", "confirmee"))
+        # Refus pour P1 : état incertain, expiration repoussée jusqu'à la fin
+        # du délai de grâce, puis faite.
+        self.assertEqual(self.statuts(self.p1, self.c1), ("en_attente", "creee"))
+        vieillir_commandes(self.c1, minutes=61)
+        with self.assertLogs("securite", "ERROR"):
+            self.assertEqual(self.expirer(), "1 commande(s) non payée(s) annulée(s).")
+        self.assertEqual(self.statuts(self.p1, self.c1), ("annule", "annulee"))
+
+    def test_5xx_ou_delai_depasse_arretent_toujours_l_execution(self):
+        import requests
+
+        def delai_depasse():
+            raise requests.Timeout()
+
+        vieillir_commandes(self.c1, self.c2, minutes=31)
+        for libelle, panne in (("503", ReponseHTTP({"code": 503, "status": "SERVICE_UNAVAILABLE"}, 503)),
+                               ("délai dépassé", delai_depasse)):
+            with self.subTest(libelle):
+                self.repondre_a(self.p1, panne)
+                self.appels.clear()
+                self.assertEqual(self.reconcilier(), "0 paiement(s) vérifié(s), 0 statut(s) changé(s). "
+                                                     "Interrompue : fournisseur injoignable.")
+                self.assertEqual(self.expirer(), "0 commande(s) non payée(s) annulée(s).")
+                # Un seul appel par exécution, sur P1 : P2 n'est jamais demandé.
+                self.assertEqual(self.verifications(), [self.p1.reference, self.p1.reference])
+                self.assertEqual(self.statuts(self.p2, self.c2), ("en_attente", "creee"))
+                self.assertEqual(self.statuts(self.p1, self.c1), ("en_attente", "creee"))
+                self.assertIsNone(self.p1.date_derniere_reconciliation)
 
 
 # =====================================================================

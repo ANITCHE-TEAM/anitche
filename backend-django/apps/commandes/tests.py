@@ -388,8 +388,8 @@ import threading
 from datetime import timedelta
 from unittest import mock, skipUnless
 
-from django.db import OperationalError, connection
-from django.db.models import ProtectedError
+from django.db import OperationalError, connection, transaction
+from django.db.models import F, ProtectedError
 from django.test import TransactionTestCase
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
@@ -401,7 +401,7 @@ from apps.livraison.tests import recreer_tarifs_initiaux
 from apps.notifications.models import Notification
 from apps.paiements.models import Paiement
 from apps.paiements.services import valider_paiement
-from apps.paiements.tests import recreer_bareme_plateforme
+from apps.paiements.tests import attendre_transactions_bloquees, recreer_bareme_plateforme
 from .services import expirer_commandes_impayees
 
 URL_VALIDER = "/api/commandes/valider-panier/"
@@ -908,6 +908,72 @@ class ConcurrenceCommandesTests(DonneesCycleDeVie, TransactionTestCase):
         codes = self.en_parallele(self.appel(f"/api/commandes/{commande.pk}/annuler/"))
         self.assertEqual(codes, [200, 409])
         self.assertEqual(self.stock(self.variante1), 10)
+
+    def test_stocks_verrouilles_dans_l_ordre_des_cles_quel_que_soit_le_plan(self):
+        """Sans ORDER BY, les stocks seraient verrouillés dans l'ordre que
+        produit le plan : ordre des clés par un index, ordre physique par une
+        lecture séquentielle. Les plans sont forcés par connexion (SET
+        enable_*), comme deux plans choisis en même temps par le
+        planificateur. Un autre checkout tient Y ; l'annulation (lecture
+        séquentielle) puis le checkout (index) attendent. Verrouillés dans
+        l'ordre des clés, ils passent l'un après l'autre ; dans l'ordre du
+        plan (Y puis X contre X puis Y), ils s'interbloqueraient."""
+        x = self.variante1
+        y = self.variante(self.boutique1, "Produit C", Decimal("1000"))
+        self.assertLess(x.pk, y.pk)
+        self.assertEqual(self.commander((x, 2), (y, 2)).status_code, 201)
+        commande = Commande.objects.get()
+        panier, _ = Panier.objects.get_or_create(utilisateur=self.autre_client)
+        PanierItem.objects.create(panier=panier, variante=x, quantite=1)
+        PanierItem.objects.create(panier=panier, variante=y, quantite=1)
+        # X vient d'être vendu : sa ligne vivante est physiquement après Y.
+        Stock.objects.filter(variante=x).update(quantite_disponible=F("quantite_disponible"))
+        index = ("enable_seqscan", "enable_bitmapscan")
+        sequentiel = ("enable_indexscan", "enable_indexonlyscan", "enable_bitmapscan")
+
+        def ordre(plan):
+            with transaction.atomic(), connection.cursor() as curseur:
+                for reglage in plan:
+                    curseur.execute(f"SET LOCAL {reglage} = off")
+                return [stock.variante_id for stock in Stock.objects.filter(variante_id__in=[x.pk, y.pk])]
+
+        self.assertEqual((ordre(index), ordre(sequentiel)), ([x.pk, y.pk], [y.pk, x.pk]))
+
+        resultats = {}
+
+        def fil(nom, plan, utilisateur, url, corps=None):
+            def executer():
+                try:
+                    with connection.cursor() as curseur:
+                        for reglage in plan:
+                            curseur.execute(f"SET {reglage} = off")  # connexion du fil, fermée ensuite
+                    api = APIClient()
+                    api.force_authenticate(utilisateur)
+                    resultats[nom] = api.post(url, corps or {}, format="json").status_code
+                except Exception as erreur:  # noqa: BLE001 — remontée au test
+                    resultats[nom] = erreur
+                finally:
+                    connection.close()
+            return threading.Thread(target=executer)
+
+        annulation = fil("annulation", sequentiel, self.client_user, f"/api/commandes/{commande.pk}/annuler/")
+        checkout = fil("checkout", index, self.autre_client, URL_VALIDER, {"adresse_livraison": ADRESSE_LIVRAISON})
+        try:
+            with transaction.atomic():
+                # Un autre checkout (ou le vendeur, catalogue) tient le stock de Y.
+                Stock.objects.select_for_update().get(variante=y)
+                annulation.start()
+                self.assertTrue(attendre_transactions_bloquees(1))  # l'annulation attend Y
+                checkout.start()
+                self.assertTrue(attendre_transactions_bloquees(2))  # le checkout attend aussi
+        finally:
+            for thread in (annulation, checkout):
+                if thread.ident is not None:
+                    thread.join(timeout=30)
+        self.assertFalse(annulation.is_alive() or checkout.is_alive(), "Fil bloqué")
+        self.assertEqual(resultats, {"annulation": 200, "checkout": 201})
+        # Annulation : 2 + 2 rendus ; checkout : 1 + 1 pris.
+        self.assertEqual((self.stock(x), self.stock(y)), (9, 9))
 
 
 # =====================================================================

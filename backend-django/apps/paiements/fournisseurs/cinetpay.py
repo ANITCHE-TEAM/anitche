@@ -15,6 +15,8 @@ docs/MODULE_PAIEMENTS.md, « Adaptateur CinetPay ».
   Le statut éventuellement présent dans la notification est IGNORÉ.
 - Vérification : GET /v1/payment/{merchant_transaction_id}, identifiants
   recoupés avec la notification, systématiquement avant toute validation.
+  Un 400 ou un 404 y lève TransactionIntrouvable (cette transaction) ; tout
+  autre échec lève ErreurFournisseur (le service).
 - Transfert : POST /v1/transfer, vérification GET /v1/transfer/{id}.
 - Remboursement : aucune API publiée → traitement manuel (tableau de bord).
 """
@@ -39,6 +41,7 @@ from .base import (
     NotificationInvalide,
     ResultatTransfert,
     SessionPaiement,
+    TransactionIntrouvable,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,6 +50,10 @@ URL_PRODUCTION = "https://api.cinetpay.co"
 URL_SANDBOX = "https://api.cinetpay.net"
 DUREE_JETON_SECONDES = 23 * 3600
 CODES_JETON_EXPIRE = {1002, 1003}
+#: Codes HTTP qui, sur la vérification d'un paiement, visent CETTE
+#: transaction (inconnue, référence refusée) et non le service. Le format
+#: exact de ces réponses reste à confirmer en sandbox.
+HTTP_TRANSACTION_INTROUVABLE = {400, 404}
 LONGUEUR_MAX_URL = 120
 
 PAIEMENT_MIN, PAIEMENT_MAX = 100, 2_500_000
@@ -119,7 +126,10 @@ class FournisseurCinetPay(FournisseurPaiement):
         cache.set(self._cle_cache(), jeton, DUREE_JETON_SECONDES)
         return jeton
 
-    def _appel(self, methode, chemin, corps=None, jeton=None):
+    def _appel(self, methode, chemin, corps=None, jeton=None, transaction_visee=False):
+        """transaction_visee : un 400 ou un 404 concerne la transaction
+        demandée (TransactionIntrouvable) ; sinon, et pour tout autre échec,
+        ErreurFournisseur (fournisseur injoignable ou opération refusée)."""
         entetes = {"Accept": "application/json"}
         if jeton:
             entetes["Authorization"] = f"Bearer {jeton}"
@@ -142,15 +152,22 @@ class FournisseurCinetPay(FournisseurPaiement):
                 raise _JetonExpire()
             # Jamais les identifiants dans les journaux : seul le code métier.
             logger.error("CinetPay %s %s refusé : %s %s", methode, chemin, code, donnees.get("status"))
-            raise ErreurFournisseur(f"CinetPay a refusé l'opération ({donnees.get('status') or code}).")
+            motif = donnees.get("status") or code
+            if transaction_visee and reponse.status_code in HTTP_TRANSACTION_INTROUVABLE:
+                raise TransactionIntrouvable(
+                    f"CinetPay ne renvoie pas cette transaction ({reponse.status_code} {motif})."
+                )
+            raise ErreurFournisseur(f"CinetPay a refusé l'opération ({motif}).")
         return donnees
 
-    def _requete(self, methode, chemin, corps=None):
-        """Appel authentifié, avec un seul renouvellement du jeton."""
+    def _requete(self, methode, chemin, corps=None, transaction_visee=False):
+        """Appel authentifié, avec un seul renouvellement du jeton. Le 4xx
+        d'une authentification n'est jamais « propre à la transaction »."""
         try:
-            return self._appel(methode, chemin, corps, jeton=self._jeton())
+            return self._appel(methode, chemin, corps, jeton=self._jeton(), transaction_visee=transaction_visee)
         except _JetonExpire:
-            return self._appel(methode, chemin, corps, jeton=self._jeton(renouveler=True))
+            return self._appel(methode, chemin, corps, jeton=self._jeton(renouveler=True),
+                               transaction_visee=transaction_visee)
 
     def _url(self, url):
         if len(url) > LONGUEUR_MAX_URL:
@@ -212,8 +229,8 @@ class FournisseurCinetPay(FournisseurPaiement):
     def lire_notification(self, request):
         return self._lire(request, "paiement")
 
-    def _etat_canonique(self, chemin, reference, notification):
-        donnees = self._requete("GET", chemin)
+    def _etat_canonique(self, chemin, reference, notification, transaction_visee=False):
+        donnees = self._requete("GET", chemin, transaction_visee=transaction_visee)
         if str(donnees.get("merchant_transaction_id") or "") != reference:
             raise NotificationInvalide("La transaction CinetPay ne correspond pas à la référence attendue.")
         identifiant = str(donnees.get("transaction_id") or "")
@@ -227,7 +244,8 @@ class FournisseurCinetPay(FournisseurPaiement):
         )
 
     def verifier_transaction(self, paiement, notification=None):
-        return self._etat_canonique(f"/v1/payment/{paiement.reference}", paiement.reference, notification)
+        return self._etat_canonique(f"/v1/payment/{paiement.reference}", paiement.reference, notification,
+                                    transaction_visee=True)
 
     # --- Reversements -------------------------------------------------------
 
@@ -262,5 +280,7 @@ class FournisseurCinetPay(FournisseurPaiement):
         return self._etat_canonique(f"/v1/transfer/{reversement.reference}", reversement.reference, notification)
 
 
-class _JetonExpire(Exception):
-    pass
+class _JetonExpire(ErreurFournisseur):
+    """Jeton refusé : _requete le renouvelle une fois. Refusé de nouveau,
+    c'est une panne du fournisseur, traitée comme toute ErreurFournisseur
+    (réconciliation interrompue, webhook en 503)."""

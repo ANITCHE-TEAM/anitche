@@ -35,6 +35,7 @@ from .fournisseurs.base import (
     SUCCES,
     ErreurFournisseur,
     NotificationInvalide,
+    TransactionIntrouvable,
     hacher_jeton,
 )
 from .models import JournalWebhook, Paiement, Remboursement
@@ -322,7 +323,10 @@ def traiter_notification_paiement(code, request):
 
     try:
         etat = fournisseur.verifier_transaction(paiement, notification)
-    except ErreurFournisseur as erreur:
+    except (ErreurFournisseur, TransactionIntrouvable) as erreur:
+        # Transaction introuvable juste après une notification authentique :
+        # le fournisseur peut ne pas l'exposer encore. 503 pour qu'il rejoue ;
+        # la réconciliation reste le filet de sécurité.
         _journaliser(journal, JournalWebhook.StatutTraitement.ERREUR, str(erreur))
         return ResultatNotification(503, "Vérification auprès du fournisseur impossible, réessayez.")
     except NotificationInvalide as erreur:
@@ -369,10 +373,11 @@ def reconcilier_paiement(paiement, indisponibles=None):
     transitions se font sous verrou et ne s'appliquent qu'une fois.
 
     Renvoie (issue, change) : issue = SUCCES, ECHEC, EN_ATTENTE,
-    INJOIGNABLE ou REFUSE (réponse incohérente, fournisseur inconnu) ;
-    change = le statut du paiement a changé. `indisponibles` (codes
-    fournisseur) évite de rappeler, dans la même exécution, un fournisseur
-    déjà injoignable."""
+    INJOIGNABLE ou REFUSE (réponse incohérente, transaction introuvable,
+    fournisseur inconnu) ; change = le statut du paiement a changé.
+    `indisponibles` (codes fournisseur) évite de rappeler, dans la même
+    exécution, un fournisseur déjà injoignable. Un refus ne concerne que
+    ce paiement : le fournisseur n'y est jamais ajouté."""
     if indisponibles is not None and paiement.fournisseur in indisponibles:
         return INJOIGNABLE, False
     try:
@@ -387,6 +392,14 @@ def reconcilier_paiement(paiement, indisponibles=None):
         if indisponibles is not None:
             indisponibles.add(paiement.fournisseur)
         return INJOIGNABLE, False
+    except TransactionIntrouvable as erreur:
+        # Le fournisseur répond, mais pas pour CE paiement (404, 400) : il
+        # n'est pas en panne, la réconciliation passe au suivant. Daté, ce
+        # paiement passe ensuite après ceux jamais vérifiés.
+        logger_securite.error("Réconciliation de %s : transaction refusée par le fournisseur %s (%s).",
+                              paiement.reference, paiement.fournisseur, erreur)
+        _marquer_reconcilie(paiement)
+        return REFUSE, False
     except NotificationInvalide as erreur:
         logger_securite.error("Réconciliation de %s : réponse incohérente du fournisseur (%s).",
                               paiement.reference, erreur)
@@ -416,9 +429,10 @@ def reconcilier_avant_expiration(commande, delai_de_grace_ecoule, indisponibles=
     Chaque paiement en attente de la commande est d'abord vérifié chez le
     fournisseur : succès → paiement validé, commande confirmée, pas
     d'expiration ; échec → paiement échoué, expiration normale ; en attente,
-    injoignable ou réponse incohérente → expiration repoussée jusqu'à la fin
-    du délai de grâce, puis faite quand même (un succès tardif deviendra un
-    remboursement par reconcilier_paiements_en_suspens)."""
+    injoignable, réponse incohérente ou transaction introuvable →
+    expiration repoussée jusqu'à la fin du délai de grâce, puis faite quand
+    même (un succès tardif deviendra un remboursement par
+    reconcilier_paiements_en_suspens)."""
     incertain = False
     for paiement in commande.paiements_couvrants.filter(statut=Paiement.Statut.EN_ATTENTE):
         issue, _ = reconcilier_paiement(paiement, indisponibles)
@@ -439,7 +453,8 @@ def reconcilier_paiements_en_suspens(maintenant=None):
 
     Au plus PAIEMENT_RECONCILIATION_LOT paiements par exécution, les moins
     récemment vérifiés d'abord ; arrêt dès que le fournisseur est
-    injoignable. Renvoie (vérifiés, changés, interrompu)."""
+    injoignable (un refus pour un seul paiement n'arrête rien). Renvoie
+    (vérifiés, changés, interrompu)."""
     maintenant = maintenant or timezone.now()
     Statut = Paiement.Statut
     en_attente = Q(
