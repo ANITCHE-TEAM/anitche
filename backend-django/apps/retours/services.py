@@ -220,11 +220,13 @@ def peut_agir_pour_la_boutique(utilisateur, demande):
 
 def _reintegrer_stock(demande):
     lignes = list(demande.articles.select_related("commande_item"))
+    # Verrous dans l'ordre des clés, comme le checkout et l'annulation : pas
+    # d'interblocage avec eux, quel que soit le plan choisi par PostgreSQL.
     stocks = {
         stock.variante_id: stock
         for stock in Stock.objects.select_for_update().filter(
             variante_id__in=[ligne.commande_item.variante_id for ligne in lignes]
-        )
+        ).order_by("variante_id")
     }
     for ligne in lignes:
         stock = stocks.get(ligne.commande_item.variante_id)

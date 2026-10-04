@@ -258,6 +258,7 @@ def changer_statut(livraison, nouveau, acteur, commentaire="", code=""):
 
 def annuler_livraison_de(commande, acteur=None, commentaire="Commande annulée."):
     """Appelée par commandes.services.annuler_commande, dans sa transaction.
+    Renvoie la fiche lue, ou None si la commande n'en a pas.
 
     Refuse (TransitionImpossible, donc aucune annulation) une livraison déjà
     partie : seule une livraison en attente ou échouée s'annule."""
@@ -265,7 +266,7 @@ def annuler_livraison_de(commande, acteur=None, commentaire="Commande annulée."
 
     livraison = Livraison.objects.select_for_update().filter(commande=commande).first()
     if livraison is None or livraison.status == Statut.ANNULEE:
-        return
+        return livraison
     if livraison.status not in (Statut.EN_ATTENTE, Statut.ECHOUEE):
         raise TransitionImpossible(
             f"La livraison de la commande {commande.numero_commande} est "
@@ -273,6 +274,7 @@ def annuler_livraison_de(commande, acteur=None, commentaire="Commande annulée."
         )
     _effacer_code(livraison)
     _appliquer(livraison, Statut.ANNULEE, acteur, commentaire, ["code_hash", "code_chiffre"])
+    return livraison
 
 
 def abandonner_livraison(livraison, administrateur, commentaire):

@@ -613,6 +613,38 @@ class AnnulationTests(DonneesLivraison, APITestCase):
         self.assertEqual(self.livraison.status, Statut.ANNULEE)
         self.assertEqual(self.livraison.historique.get().role_acteur, "systeme")
 
+    def test_migration_des_fiches_orphelines(self):
+        """Fiche non terminée d'une commande annulée (créée par une validation
+        de paiement concurrente à l'annulation) : passée « annulée ».
+        Rejouée, la reprise ne fait plus rien ; une fiche livrée, ou celle
+        d'une commande active, n'est jamais touchée."""
+        import importlib
+        from django.apps import apps as registre
+
+        migration = importlib.import_module("apps.livraison.migrations.0006_fiches_orphelines_des_commandes_annulees")
+        Livraison.objects.filter(pk=self.livraison.pk).update(code_hash="empreinte", code_chiffre="chiffre")
+        Commande.objects.filter(pk=self.commande.pk).update(status=Commande.Status.ANNULEE)
+
+        def fiche(statut_commande, statut_fiche):
+            commande = Commande.objects.create(boutique=self.boutique, client=self.client_user, groupe=self.groupe,
+                                               montant_total=Decimal("5000"), status=statut_commande)
+            return Livraison.objects.create(commande=commande, status=statut_fiche, adresse_livraison="Cocody")
+
+        active = fiche(Commande.Status.CONFIRMEE, Statut.EN_ATTENTE)
+        livree = fiche(Commande.Status.ANNULEE, Statut.LIVREE)
+        for _ in range(2):
+            migration.annuler_fiches_orphelines(registre, None)
+        self.livraison.refresh_from_db()
+        self.assertEqual((self.livraison.status, self.livraison.code_hash, self.livraison.code_chiffre),
+                         (Statut.ANNULEE, "", ""))
+        ligne = self.livraison.historique.get()  # une seule ligne malgré deux passages
+        self.assertEqual((ligne.ancien_status, ligne.nouveau_status, ligne.role_acteur, ligne.effectue_par),
+                         (Statut.EN_ATTENTE, Statut.ANNULEE, "systeme", None))
+        for intacte, statut in ((active, Statut.EN_ATTENTE), (livree, Statut.LIVREE)):
+            intacte.refresh_from_db()
+            self.assertEqual(intacte.status, statut)
+            self.assertFalse(intacte.historique.exists())
+
 
 class ContestationTests(DonneesLivraison, APITestCase):
     """B — « non reçu » pendant les 7 jours : reversement suspendu jusqu'à

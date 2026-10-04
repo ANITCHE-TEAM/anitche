@@ -273,17 +273,30 @@ def annuler_commande(commande, motif, acteur=None, commentaire="Commande annulé
         # Livraison d'abord (verrou de la fiche avant la commande, même ordre
         # que les transitions de livraison) : une livraison déjà partie
         # refuse l'annulation, et tout est annulé avec elle.
-        annuler_livraison_de(commande, acteur=acteur, commentaire=commentaire)
+        livraison = annuler_livraison_de(commande, acteur=acteur, commentaire=commentaire)
         _transitionner(commande, Statut.ANNULEE, ANNULATION_POSSIBLE_DEPUIS[motif], motif_annulation=motif)
+        if livraison is None:
+            # Aucune fiche à la première lecture, mais une validation de
+            # paiement concurrente a pu confirmer la commande et en créer une
+            # pendant que l'UPDATE ci-dessus attendait son verrou. Relue une
+            # fois la commande verrouillée par cet UPDATE, elle est annulée
+            # aussi : une commande annulée n'a jamais de fiche active.
+            # Ordre Commande puis Livraison dans ce seul cas : la fiche vient
+            # de naître, sans livreur ; seule une assignation par
+            # l'administration dans la même milliseconde pourrait la
+            # verrouiller (interblocage théorique : un 500, un nouvel essai).
+            annuler_livraison_de(commande, acteur=acteur, commentaire=commentaire)
 
         # Seule la requête qui a effectivement annulé arrive ici : le stock
-        # n'est restitué qu'une fois, sous le même verrou que le checkout.
+        # n'est restitué qu'une fois, sous le même verrou que le checkout, et
+        # dans le même ordre (clés des variantes croissantes : pas
+        # d'interblocage avec un checkout ou un retour, quel que soit le plan).
         articles = list(commande.article.all())
         stocks = {
             stock.variante_id: stock
             for stock in Stock.objects.select_for_update().filter(
                 variante_id__in=[article.variante_id for article in articles]
-            )
+            ).order_by("variante_id")
         }
         for article in articles:
             stock = stocks.get(article.variante_id)

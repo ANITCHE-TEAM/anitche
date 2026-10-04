@@ -6,6 +6,7 @@ trouvera cet état chez le fournisseur simulé et l'appliquera.
 
     python manage.py simuler_etat_paiement PAY-... succes
     python manage.py simuler_etat_paiement PAY-... injoignable
+    python manage.py simuler_etat_paiement PAY-... introuvable
 
 Réservée au fournisseur simulé, lui-même refusé en production.
 """
@@ -13,16 +14,17 @@ Réservée au fournisseur simulé, lui-même refusé en production.
 from django.core.management.base import BaseCommand, CommandError
 
 from apps.paiements.fournisseurs.base import ECHEC, EN_ATTENTE, SUCCES
-from apps.paiements.fournisseurs.simule import INJOIGNABLE, FournisseurSimule, definir_etat_distant
+from apps.paiements.fournisseurs.simule import INJOIGNABLE, INTROUVABLE, FournisseurSimule, definir_etat_distant
 from apps.paiements.models import Paiement
 
 
 class Command(BaseCommand):
-    help = "Fixe l'état d'un paiement chez le fournisseur simulé (webhook perdu, fournisseur injoignable)."
+    help = ("Fixe l'état d'un paiement chez le fournisseur simulé (webhook perdu, fournisseur injoignable, "
+            "transaction introuvable).")
 
     def add_arguments(self, parser):
         parser.add_argument("reference", help="Référence du paiement (PAY-...).")
-        parser.add_argument("statut", choices=[SUCCES, ECHEC, EN_ATTENTE, INJOIGNABLE])
+        parser.add_argument("statut", choices=[SUCCES, ECHEC, EN_ATTENTE, INJOIGNABLE, INTROUVABLE])
         parser.add_argument("--montant", type=int, help="Montant confirmé (défaut : celui du paiement).")
         parser.add_argument("--devise", default="XOF")
 

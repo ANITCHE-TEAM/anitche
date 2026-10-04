@@ -121,10 +121,15 @@ class ValiderPanierView(APIView):
             # 2. Verrouille les lignes de stock concernées pour toute la durée
             # de la transaction : aucune autre commande ne peut décrémenter
             # ces mêmes variantes tant que celle-ci n'est pas terminée.
+            # order_by : verrous pris dans l'ordre des clés, quel que soit le
+            # plan. Sans lui, une lecture séquentielle verrouille dans l'ordre
+            # physique des lignes, qui change à chaque vente, et peut
+            # s'interbloquer avec une annulation ou un retour.
             items = [item for lot in checkout.lots for item in lot.items]
             stocks_verrouilles = {
                 s.variante_id: s
-                for s in Stock.objects.select_for_update().filter(variante_id__in=[item.variante_id for item in items])
+                for s in Stock.objects.select_for_update()
+                .filter(variante_id__in=[item.variante_id for item in items]).order_by("variante_id")
             }
 
             for item in items:
