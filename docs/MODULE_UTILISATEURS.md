@@ -44,7 +44,7 @@ Le module dépend de `apps/core` (validateurs de fichiers, `CheminUploadUUID`, `
 | POST | `renvoyer-code-inscription/` | IsAuthenticated | `otp_envoi` | **Nouveau.** Envoie un nouveau code de vérification de l'email. 400 si l'email est déjà vérifié. **200** |
 | POST | `verification-otp/` | IsAuthenticated | `otp_verification` | `code`, `type_usage`. Vérifie le dernier OTP non utilisé de ce type et applique l'effet (§ 5) |
 | GET / PUT / PATCH | `profil/` | IsAuthenticated | `user` | Seuls `nom` et `prenom` sont modifiables |
-| GET | `jeton/verification/` | IsAuthenticated | `service_fastapi` | **Route interne, réservée au service FastAPI** : `{id, role}` uniquement. Hors schéma OpenAPI, à bloquer publiquement dans nginx (§ 3 bis) |
+| GET | `jeton/verification/` | IsAuthenticated | `service_fastapi` | **Route interne, réservée au service FastAPI** : `{id, role}` uniquement. Hors schéma OpenAPI, bloquée publiquement par nginx (404, § 3 bis) |
 | POST | `changement-contact/` | IsAuthenticated + **email vérifié** | `otp_envoi` | `nouvel_email` **ou** `nouveau_telephone`. Refus si la valeur appartient déjà à un autre compte |
 | POST | `mot-de-passe-oublie/` | AllowAny | `otp_envoi` | `email`. Réponse identique que le compte existe ou non |
 | POST | `mot-de-passe-oublie/confirmer/` | AllowAny | `otp_verification` | `email`, `code`, `nouveau_password`. Erreur unique « Code invalide ou expiré. » ; succès : mot de passe changé, **tous les refresh tokens révoqués** |
@@ -72,7 +72,7 @@ FastAPI ne valide pas lui-même les JWT : il transmet le jeton du client à `GET
 - Distincte de `profil/`, qui reste inchangé (son `id` fait partie du contrat public). On ne peut pas distinguer, sur `profil/`, un appel de FastAPI d'un appel du client.
 - **Hors schéma OpenAPI** (`@extend_schema(exclude=True)`) : aucun chemin dans `schema.yaml`. Pour la même raison, la note sur FastAPI de `ProfilSerializer` est un commentaire et non un docstring (drf-spectacular exporte les docstrings des serializers dans le schéma).
 - **Production** : FastAPI appelle Django directement sur le réseau Docker, en HTTP (`http://backend-django:8000`), sans nginx. D'où `SECURE_REDIRECT_EXEMPT` dans `prod.py` (cette seule route échappe à la redirection HTTPS) et `backend-django` dans `ALLOWED_HOSTS` (`infra/.env`, sinon 400 DisallowedHost). En dev, l'hôte à utiliser est `http://anitche-backend:8000`, déjà dans `ALLOWED_HOSTS` de `dev.py` (URL à configurer côté FastAPI, module 0).
-- **Point ouvert (étape hébergement)** : bloquer la route publiquement dans nginx (`location = /api/utilisateurs/jeton/verification/ { return 404; }`). Tant que ce n'est pas fait, elle reste joignable depuis Internet ; le risque est faible (un jeton valide est exigé et la réponse ne contient que l'id et le rôle de son propre titulaire), mais la route n'est pas destinée au frontend.
+- **Bloquée publiquement** : nginx répond 404 sur `/api/utilisateurs/jeton/verification` (et tout ce qui commence ainsi, `location ^~` de `infra/nginx/nginx.conf`) sans transmettre la requête à Django. nginx compare l'URI normalisée : les variantes `//`, `./`, `../` ou encodées en `%XX` sont bloquées aussi. L'appel direct de FastAPI sur le réseau Docker ne passe pas par nginx et n'est pas concerné.
 
 ## 4. JWT et chiffrement
 
@@ -215,7 +215,6 @@ Aucun autre champ de réponse ne change (le profil, les jetons et le dépôt KYC
 
 - **Fournisseur SMS** absent : conditionne `telephone_verifie` (§ 10).
 - `GOOGLE_OAUTH_CLIENT_ID` vide par défaut : la connexion Google refuse tout jeton tant qu'il n'est pas configuré.
-- **Route interne `jeton/verification/` pas encore bloquée dans nginx** (point ouvert, à faire à l'étape hébergement, § 3 bis).
 - **Niveau 2 — comptes jamais vérifiés** : aucune purge. Une tâche Celery planifiée (même modèle que `nettoyer_otp_expires`) devra supprimer les comptes dont l'email n'a jamais été vérifié après N jours (N à fixer en équipe), pour éviter les comptes fantômes (adresses mal saisies, inscriptions abandonnées, comptes créés avec l'email d'un tiers). À cadrer avant de l'écrire : exclure tout compte lié à des données (commande, dossier KYC, boutique, ticket) et prévenir le titulaire avant suppression.
 
 ## 13. Tests

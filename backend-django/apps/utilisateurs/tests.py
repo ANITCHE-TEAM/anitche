@@ -2251,7 +2251,7 @@ class VerificationJetonProductionTests(TestCase):
             'FIELD_ENCRYPTION_KEYS': Fernet.generate_key().decode(),
             'ALLOWED_HOSTS': 'anitche.com,backend-django',
             'CORS_ALLOWED_ORIGINS': 'https://anitche.com',
-            'BACKEND_BASE_URL': 'https://api.anitche.com',
+            'BACKEND_BASE_URL': 'https://anitche.com',
             'PAIEMENT_FOURNISSEUR': 'cinetpay',
             'CINETPAY_API_KEY': 'sk_live_cle',
             'CINETPAY_API_PASSWORD': 'mdp',

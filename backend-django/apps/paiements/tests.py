@@ -1740,7 +1740,17 @@ class ConfigurationProductionTests(APITestCase):
         )
 
     def test_configuration_valide(self):
-        self.assertEqual(self.importer_prod().returncode, 0, self.importer_prod().stderr[-500:])
+        cas = {
+            "défaut": {},
+            # Configuration de infra/.env.example : même domaine que le site.
+            "même domaine": {"ALLOWED_HOSTS": "anitche.com,www.anitche.com,backend-django",
+                             "BACKEND_BASE_URL": "https://anitche.com"},
+            "sous-domaines": {"ALLOWED_HOSTS": ".anitche.com"},
+        }
+        for libelle, variables in cas.items():
+            with self.subTest(libelle):
+                resultat = self.importer_prod(**variables)
+                self.assertEqual(resultat.returncode, 0, resultat.stderr[-500:])
 
     def test_refus(self):
         cas = {
@@ -1754,6 +1764,22 @@ class ConfigurationProductionTests(APITestCase):
                 resultat = self.importer_prod(**variables)
                 self.assertNotEqual(resultat.returncode, 0)
                 self.assertIn("ImproperlyConfigured", resultat.stderr)
+
+    def test_refus_url_de_notification_injoignable(self):
+        cas = {
+            # Notification CinetPay rejetée par Django (400 DisallowedHost).
+            "hôte hors ALLOWED_HOSTS": ({"BACKEND_BASE_URL": "https://anitche.com"}, "doit figurer dans ALLOWED_HOSTS"),
+            # « /x/api/... » part vers le frontend ; « //api/... » dépend de la
+            # fusion des « / » par nginx.
+            "« / » final": ({"BACKEND_BASE_URL": "https://api.anitche.com/"}, "sans chemin"),
+            "chemin": ({"BACKEND_BASE_URL": "https://api.anitche.com/backend"}, "sans chemin"),
+        }
+        for libelle, (variables, message) in cas.items():
+            with self.subTest(libelle):
+                resultat = self.importer_prod(**variables)
+                self.assertNotEqual(resultat.returncode, 0)
+                self.assertIn("ImproperlyConfigured", resultat.stderr)
+                self.assertIn(message, resultat.stderr)
 
 
 # =====================================================================

@@ -142,7 +142,7 @@ Pour que les Runs Postman répétés (connexions, codes OTP, inscriptions, paiem
 docker compose -f infra/docker-compose.prod.yml --env-file infra/.env up -d --build
 ```
 
-- **Nginx** en reverse proxy devant tout : sert le build React statique (`/`), route `/api/` vers Django et `/fast/` vers FastAPI.
+- **Nginx** en reverse proxy devant tout, sur un seul domaine (`https://anitche.com`) : `/` vers le build React statique, `/api/` et `/admin/` vers Django avec le chemin complet (sauf la route interne `/api/utilisateurs/jeton/verification`, 404), `/fast/` vers FastAPI sans le préfixe `/fast` (WebSocket compris). Il sert lui-même `/static/` (volume `anitche_static`, rempli par `collectstatic`) et les seuls médias publics sous `/media/` (images des produits et catégories, logos et bannières ; volume `anitche_media` en lecture seule) ; tout autre chemin sous `/media/` répond 404. Détail et liste des dossiers : en-tête de `infra/nginx/nginx.conf`.
 - **Gunicorn** pour Django, **Uvicorn** pour FastAPI, chacun dans son conteneur.
 - **PostgreSQL managé** si possible (Neon, Supabase, Railway) plutôt que self-hosté au début.
 - **Redis** pour Celery + cache.

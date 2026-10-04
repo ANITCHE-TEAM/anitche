@@ -254,10 +254,11 @@ Rien d'autre ne change : commandes, remboursements, reversements et frais ignore
 | `PAIEMENT_FOURNISSEUR` | `cinetpay` en production (`simule` interdit) |
 | `CINETPAY_API_KEY` | Clé du compte marchand Côte d'Ivoire (`sk_live_…` en production, `sk_test_…` interdite) |
 | `CINETPAY_API_PASSWORD` | Mot de passe API associé |
-| `BACKEND_BASE_URL` | Adresse HTTPS publique de l'API (URL de notification) |
+| `BACKEND_BASE_URL` | Origine HTTPS publique de Django, sans chemin ni « / » final : `https://anitche.com` en production (URL de notification) |
 | `CINETPAY_API_URL`, `CINETPAY_TIMEOUT` | Facultatifs (URL déduite de la clé ; 10 s) |
 
-- **Jamais dans le code ni dans le dépôt.** Transmises comme `FIELD_ENCRYPTION_KEYS` : `infra/.env` (hors dépôt) → `docker-compose.prod.yml` (Django, worker et beat Celery) ; `infra/scripts/check_prod_env.sh` bloque le déploiement si elles manquent, si le fournisseur est `simule`, si la clé est de sandbox ou si `BACKEND_BASE_URL` n'est pas en HTTPS ; `prod.py` refuse de démarrer dans les mêmes cas.
+- **Jamais dans le code ni dans le dépôt.** Transmises comme `FIELD_ENCRYPTION_KEYS` : `infra/.env` (hors dépôt) → `docker-compose.prod.yml` (Django, worker et beat Celery) ; `infra/scripts/check_prod_env.sh` bloque le déploiement si elles manquent, si le fournisseur est `simule`, si la clé est de sandbox ou si `BACKEND_BASE_URL` n'est pas en HTTPS ; `prod.py` refuse de démarrer dans les mêmes cas, et aussi si l'hôte de `BACKEND_BASE_URL` n'est pas dans `ALLOWED_HOSTS` (Django rejetterait chaque notification en 400) ou si elle contient un chemin.
+- **URL de notification en production** : `https://anitche.com/api/paiements/webhook/cinetpay/` (paiement) et `https://anitche.com/api/paiements/webhook/cinetpay/transfert/` (transfert). Même domaine et même certificat que le site : nginx (`location /api/` de `infra/nginx/nginx.conf`) transmet le chemin complet à Django, qui l'adresse à `WebhookPaiementView` ou `WebhookTransfertView`. Aucun sous-domaine `api.`.
 - Jamais journalisées (seuls les codes d'erreur CinetPay le sont) ; le jeton Bearer vit dans le cache Redis (clé dérivée d'une empreinte de la clé API).
 - **Rotation** : générer un nouveau couple dans le tableau de bord CinetPay, mettre à jour `infra/.env`, redémarrer Django et Celery ; le jeton en cache expire seul (ou vider la clé `cinetpay:jeton:*`).
 - En dev : laisser `PAIEMENT_FOURNISSEUR` vide (simulé). Pour essayer la sandbox : `PAIEMENT_FOURNISSEUR=cinetpay`, clé `sk_test_…`, et un `BACKEND_BASE_URL` joignable par CinetPay (tunnel).

@@ -13,9 +13,10 @@ Le backend du projet **ANITCHE** repose sur une architecture moderne, conteneuri
 
 ```mermaid
 graph TD
-    Client[Frontend React / Mobile] -->|Reverse Proxy / Port 80| NGINX[Nginx Proxy]
-    NGINX -->|/api/* & /admin/*| Django[Backend Django :8000]
-    NGINX -->|/fastapi/* /ia /qr /livraison| FastAPI[Backend FastAPI :8001]
+    Client[Frontend React / Mobile] -->|HTTPS / Port 443| NGINX[Nginx Proxy]
+    NGINX -->|/api/* & /admin/*, chemin complet| Django[Backend Django :8000]
+    NGINX -->|/fast/* sans le préfixe /fast| FastAPI[Backend FastAPI :8001]
+    NGINX -->|/static/* et médias publics /media/*| Volumes[(Volumes anitche_static, anitche_media)]
     
     Django --> Postgres[(PostgreSQL 16)]
     Django --> Redis[(Redis 7 - Broker & Cache)]

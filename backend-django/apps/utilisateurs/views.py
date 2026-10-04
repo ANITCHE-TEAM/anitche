@@ -179,8 +179,9 @@ class VerificationJetonServiceView(APIView):
       (sinon le suivi GPS épuiserait les 300/h de l'utilisateur) ;
     - minimisation : FastAPI ne reçoit que l'id et le rôle.
 
-    Exclue du schéma OpenAPI (route interne). En production, nginx doit la
-    bloquer publiquement ; FastAPI l'appelle directement sur le réseau
+    Exclue du schéma OpenAPI (route interne). En production, nginx répond
+    404 sur ce chemin depuis Internet sans le transmettre à Django
+    (infra/nginx/nginx.conf) ; FastAPI l'appelle directement sur le réseau
     Docker, en HTTP (SECURE_REDIRECT_EXEMPT dans prod.py).
     """
 
