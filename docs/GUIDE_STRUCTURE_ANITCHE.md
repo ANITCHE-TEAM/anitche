@@ -139,14 +139,45 @@ Pour que les Runs Postman répétés (connexions, codes OTP, inscriptions, paiem
 ## 5. Déploiement en production
 
 ```bash
-docker compose -f infra/docker-compose.prod.yml --env-file infra/.env up -d --build
+./infra/scripts/deploy.sh
 ```
+
+Toujours passer par `deploy.sh`, jamais par un `docker compose … up -d --build` direct : seul le script contrôle `infra/.env` et recrée le rôle PostgreSQL de FastAPI après les migrations. Étapes, arrêt à la première erreur :
+
+1. `git pull origin main` ;
+2. `infra/scripts/check_prod_env.sh` : refuse tout ce que refuseraient au démarrage `config/settings/prod.py` (Django et Celery) et les réglages de production de FastAPI (origines CORS, `FRONTEND_BASE_URL`, `PUBLIC_BASE_URL`, `MEDIA_BASE_URL`), plus un `FASTAPI_DB_PASSWORD` de moins de 12 caractères ou pas seulement alphanumérique, et un `DB_PASSWORD` d'exemple ou de moins de 12 caractères. Il affiche toutes les erreurs (noms des variables, jamais leurs valeurs) puis sort en 1, et avertit si `infra/.env` n'a pas les droits 600 ;
+3. construction des images (`docker compose build`) ;
+4. démarrage de `db` et `redis` seuls, jusqu'à ce qu'ils soient prêts (`up -d --wait db redis`) ;
+5. migrations dans un conteneur ponctuel (`docker compose run --rm backend-django python manage.py migrate`) ;
+6. `infra/scripts/create_fastapi_readonly_role.sh` (avec `COMPOSE_FILE=infra/docker-compose.prod.yml`) : crée ou met à jour le rôle `anitche_fastapi_ro`, son mot de passe (`FASTAPI_DB_PASSWORD`) et ses droits. À chaque déploiement, car ses `GRANT` portent sur des tables et des vues créées par les migrations : une migration qui recrée une vue lui retire ses droits ;
+7. `up -d` de toute la pile, puis statut. `backend-django` relance `migrate` à son démarrage, sans effet après l'étape 5.
+
+### Emails en production
+
+Variables de `infra/.env` (modèle commenté : `infra/.env.example`), transmises à `backend-django`, `celery-worker` et `celery-beat` :
+
+| Variable | Valeur | Refusé au démarrage |
+|---|---|---|
+| `EMAIL_BACKEND` | `django.core.mail.backends.smtp.EmailBackend` | tout autre backend (console, locmem, dummy, filebased) |
+| `EMAIL_HOST` | serveur SMTP du fournisseur | vide ou absent (aucune valeur par défaut en production) |
+| `EMAIL_PORT` | 587 (par défaut) ou 465 | |
+| `EMAIL_USE_TLS`, `EMAIL_USE_SSL` | `True`, `False` (par défaut : STARTTLS sur 587) ; `False`, `True` pour 465 | les deux à `True`, ou les deux à `False` (identifiants SMTP en clair) |
+| `EMAIL_TIMEOUT` | 10 secondes par défaut | hors de 1 à 60 |
+| `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD` | identifiant et clé SMTP du compte (secrets) | vides ou absents |
+| `DEFAULT_FROM_EMAIL` | `"ANITCHE <no-reply@anitche.com>"`, entre guillemets dans `infra/.env` | adresse hors `@anitche.com` |
+
+- `prod.py` applique ces refus au démarrage de Django et de Celery ; `check_prod_env.sh` les applique avant le déploiement. `SERVER_EMAIL` (emails d'erreur de Django) reprend `DEFAULT_FROM_EMAIL`.
+- Avant le premier envoi, publier pour `anitche.com` les enregistrements SPF, DKIM et DMARC demandés par le fournisseur : sans eux, les codes OTP arrivent en spam ou sont refusés.
+- Codes OTP : 3 essais au plus sur erreur SMTP ou réseau, sans que le code apparaisse dans les journaux ([`MODULE_UTILISATEURS.md`](./MODULE_UTILISATEURS.md) § 5).
+- Preuve attendue avant l'ouverture : un code OTP réellement reçu sur une vraie boîte.
+
+### Composants
 
 - **Nginx** en reverse proxy devant tout, sur un seul domaine (`https://anitche.com`) : `/` vers le build React statique, `/api/` et `/admin/` vers Django avec le chemin complet (sauf la route interne `/api/utilisateurs/jeton/verification`, 404), `/fast/` vers FastAPI sans le préfixe `/fast` (WebSocket compris). Il sert lui-même `/static/` (volume `anitche_static`, rempli par `collectstatic`) et les seuls médias publics sous `/media/` (images des produits et catégories, logos et bannières ; volume `anitche_media` en lecture seule) ; tout autre chemin sous `/media/` répond 404. Détail et liste des dossiers : en-tête de `infra/nginx/nginx.conf`.
 - **Gunicorn** pour Django, **Uvicorn** pour FastAPI, chacun dans son conteneur.
 - **PostgreSQL managé** si possible (Neon, Supabase, Railway) plutôt que self-hosté au début.
 - **Redis** pour Celery + cache.
-- `infra/scripts/deploy.sh` automatise pull + rebuild + redémarrage.
+- `infra/scripts/deploy.sh` enchaîne contrôle, construction, migrations, rôle FastAPI et redémarrage (étapes ci-dessus).
 - `infra/scripts/backup_db.sh` sauvegarde la base (à brancher sur un cron).
 
 ## 6. Aide-mémoire — où je mets quoi

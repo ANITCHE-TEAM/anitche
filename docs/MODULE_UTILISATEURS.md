@@ -129,6 +129,7 @@ Ne jamais passer à l'étape 5 tant que l'étape 4 signale des valeurs illisible
 | `changement_telephone` | l'email **actuel** du compte (aucun fournisseur SMS) | `telephone` remplacé, **`telephone_verifie = false`** (§ 10) |
 | `mdp_oublie` | l'email du compte | Géré par `mot-de-passe-oublie/confirmer/` |
 
+- **Envoi** : tâche Celery `envoyer_code_otp_email`. Sur erreur SMTP ou réseau (dont le délai `EMAIL_TIMEOUT`), 3 essais au plus à délai croissant (10 puis 20 secondes au plus), puis abandon : l'utilisateur redemande un code. Le code ne figure ni dans les journaux ni dans la représentation des arguments publiée par Celery (`argsrepr`, `kwargsrepr` : journaux du worker, événements, `celery inspect`) ; il ne circule que dans le message de la tâche (Redis, réseau Docker interne) et dans l'email.
 - **Purge** : `nettoyer_otp_expires` (3 h 00) supprime les OTP expirés depuis plus de 24 heures.
 - **Notification de connexion** : après chaque connexion réussie (mot de passe ou Google), email au titulaire avec l'**IP réelle** du client (`adresse_ip_client()`, `apps/core/reseau.py`, qui ne lit `X-Forwarded-For` que derrière le proxy de confiance) et le user-agent. Jamais sur un échec.
 
