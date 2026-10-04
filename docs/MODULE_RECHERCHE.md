@@ -222,7 +222,7 @@ Commandes locales : [`MODULE_SUIVI_GPS.md`](./MODULE_SUIVI_GPS.md) § 11 (même 
 
 ## 14. Hors périmètre et suites
 
-- **Médias en prod** : aucune `location /media/` dans `infra/nginx/nginx.conf` ; l'hébergement des images (et donc `MEDIA_BASE_URL`) est à confirmer à l'étape hébergement.
+- **Médias en prod** : `infra/nginx/nginx.conf` sert les médias publics sous `/media/` (`catalogue/produits/`, `catalogue/categories/`, `boutiques/logos/`, `boutiques/bannieres/`) et répond 404 pour le reste ; `MEDIA_BASE_URL` vaut donc `https://<domaine>/media/`. Les URL d'images de la recherche viennent toutes de `ImageProduit.image` (`catalogue/produits/%Y/%m/`), donc d'un dossier public.
 - `infra/scripts/check_prod_env.sh` ne liste pas encore `PUBLIC_BASE_URL` ni `MEDIA_BASE_URL` (le service refuse déjà de démarrer sans elles).
 - Produit rangé dans une catégorie inactive : visible (règle Django actuelle, dette [`MODULE_CATALOGUE.md`](./MODULE_CATALOGUE.md) § 9) ; la vue et le test de parité suivront la décision Django.
 - JIT de PostgreSQL (actif par défaut) : peut ajouter du temps de compilation sur les grosses requêtes (facettes du catalogue entier) ; à mesurer pendant la phase de performance avant de le couper.
