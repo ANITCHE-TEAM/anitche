@@ -1910,6 +1910,83 @@ class MessageOTPDureeTests(TestCase):
         self.assertIn('Ce code expire dans 3 minutes.', mail.outbox[-1].body)
 
 
+import logging
+import smtplib
+from unittest.mock import DEFAULT
+
+from celery.exceptions import Retry
+from django.core.mail import send_mail
+
+from .tasks import ARGUMENTS_MASQUES, envoyer_code_otp_email
+
+
+class EnvoiCodeOTPEmailTests(TestCase):
+    """Tâche d'envoi du code OTP : nouvel essai sur erreur SMTP ou réseau, code
+    absent des journaux et de la représentation des messages publiés.
+
+    Les essais tournent en mode eager sans propagation des exceptions, comme
+    dans un worker : test.py propage toute exception, y compris le Retry qui
+    déclenche le nouvel essai."""
+
+    CODE = '482913'
+    ARGUMENTS = ('otp-envoi@anitche.ci', CODE, 'inscription')
+
+    def lignes_journalisees(self, records):
+        # Message et trace d'exception, tels qu'un handler les écrirait.
+        formateur = logging.Formatter('%(levelname)s %(name)s %(message)s')
+        return [formateur.format(record) for record in records]
+
+    @override_settings(CELERY_TASK_EAGER_PROPAGATES=False)
+    def test_erreur_smtp_puis_nouvel_essai_reussi(self):
+        with patch('apps.utilisateurs.tasks.send_mail', wraps=send_mail,
+                   side_effect=[smtplib.SMTPServerDisconnected('connexion perdue'), DEFAULT]) as envoi, \
+                self.assertLogs(level='DEBUG') as journal:
+            resultat = envoyer_code_otp_email.delay(*self.ARGUMENTS)
+        self.assertEqual(resultat.state, 'SUCCESS')
+        self.assertEqual(envoi.call_count, 2)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn(self.CODE, mail.outbox[0].body)
+        lignes = self.lignes_journalisees(journal.records)
+        self.assertTrue([ligne for ligne in lignes if 'retry' in ligne], lignes)
+        self.assertEqual([ligne for ligne in lignes if self.CODE in ligne], [])
+
+    @override_settings(CELERY_TASK_EAGER_PROPAGATES=False)
+    def test_abandon_apres_trois_essais(self):
+        with patch('apps.utilisateurs.tasks.send_mail', side_effect=TimeoutError('délai dépassé')) as envoi, \
+                self.assertLogs(level='DEBUG') as journal:
+            resultat = envoyer_code_otp_email.delay(*self.ARGUMENTS)
+        self.assertEqual(resultat.state, 'FAILURE')
+        self.assertIsInstance(resultat.result, TimeoutError)
+        self.assertEqual(envoi.call_count, 3)
+        self.assertEqual(mail.outbox, [])
+        lignes = self.lignes_journalisees(journal.records)
+        self.assertTrue([ligne for ligne in lignes if 'TimeoutError' in ligne], lignes)
+        self.assertEqual([ligne for ligne in lignes if self.CODE in ligne], [])
+
+    @override_settings(CELERY_TASK_ALWAYS_EAGER=False)
+    def test_code_absent_de_la_representation_publiee(self):
+        """Hors mode eager : premier envoi et nouvel essai décidé par un worker.
+        Le worker reçoit le code ; argsrepr et kwargsrepr (journaux du worker,
+        événements, celery inspect) ne le contiennent pas."""
+        with patch.object(envoyer_code_otp_email.app, 'send_task') as publication:
+            envoyer_code_otp_email.delay(*self.ARGUMENTS)
+            envoyer_code_otp_email.push_request(
+                id='tache-otp', args=list(self.ARGUMENTS), kwargs={}, retries=0,
+                called_directly=False, is_eager=False, delivery_info={},
+            )
+            try:
+                with self.assertRaises(Retry):
+                    envoyer_code_otp_email.retry(exc=smtplib.SMTPServerDisconnected('connexion perdue'), countdown=1)
+            finally:
+                envoyer_code_otp_email.pop_request()
+        self.assertEqual(publication.call_count, 2)
+        for appel in publication.call_args_list:
+            with self.subTest(essai=appel.kwargs.get('retries', 0)):
+                self.assertEqual(list(appel.args[1]), list(self.ARGUMENTS))
+                self.assertEqual(appel.kwargs.get('argsrepr'), ARGUMENTS_MASQUES)
+                self.assertEqual(appel.kwargs.get('kwargsrepr'), ARGUMENTS_MASQUES)
+
+
 class DocumentKYCAbsentDuStockageTests(TestCase):
     def test_piece_perdue_404_et_non_500(self):
         utilisateur = Utilisateur.objects.create_user(email='kyc-perdu@anitche.ci', password='x', nom='K', prenom='P')
@@ -2255,6 +2332,11 @@ class VerificationJetonProductionTests(TestCase):
             'PAIEMENT_FOURNISSEUR': 'cinetpay',
             'CINETPAY_API_KEY': 'sk_live_cle',
             'CINETPAY_API_PASSWORD': 'mdp',
+            'EMAIL_BACKEND': 'django.core.mail.backends.smtp.EmailBackend',
+            'EMAIL_HOST': 'smtp.exemple.test',
+            'EMAIL_HOST_USER': 'identifiant-factice',
+            'EMAIL_HOST_PASSWORD': 'mot-de-passe-factice',
+            'DEFAULT_FROM_EMAIL': 'ANITCHE <no-reply@anitche.com>',
         }
         # Sans jeton : aucune requête en base, la vue répond 401 si elle est
         # atteinte. Une redirection répondrait 301 avant même la vue.

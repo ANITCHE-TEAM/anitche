@@ -198,6 +198,11 @@ class DocumentationInteractiveTests(TestCase):
             "PAIEMENT_FOURNISSEUR": "cinetpay",
             "CINETPAY_API_KEY": "sk_live_cle",
             "CINETPAY_API_PASSWORD": "mdp",
+            "EMAIL_BACKEND": "django.core.mail.backends.smtp.EmailBackend",
+            "EMAIL_HOST": "smtp.exemple.test",
+            "EMAIL_HOST_USER": "identifiant-factice",
+            "EMAIL_HOST_PASSWORD": "mot-de-passe-factice",
+            "DEFAULT_FROM_EMAIL": "ANITCHE <no-reply@anitche.com>",
             "DOCUMENTATION_API_ACTIVE": "True",
         }
         script = (

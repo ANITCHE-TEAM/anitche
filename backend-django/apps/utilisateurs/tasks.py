@@ -1,9 +1,28 @@
-from celery import shared_task
+import smtplib
+
+from celery import Task, shared_task
 from django.utils import timezone
 from django.core.mail import send_mail
 from django.conf import settings
 
 from .models import CodeOTP
+
+ARGUMENTS_MASQUES = '[masqués]'
+
+
+class TacheArgumentsMasques(Task):
+    """Tâche dont les arguments n'apparaissent jamais hors du worker.
+
+    Celery recopie une représentation des arguments (argsrepr, kwargsrepr)
+    dans le message publié, puis dans les journaux du worker, ses événements
+    (Flower) et `celery inspect`. Elle est remplacée ici par un texte fixe :
+    le code OTP ne part que vers le serveur SMTP. Un nouvel essai (retry)
+    republie la tâche par cette même méthode.
+    """
+
+    def apply_async(self, args=None, kwargs=None, **options):
+        options['argsrepr'] = options['kwargsrepr'] = ARGUMENTS_MASQUES
+        return super().apply_async(args, kwargs, **options)
 
 
 @shared_task
@@ -55,9 +74,23 @@ def nettoyer_otp_expires():
     return f"{supprimes} codes OTP supprimés."
 
 
-@shared_task
+@shared_task(
+    base=TacheArgumentsMasques,
+    autoretry_for=(smtplib.SMTPException, OSError),
+    retry_backoff=10,
+    retry_backoff_max=60,
+    max_retries=2,
+)
 def envoyer_code_otp_email(email_destinataire, code, type_usage):
-    """Envoie un code OTP par email, en tâche asynchrone (ne bloque pas la requête HTTP)."""
+    """Envoie un code OTP par email, en tâche asynchrone (ne bloque pas la requête HTTP).
+
+    Erreur SMTP ou réseau (coupure, délai EMAIL_TIMEOUT dépassé) : 3 essais au
+    plus, espacés de quelques secondes (délai croissant), bien avant
+    l'expiration du code (CodeOTP.DUREE_VALIDITE_MINUTES). Ni le code ni le
+    corps du message ne sont journalisés : arguments masqués
+    (TacheArgumentsMasques), et les exceptions SMTP ne contiennent que la
+    réponse du serveur, jamais le message envoyé.
+    """
     sujets = {
         'inscription': "Confirmez votre inscription",
         'mdp_oublie': "Réinitialisation de votre mot de passe",

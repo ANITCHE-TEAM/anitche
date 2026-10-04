@@ -1,3 +1,4 @@
+from email.utils import parseaddr
 from urllib.parse import urlsplit
 
 from django.core.exceptions import ImproperlyConfigured
@@ -142,6 +143,61 @@ if not CORS_ALLOWED_ORIGINS:
         "CORS_ALLOWED_ORIGINS doit être défini explicitement en production "
         "(ex: 'https://anitche.ci,https://admin.anitche.ci')."
     )
+
+# Emails (codes OTP d'inscription, de mot de passe oublié et de changement de
+# contact, notifications) : un vrai serveur SMTP authentifié, sinon ces
+# parcours sont inutilisables sans que rien ne le signale. EMAIL_HOST est relu
+# sans la valeur par défaut de base.py : une variable absente est refusée,
+# jamais remplacée par un serveur tiers. Transmis par docker-compose.prod.yml.
+BACKEND_EMAIL_SMTP = 'django.core.mail.backends.smtp.EmailBackend'
+DOMAINE_EXPEDITEUR = 'anitche.com'
+EMAIL_HOST = config('EMAIL_HOST', default='')
+
+if EMAIL_BACKEND != BACKEND_EMAIL_SMTP:
+    raise ImproperlyConfigured(
+        f"EMAIL_BACKEND doit valoir '{BACKEND_EMAIL_SMTP}' en production (reçu : "
+        f"{EMAIL_BACKEND!r}) : les backends console, locmem, dummy et filebased "
+        "n'envoient rien, aucun code OTP n'arriverait."
+    )
+_email_manquants = [
+    nom for nom, valeur in (
+        ('EMAIL_HOST', EMAIL_HOST),
+        ('EMAIL_HOST_USER', EMAIL_HOST_USER),
+        ('EMAIL_HOST_PASSWORD', EMAIL_HOST_PASSWORD),
+    ) if not valeur.strip()
+]
+if _email_manquants:
+    raise ImproperlyConfigured(
+        f"{', '.join(_email_manquants)} : à définir en production (serveur SMTP "
+        "et identifiants SMTP du fournisseur d'emails)."
+    )
+if EMAIL_USE_TLS and EMAIL_USE_SSL:
+    raise ImproperlyConfigured(
+        "EMAIL_USE_TLS et EMAIL_USE_SSL sont exclusifs : STARTTLS sur le port 587 "
+        "(EMAIL_USE_TLS=True) ou TLS implicite sur le port 465 (EMAIL_USE_SSL=True)."
+    )
+if not EMAIL_USE_TLS and not EMAIL_USE_SSL:
+    raise ImproperlyConfigured(
+        "EMAIL_USE_TLS ou EMAIL_USE_SSL doit être activé : sans chiffrement, "
+        "l'identifiant et la clé SMTP partent en clair sur le réseau."
+    )
+if not 1 <= EMAIL_TIMEOUT <= 60:
+    raise ImproperlyConfigured(
+        "EMAIL_TIMEOUT doit être compris entre 1 et 60 secondes : sans limite, un "
+        "serveur SMTP qui ne répond plus bloque un worker Celery."
+    )
+# Le fournisseur n'accepte que les expéditeurs du domaine authentifié (SPF,
+# DKIM, DMARC) ; tout autre domaine est refusé ou classé en spam.
+# « ANITCHE <no-reply@anitche.com> » est accepté : seule l'adresse compte.
+_local, _, _domaine = parseaddr(DEFAULT_FROM_EMAIL)[1].rpartition('@')
+if not _local or '@' in _local or _domaine.lower() != DOMAINE_EXPEDITEUR:
+    raise ImproperlyConfigured(
+        f"DEFAULT_FROM_EMAIL doit être une adresse @{DOMAINE_EXPEDITEUR} (reçu : "
+        f"{DEFAULT_FROM_EMAIL!r} ; ex. « ANITCHE <no-reply@anitche.com> »)."
+    )
+# Expéditeur des emails d'erreur de Django (mail_admins) : la même adresse
+# vérifiée chez le fournisseur, jamais root@localhost.
+SERVER_EMAIL = DEFAULT_FROM_EMAIL
 
 # Aucune credential cross-origin (cookies de session) n'est nécessaire :
 # l'API s'authentifie par JWT dans l'en-tête Authorization, jamais par
