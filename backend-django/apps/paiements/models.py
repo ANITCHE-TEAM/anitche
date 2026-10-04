@@ -107,6 +107,10 @@ class Paiement(models.Model):
     date_creation = models.DateTimeField(auto_now_add=True)
     date_validation = models.DateTimeField(null=True, blank=True)
     date_mise_a_jour = models.DateTimeField(auto_now=True)
+    # Dernier état demandé au fournisseur hors webhook (services.reconcilier_paiement) :
+    # la tâche de réconciliation traite d'abord les paiements jamais ou le
+    # moins récemment vérifiés, aucun n'est laissé de côté d'une exécution à l'autre.
+    date_derniere_reconciliation = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         verbose_name = "Paiement"
