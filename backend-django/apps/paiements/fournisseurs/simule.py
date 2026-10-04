@@ -13,6 +13,12 @@ Corps d'une notification de paiement (JSON) :
      "statut": "succes" | "echec" | "en_attente", "montant": 15000, "devise": "XOF"}
 Pour un transfert, « reference » est celle du reversement (REV-...).
 
+État « côté fournisseur » (réconciliation, services.reconcilier_paiement) :
+le dernier état signé reçu pour un paiement, ou celui fixé par
+definir_etat_distant (tests, commande `simuler_etat_paiement` en dev), est
+gardé dans le cache. verifier_transaction sans notification le renvoie ;
+sans état connu, la transaction est « en attente » (le client n'a pas payé).
+
 Refusé en production (config/settings/prod.py).
 """
 
@@ -23,6 +29,7 @@ import time
 import uuid
 
 from django.conf import settings
+from django.core.cache import cache
 
 from .base import (
     ECHEC,
@@ -40,6 +47,23 @@ from .base import (
 EN_TETE_SIGNATURE = "X-Signature-Simulation"
 TOLERANCE_SECONDES = 300
 STATUTS = {SUCCES, ECHEC, EN_ATTENTE}
+# État distant simulé : « injoignable » fait lever ErreurFournisseur à la vérification.
+INJOIGNABLE = "injoignable"
+DUREE_ETAT_DISTANT = 3 * 24 * 3600  # au-delà de la fenêtre de réconciliation (24 h)
+
+
+def _cle_etat(reference):
+    return f"paiement_simule:etat:{reference}"
+
+
+def definir_etat_distant(reference, statut, montant=None, devise="XOF", identifiant_externe=""):
+    """Fixe l'état que le fournisseur simulé renverra pour ce paiement
+    (SUCCES, ECHEC, EN_ATTENTE ou INJOIGNABLE)."""
+    if statut not in STATUTS | {INJOIGNABLE}:
+        raise ValueError(f"Statut simulé inconnu : {statut}")
+    cache.set(_cle_etat(reference), {
+        "statut": statut, "montant": montant, "devise": devise, "identifiant_externe": identifiant_externe,
+    }, DUREE_ETAT_DISTANT)
 
 
 def signer(corps, secret, horodatage=None):
@@ -128,8 +152,24 @@ class FournisseurSimule(FournisseurPaiement):
         )
 
     def verifier_transaction(self, paiement, notification=None):
-        # Pas de serveur distant : la notification signée fait foi.
-        return self._etat(notification)
+        if notification is not None:
+            # Pas de serveur distant : la notification signée fait foi, et
+            # devient l'état connu du « fournisseur » pour la réconciliation.
+            etat = self._etat(notification)
+            definir_etat_distant(paiement.reference, etat.statut, etat.montant, etat.devise or "XOF",
+                                 etat.identifiant_externe)
+            return etat
+        connu = cache.get(_cle_etat(paiement.reference))
+        if connu is None:
+            return EtatTransaction(statut=EN_ATTENTE, identifiant_externe=paiement.transaction_id_externe or "")
+        if connu["statut"] == INJOIGNABLE:
+            raise ErreurFournisseur("Fournisseur simulé injoignable.")
+        return EtatTransaction(
+            statut=connu["statut"],
+            identifiant_externe=connu["identifiant_externe"] or paiement.transaction_id_externe or "",
+            montant=connu["montant"],
+            devise=connu["devise"],
+        )
 
     def transferer(self, reversement, telephone, operateur):
         self._secret()

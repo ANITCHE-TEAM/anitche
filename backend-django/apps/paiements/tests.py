@@ -38,10 +38,11 @@ from apps.vendeurs.models import Boutique
 from . import reversements
 from .fournisseurs.base import EN_ATTENTE, ErreurFournisseur, EtatTransaction, hacher_jeton
 from .fournisseurs.cinetpay import FournisseurCinetPay
-from .fournisseurs.simule import EN_TETE_SIGNATURE, FournisseurSimule, signer
+from .fournisseurs.simule import EN_TETE_SIGNATURE, FournisseurSimule, definir_etat_distant, signer
 from .frais import bareme_en_vigueur, calculer_frais_ligne
 from .models import AjustementVendeur, BaremeFrais, JournalWebhook, Paiement, Remboursement, Reversement
-from .services import valider_paiement
+from .services import reconcilier_paiement, reconcilier_paiements_en_suspens, valider_paiement
+from .tasks import reconcilier_paiements
 
 URL_INITIER = "/api/paiements/initier/"
 URL_VALIDER_PANIER = "/api/commandes/valider-panier/"
@@ -389,7 +390,9 @@ class RemboursementTests(Donnees, APITestCase):
 
     def test_paiement_recu_apres_expiration(self):
         paiement = self.payer(self.commande_a)
-        Commande.objects.filter(pk=self.commande_a.pk).update(created_at=timezone.now() - timedelta(minutes=31))
+        # Toujours « en attente » chez le fournisseur : l'expiration attend la
+        # fin du délai de grâce (30 + 30 minutes), puis se fait quand même.
+        Commande.objects.filter(pk=self.commande_a.pk).update(created_at=timezone.now() - timedelta(minutes=61))
         expirer_commandes_impayees()
         paiement.refresh_from_db()
         self.assertEqual(paiement.statut, Paiement.Statut.ANNULE)
@@ -502,6 +505,390 @@ class ConcurrenceTests(Donnees, TransactionTestCase):
         self.assertFalse(CompteFidelite.objects.filter(utilisateur=self.client1, solde_points__gt=0).exists())
         self.assertEqual(Reversement.objects.count(), 1)
         self.assertEqual(Notification.objects.filter(destinataire=self.client1, titre="Paiement confirmé").count(), 1)
+
+
+# =====================================================================
+# RÉCONCILIATION AVEC LE FOURNISSEUR (M1) ET ORDRE DES VERROUS (A1)
+# =====================================================================
+
+def vieillir_commandes(*commandes, minutes):
+    Commande.objects.filter(pk__in=[c.pk for c in commandes]).update(
+        created_at=timezone.now() - timedelta(minutes=minutes))
+
+
+def vieillir_paiement(paiement, minutes):
+    Paiement.objects.filter(pk=paiement.pk).update(date_creation=timezone.now() - timedelta(minutes=minutes))
+
+
+def compter_verifications():
+    """Le vrai verifier_transaction du fournisseur simulé, appels comptés."""
+    return mock.patch.object(FournisseurSimule, "verifier_transaction", autospec=True,
+                             side_effect=FournisseurSimule.verifier_transaction)
+
+
+class DonneesReconciliation(Donnees):
+    def preparer(self):
+        self.creer_donnees()
+        (self.commande,) = self.commander((self.variante1, 3))
+        self.paiement = self.payer(self.commande)
+
+    def etat_distant(self, statut, paiement=None, montant=None, devise="XOF"):
+        """État de la transaction « chez le fournisseur » (simulé)."""
+        paiement = paiement or self.paiement
+        definir_etat_distant(paiement.reference, statut,
+                             int(paiement.montant) if montant is None else montant, devise)
+
+    def statuts(self, paiement=None, commande=None):
+        paiement, commande = paiement or self.paiement, commande or self.commande
+        paiement.refresh_from_db()
+        commande.refresh_from_db()
+        return paiement.statut, commande.status
+
+    def stock(self):
+        return Stock.objects.get(variante=self.variante1).quantite_disponible
+
+
+class ReconciliationAvantExpirationTests(DonneesReconciliation, APITestCase):
+    def setUp(self):
+        self.preparer()
+
+    def test_succes_chez_le_fournisseur_valide_au_lieu_d_expirer(self):
+        self.etat_distant("succes")
+        vieillir_commandes(self.commande, minutes=31)
+        with self.assertLogs("securite", "WARNING") as journaux:
+            self.assertEqual(expirer_commandes_impayees(), 0)
+        self.assertEqual(self.statuts(), ("valide", "confirmee"))
+        self.assertIn(f"Paiement {self.paiement.reference} : en_attente → valide (source=reconciliation).",
+                      journaux.output[-1])
+        self.assertTrue(Livraison.objects.filter(commande=self.commande).exists())
+        self.assertFalse(Remboursement.objects.exists())
+        self.assertEqual(self.stock(), 47)
+
+    def test_echec_chez_le_fournisseur_echoue_puis_expire(self):
+        self.etat_distant("echec")
+        vieillir_commandes(self.commande, minutes=31)
+        self.assertEqual(expirer_commandes_impayees(), 1)
+        self.assertEqual(self.statuts(), ("echoue", "annulee"))
+        self.assertEqual(self.paiement.metadata["motif_echec"], "échec constaté par réconciliation")
+        self.assertEqual(self.stock(), 50)
+
+    def test_en_attente_expiration_repoussee_puis_faite_apres_le_delai_de_grace(self):
+        # Aucun état connu du fournisseur simulé : transaction « en attente ».
+        for minutes in (31, 59):
+            vieillir_commandes(self.commande, minutes=minutes)
+            self.assertEqual(expirer_commandes_impayees(), 0)
+            self.assertEqual(self.statuts(), ("en_attente", "creee"))
+        vieillir_commandes(self.commande, minutes=61)
+        self.assertEqual(expirer_commandes_impayees(), 1)
+        self.assertEqual(self.statuts(), ("annule", "annulee"))
+        self.assertEqual(self.stock(), 50)
+
+    @override_settings(PAIEMENT_RECONCILIATION_DELAI_GRACE_MINUTES=0)
+    def test_delai_de_grace_configurable(self):
+        vieillir_commandes(self.commande, minutes=31)
+        self.assertEqual(expirer_commandes_impayees(), 1)
+        self.assertEqual(self.statuts(), ("annule", "annulee"))
+
+    def test_fournisseur_injoignable_un_seul_appel_puis_expiration_apres_le_delai_de_grace(self):
+        (autre,) = self.commander((self.variante2, 1))
+        autre_paiement = self.payer(autre)
+        self.etat_distant("injoignable")
+        self.etat_distant("injoignable", autre_paiement)
+        vieillir_commandes(self.commande, autre, minutes=31)
+        with compter_verifications() as verifier:
+            self.assertEqual(expirer_commandes_impayees(), 0)
+        # Fournisseur injoignable : il n'est plus rappelé dans la même exécution.
+        self.assertEqual(verifier.call_count, 1)
+        self.assertEqual(self.statuts(), ("en_attente", "creee"))
+        self.assertEqual(self.statuts(autre_paiement, autre), ("en_attente", "creee"))
+        vieillir_commandes(self.commande, autre, minutes=61)
+        self.assertEqual(expirer_commandes_impayees(), 2)
+        self.assertEqual(self.statuts(), ("annule", "annulee"))
+
+    def test_commande_sans_paiement_expire_sans_appel_au_fournisseur(self):
+        (autre,) = self.commander((self.variante2, 1))
+        vieillir_commandes(autre, minutes=31)
+        with compter_verifications() as verifier:
+            self.assertEqual(expirer_commandes_impayees(), 1)
+        self.assertEqual(verifier.call_count, 0)
+
+
+class ReconciliationPlanifieeTests(DonneesReconciliation, APITestCase):
+    def setUp(self):
+        self.preparer()
+
+    def test_webhook_perdu_puis_reconciliation_qui_valide(self):
+        # Le webhook échoue (vérification impossible, 503) et n'est jamais rejoué...
+        with mock.patch.object(FournisseurSimule, "verifier_transaction", side_effect=ErreurFournisseur("x")):
+            self.assertEqual(self.notifier_succes(self.paiement).status_code, 503)
+        self.etat_distant("succes")  # ... alors que le fournisseur a encaissé.
+        self.assertEqual(reconcilier_paiements_en_suspens(), (0, 0, False))  # moins de 15 minutes
+        vieillir_paiement(self.paiement, 16)
+        with self.assertLogs("securite", "WARNING") as journaux:
+            self.assertEqual(reconcilier_paiements(), "1 paiement(s) vérifié(s), 1 statut(s) changé(s).")
+        self.assertIn(f"Paiement {self.paiement.reference} : en_attente → valide (source=reconciliation).",
+                      journaux.output[-1])
+        self.assertEqual(self.statuts(), ("valide", "confirmee"))
+        self.assertEqual(Reversement.objects.filter(commande=self.commande).count(), 1)
+        self.assertEqual(Notification.objects.filter(destinataire=self.client1, titre="Paiement confirmé").count(), 1)
+        # Validé : il n'est plus vérifié.
+        self.assertEqual(reconcilier_paiements_en_suspens(), (0, 0, False))
+
+    def test_echec_constate(self):
+        self.etat_distant("echec")
+        vieillir_paiement(self.paiement, 16)
+        self.assertEqual(reconcilier_paiements_en_suspens(), (1, 1, False))
+        self.assertEqual(self.statuts(), ("echoue", "creee"))
+        # Échoué sans succès chez le fournisseur : vérifié de nouveau, sans effet.
+        self.assertEqual(reconcilier_paiements_en_suspens(), (1, 0, False))
+
+    def test_en_attente_n_agit_pas_mais_date_la_verification(self):
+        vieillir_paiement(self.paiement, 16)
+        self.assertEqual(reconcilier_paiements_en_suspens(), (1, 0, False))
+        self.assertEqual(self.statuts(), ("en_attente", "creee"))
+        self.assertIsNotNone(self.paiement.date_derniere_reconciliation)
+
+    def test_fournisseur_injoignable_arret_propre(self):
+        (autre,) = self.commander((self.variante2, 1))
+        autre_paiement = self.payer(autre)
+        for paiement in (self.paiement, autre_paiement):
+            self.etat_distant("injoignable", paiement)
+            vieillir_paiement(paiement, 16)
+        with compter_verifications() as verifier:
+            self.assertEqual(reconcilier_paiements(),
+                             "0 paiement(s) vérifié(s), 0 statut(s) changé(s). Interrompue : fournisseur injoignable.")
+        self.assertEqual(verifier.call_count, 1)
+        self.assertEqual(self.statuts(), ("en_attente", "creee"))
+        self.paiement.refresh_from_db()
+        self.assertIsNone(self.paiement.date_derniere_reconciliation)
+
+    def test_paiement_annule_puis_succes_constate_un_seul_remboursement(self):
+        vieillir_commandes(self.commande, minutes=61)
+        expirer_commandes_impayees()
+        self.assertEqual(self.statuts(), ("annule", "annulee"))
+        self.etat_distant("succes")  # le client a finalement payé
+        self.assertEqual(reconcilier_paiements_en_suspens(), (1, 1, False))
+        self.assertEqual(reconcilier_paiements_en_suspens(), (0, 0, False))
+        self.assertEqual(self.notifier_succes(self.paiement).status_code, 200)  # webhook tardif
+        self.assertEqual(self.statuts(), ("valide", "annulee"))
+        remboursement = Remboursement.objects.get()
+        self.assertEqual((remboursement.motif, remboursement.paiement, remboursement.montant),
+                         ("commande_annulee", self.paiement, self.commande.montant_total))
+        self.assertEqual(self.stock(), 50)  # restitué une seule fois
+        self.assertFalse(Livraison.objects.filter(commande=self.commande).exists())
+
+    def test_annule_sans_transaction_externe_ou_hors_fenetre_non_verifie(self):
+        self.api(self.client1).post(f"/api/paiements/{self.paiement.pk}/annuler/")
+        self.etat_distant("succes")
+        Paiement.objects.filter(pk=self.paiement.pk).update(transaction_id_externe="")
+        with compter_verifications() as verifier:
+            self.assertEqual(reconcilier_paiements_en_suspens(), (0, 0, False))
+            Paiement.objects.filter(pk=self.paiement.pk).update(transaction_id_externe="SIM-X")
+            vieillir_paiement(self.paiement, 25 * 60)
+            self.assertEqual(reconcilier_paiements_en_suspens(), (0, 0, False))
+            vieillir_paiement(self.paiement, 23 * 60)
+            self.assertEqual(reconcilier_paiements_en_suspens(), (1, 1, False))
+        self.assertEqual(verifier.call_count, 1)
+
+    def test_montant_ou_devise_incoherents_refuses_et_journalises(self):
+        vieillir_paiement(self.paiement, 16)
+        for montant, devise in ((1, "XOF"), (None, "EUR")):
+            with self.subTest(montant=montant, devise=devise):
+                self.etat_distant("succes", montant=montant, devise=devise)
+                with self.assertLogs("securite", "ERROR") as journaux:
+                    self.assertEqual(reconcilier_paiements_en_suspens(), (1, 0, False))
+                self.assertIn("rejeté (source=reconciliation)", journaux.output[0])
+                self.assertEqual(self.statuts(), ("en_attente", "creee"))
+
+    def test_commande_de_developpement_simuler_etat_paiement(self):
+        from io import StringIO
+
+        from django.core.management import CommandError, call_command
+
+        sortie = StringIO()
+        call_command("simuler_etat_paiement", self.paiement.reference, "succes", stdout=sortie)
+        self.assertIn("état simulé « succes »", sortie.getvalue())
+        vieillir_paiement(self.paiement, 16)
+        self.assertEqual(reconcilier_paiements_en_suspens(), (1, 1, False))
+        self.assertEqual(self.statuts(), ("valide", "confirmee"))
+        with self.assertRaises(CommandError):
+            call_command("simuler_etat_paiement", "PAY-INCONNU", "succes")
+        Paiement.objects.filter(pk=self.paiement.pk).update(fournisseur="cinetpay")
+        with self.assertRaises(CommandError):
+            call_command("simuler_etat_paiement", self.paiement.reference, "echec")
+
+    @override_settings(PAIEMENT_RECONCILIATION_LOT=1)
+    def test_lot_limite_et_rotation(self):
+        (autre,) = self.commander((self.variante2, 1))
+        autre_paiement = self.payer(autre)
+        vieillir_paiement(self.paiement, 20)
+        vieillir_paiement(autre_paiement, 16)
+        verifies = []
+        for _ in range(3):
+            with compter_verifications() as verifier:
+                self.assertEqual(reconcilier_paiements_en_suspens(), (1, 0, False))
+            verifies.append(verifier.call_args.args[1].pk)
+        # Jamais vérifié d'abord, puis le moins récemment vérifié.
+        self.assertEqual(verifies, [self.paiement.pk, autre_paiement.pk, self.paiement.pk])
+
+
+class ReconciliationConcurrenceTests(DonneesReconciliation, TransactionTestCase):
+    """PostgreSQL : vraies transactions concurrentes (fils d'exécution)."""
+
+    def setUp(self):
+        recreer_bareme_plateforme()
+        recreer_tarifs_initiaux()
+        self.preparer()
+
+    def lancer(self, *fonctions, entre=None):
+        """Exécute chaque fonction dans son fil (sa connexion). `entre` :
+        appelée après le démarrage du premier fil, avant celui des autres."""
+        resultats, erreurs = {}, []
+
+        def cible(indice, fonction):
+            try:
+                resultats[indice] = fonction()
+            except Exception as erreur:  # noqa: BLE001 — remontée au test
+                erreurs.append(erreur)
+            finally:
+                connection.close()
+
+        fils = [threading.Thread(target=cible, args=(i, f)) for i, f in enumerate(fonctions)]
+        fils[0].start()
+        if entre is not None:
+            entre()
+        for fil in fils[1:]:
+            fil.start()
+        for fil in fils:
+            fil.join(timeout=30)
+        self.assertFalse(any(fil.is_alive() for fil in fils), "Fil bloqué : interblocage probable.")
+        self.assertEqual(erreurs, [])
+        return [resultats[i] for i in range(len(fonctions))]
+
+    @staticmethod
+    def attendre_une_transaction_bloquee(delai=10):
+        """Dans la transaction du fil appelant : attend qu'une autre connexion
+        à cette base soit bloquée sur un verrou (pg_locks)."""
+        fin = time.monotonic() + delai
+        with connection.cursor() as curseur:
+            while time.monotonic() < fin:
+                curseur.execute("SELECT pg_stat_clear_snapshot()")
+                curseur.execute(
+                    "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid "
+                    "WHERE NOT l.granted AND a.datname = current_database() AND l.pid <> pg_backend_pid()"
+                )
+                if curseur.fetchone()[0]:
+                    return True
+                time.sleep(0.02)
+        return False
+
+    def verifier_invariant(self):
+        """Webhook de succès reçu (argent encaissé) : paiement validé, et
+        commande confirmée OU remboursement créé ; stock restitué une fois
+        au plus ; jamais « paiement annulé + commande annulée »."""
+        paiement_statut, commande_statut = self.statuts()
+        remboursements = Remboursement.objects.filter(paiement=self.paiement, commande=self.commande).count()
+        self.assertEqual(paiement_statut, "valide")
+        if commande_statut == "annulee":
+            self.assertEqual((remboursements, self.stock()), (1, 50))
+        else:
+            self.assertEqual((commande_statut, remboursements, self.stock()), ("confirmee", 0, 47))
+        return commande_statut
+
+    def test_A1_webhook_de_succes_contre_expiration_qui_tient_la_commande(self):
+        """Contre-audit A1 : l'expiration annule la commande (verrou de
+        ligne) puis s'arrête juste avant de toucher au paiement ; le webhook
+        arrive à ce moment. Ancien ordre (Paiement puis Commandes) :
+        interblocage, webhook en 500, paiement annulé sans remboursement."""
+        from apps.commandes.tasks import expirer_commandes_non_payees
+
+        vieillir_commandes(self.commande, minutes=61)  # délai de grâce écoulé, fournisseur « en attente »
+        import apps.paiements.services as services
+        vraie = services.traiter_paiements_apres_annulation
+        commande_verrouillee = threading.Event()
+
+        def traiter_apres_annulation(commande):
+            commande_verrouillee.set()
+            self.assertTrue(self.attendre_une_transaction_bloquee())  # le webhook attend la commande
+            return vraie(commande)
+
+        with mock.patch.object(services, "traiter_paiements_apres_annulation", side_effect=traiter_apres_annulation):
+            expiration, webhook = self.lancer(
+                expirer_commandes_non_payees,
+                lambda: self.notifier_succes(self.paiement).status_code,
+                entre=lambda: self.assertTrue(commande_verrouillee.wait(10)),
+            )
+        self.assertEqual((expiration, webhook), ("1 commande(s) non payée(s) annulée(s).", 200))
+        self.assertEqual(self.verifier_invariant(), "annulee")
+        self.assertEqual(Remboursement.objects.get().motif, "commande_annulee")
+
+    def test_A1_webhook_de_succes_qui_tient_les_verrous_contre_expiration(self):
+        """Le webhook tient la commande et le paiement ; l'expiration (le
+        fournisseur répondait encore « en attente ») attend, puis trouve la
+        commande confirmée et n'y touche pas."""
+        from apps.commandes.tasks import expirer_commandes_non_payees
+
+        vieillir_commandes(self.commande, minutes=61)
+        import apps.paiements.services as services
+        vrai_controle = services._controler_etat
+        verrous_tenus = threading.Event()
+
+        def controler_etat(paiement, etat):
+            verrous_tenus.set()
+            self.assertTrue(self.attendre_une_transaction_bloquee())  # l'expiration attend la commande
+            return vrai_controle(paiement, etat)
+
+        with mock.patch.object(services, "_controler_etat", side_effect=controler_etat), \
+                mock.patch.object(services, "reconcilier_avant_expiration", return_value=True):
+            webhook, expiration = self.lancer(
+                lambda: self.notifier_succes(self.paiement).status_code,
+                expirer_commandes_non_payees,
+                entre=lambda: self.assertTrue(verrous_tenus.wait(10)),
+            )
+        self.assertEqual((webhook, expiration), (200, "0 commande(s) non payée(s) annulée(s)."))
+        self.assertEqual(self.verifier_invariant(), "confirmee")
+
+    def test_reconciliation_et_webhook_simultanes_un_seul_effet(self):
+        self.etat_distant("succes")
+        barriere = threading.Barrier(2)
+
+        def apres(fonction):
+            def executer():
+                barriere.wait()
+                return fonction()
+            return executer
+
+        webhook, (issue, change) = self.lancer(
+            apres(lambda: self.notifier_succes(self.paiement).status_code),
+            apres(lambda: reconcilier_paiement(Paiement.objects.get(pk=self.paiement.pk))),
+        )
+        self.assertEqual((webhook, issue), (200, "succes"))
+        self.assertEqual(self.verifier_invariant(), "confirmee")
+        self.assertEqual(Reversement.objects.count(), 1)
+        self.assertEqual(Livraison.objects.count(), 1)
+        self.assertEqual(Notification.objects.filter(destinataire=self.client1, titre="Paiement confirmé").count(), 1)
+
+    def test_tache_lancee_deux_fois_en_parallele_idempotente(self):
+        # Paiement annulé (commande expirée) mais encaissé, et un second en attente encaissé.
+        vieillir_commandes(self.commande, minutes=61)
+        expirer_commandes_impayees()
+        self.etat_distant("succes")
+        (autre,) = self.commander((self.variante2, 1))
+        autre_paiement = self.payer(autre)
+        self.etat_distant("succes", autre_paiement)
+        vieillir_paiement(autre_paiement, 16)
+        barriere = threading.Barrier(2)
+
+        def tache():
+            barriere.wait()
+            return reconcilier_paiements_en_suspens()
+
+        premier, second = self.lancer(tache, tache)
+        self.assertEqual(premier[1] + second[1], 2)  # chaque changement appliqué une seule fois
+        self.assertEqual(self.verifier_invariant(), "annulee")
+        self.assertEqual(self.statuts(autre_paiement, autre), ("valide", "confirmee"))
+        self.assertEqual(Remboursement.objects.count(), 1)
+        self.assertEqual(Reversement.objects.filter(commande=autre).count(), 1)
 
 
 # =====================================================================
@@ -935,19 +1322,21 @@ class MigrationBaremeQuatorzePourcentTests(Donnees, TransactionTestCase):
     retour arrière propre ; idempotente."""
 
     AVANT = [("paiements", "0007_bareme_frais_petit_article")]
-    APRES = [("paiements", "0008_bareme_plateforme_14_pourcent")]
 
     def setUp(self):
         recreer_tarifs_initiaux()
         self.creer_donnees()
 
     def tearDown(self):
-        executeur = MigrationExecutor(connection)
-        executeur.migrate(executeur.loader.graph.leaf_nodes())
+        self.migrer()
 
-    def migrer(self, cible):
+    def migrer(self, cible=None):
+        """Sans cible : dernier état du schéma (0008 et les migrations
+        suivantes). Les modèles du code (Paiement : colonne ajoutée par 0009)
+        ne s'utilisent qu'à cet état ; avant 0008, seuls les barèmes et le
+        checkout (frais figés) sont manipulés."""
         executeur = MigrationExecutor(connection)
-        executeur.migrate(cible)
+        executeur.migrate(cible or executeur.loader.graph.leaf_nodes())
 
     def test_migration_aller_retour(self):
         # Avant 0008 : un seul barème de la plateforme, celui de la migration 0004.
@@ -959,9 +1348,7 @@ class MigrationBaremeQuatorzePourcentTests(Donnees, TransactionTestCase):
                                            taux_commission=Decimal("5"), frais_fixe_article=0,
                                            date_debut=timezone.now() - timedelta(days=1))
         (commande_avant,) = self.commander((self.variante1, 1))
-        self.notifier_succes(self.payer(commande_avant))
         article_avant = commande_avant.article.get()
-        reversement_avant = Reversement.objects.get(commande=commande_avant)
         self.assertEqual(frais_figes(article_avant), (Decimal("12"), 200, Decimal("600"), Decimal("200"), Decimal("4200")))
 
         def montants(reversement):
@@ -969,9 +1356,11 @@ class MigrationBaremeQuatorzePourcentTests(Donnees, TransactionTestCase):
             return (reversement.montant_brut, reversement.montant_commission, reversement.montant_frais_fixes,
                     reversement.montant_net)
 
+        self.migrer()
+        # Commande passée avant le changement, payée après : frais figés au checkout.
+        self.notifier_succes(self.payer(commande_avant))
+        reversement_avant = Reversement.objects.get(commande=commande_avant)
         self.assertEqual(montants(reversement_avant), (Decimal("5000"), Decimal("600"), Decimal("200"), Decimal("4200")))
-
-        self.migrer(self.APRES)
         nouveau = BaremeFrais.objects.get(pk=MIGRATION_BAREME_14.ID_BAREME_14)
         self.assertEqual(
             (nouveau.boutique, nouveau.taux_commission, nouveau.seuil_petit_article, nouveau.frais_fixe_petit_article,
@@ -1018,7 +1407,7 @@ class MigrationBaremeQuatorzePourcentTests(Donnees, TransactionTestCase):
         self.assertEqual(frais_figes(article_apres), (Decimal("14"), 200, Decimal("700"), Decimal("200"), Decimal("4100")))
 
         # De nouveau vers l'avant : un seul barème à 14 %, en vigueur.
-        self.migrer(self.APRES)
+        self.migrer()
         self.assertEqual(BaremeFrais.objects.filter(boutique__isnull=True, taux_commission=Decimal("14")).count(), 1)
         self.assertEqual(bareme_en_vigueur(self.boutique1).pk, MIGRATION_BAREME_14.ID_BAREME_14)
 

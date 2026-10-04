@@ -24,7 +24,7 @@ from datetime import timedelta
 from decimal import ROUND_DOWN, Decimal
 
 from django.conf import settings
-from django.db import transaction
+from django.db import OperationalError, transaction
 from django.utils import timezone
 
 from apps.catalogue.models import Stock
@@ -308,14 +308,37 @@ def est_payee(commande):
 def expirer_commandes_impayees(maintenant=None):
     """Annule les commandes restées « créées » (donc non payées : toute
     commande se paie en ligne, sans exception) au-delà du délai
-    COMMANDE_DELAI_PAIEMENT_MINUTES, et restitue leur stock."""
-    limite = (maintenant or timezone.now()) - timedelta(minutes=settings.COMMANDE_DELAI_PAIEMENT_MINUTES)
+    COMMANDE_DELAI_PAIEMENT_MINUTES, et restitue leur stock.
+
+    Une commande qui a un paiement en attente n'expire qu'après avoir
+    demandé son état au fournisseur (webhook perdu) : un succès la confirme ;
+    un état incertain repousse l'expiration de
+    PAIEMENT_RECONCILIATION_DELAI_GRACE_MINUTES
+    (apps.paiements.services.reconcilier_avant_expiration)."""
+    from apps.paiements.services import reconcilier_avant_expiration
+
+    maintenant = maintenant or timezone.now()
+    limite = maintenant - timedelta(minutes=settings.COMMANDE_DELAI_PAIEMENT_MINUTES)
+    fin_de_grace = limite - timedelta(minutes=settings.PAIEMENT_RECONCILIATION_DELAI_GRACE_MINUTES)
+    # Liste figée avant la boucle : des appels au fournisseur s'y intercalent.
+    commandes = list(Commande.objects.filter(status=Statut.CREEE, created_at__lt=limite).order_by('pk'))
+    indisponibles = set()
     annulees = 0
-    for commande in Commande.objects.filter(status=Statut.CREEE, created_at__lt=limite).iterator():
+    for commande in commandes:
         try:
+            # Appel au fournisseur hors transaction, avant tout verrou.
+            if not reconcilier_avant_expiration(commande, commande.created_at < fin_de_grace, indisponibles):
+                continue
             annuler_commande(commande, Motif.EXPIRATION)
             annulees += 1
         except TransitionImpossible:
             # Payée ou annulée entre la lecture et l'annulation : rien à faire.
+            continue
+        except OperationalError as erreur:
+            # Interblocage ou conflit de sérialisation : la transaction de
+            # CETTE commande est annulée ; les suivantes sont traitées, elle
+            # le sera à l'exécution suivante.
+            logger.warning("Expiration de la commande %s reportée (%s).", commande.numero_commande,
+                           str(erreur).splitlines()[0] if str(erreur) else type(erreur).__name__)
             continue
     return annulees

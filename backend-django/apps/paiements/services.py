@@ -11,11 +11,18 @@ verrou de ligne (select_for_update) :
 
 Un paiement validé pour une commande déjà annulée ou déjà payée par un
 autre paiement ne la confirme jamais : un Remboursement est créé.
+
+Ordre des verrous, unique dans tout le code : Commandes (triées par pk)
+puis Paiement. Le succès ou l'échec vient du webhook du fournisseur, ou de
+la réconciliation (reconcilier_paiement) quand le webhook n'arrive pas.
 """
 
 import logging
+from datetime import timedelta
 
+from django.conf import settings
 from django.db import IntegrityError, transaction
+from django.db.models import F, Q
 from django.utils import timezone
 
 from apps.commandes.models import Commande, GroupeCommande
@@ -187,11 +194,21 @@ def annuler_paiement_client(paiement):
 
 def valider_paiement(paiement, etat=None):
     """Applique un succès confirmé par le fournisseur. Idempotent : False si
-    le paiement était déjà validé (notification rejouée ou concurrente)."""
+    le paiement était déjà validé (notification rejouée ou concurrente).
+
+    Ordre des verrous, unique dans tout le code : Commandes (triées par pk)
+    PUIS Paiement, comme initier_paiement et annuler_commande. L'ordre
+    inverse créait un interblocage avec l'expiration (contre-audit, A1)."""
     from apps.commandes.services import confirmer_commande
     from apps.livraison.models import Livraison
 
     with transaction.atomic():
+        # Les commandes d'un paiement sont fixées à sa création : les lire
+        # avant de verrouiller le paiement est sans risque.
+        commandes = list(
+            Commande.objects.select_for_update(of=("self",))
+            .filter(paiements_couvrants=paiement.pk).order_by("pk")
+        )
         verrouille = Paiement.objects.select_for_update().get(pk=paiement.pk)
         if verrouille.statut not in VALIDABLE_DEPUIS:
             return False
@@ -204,7 +221,7 @@ def valider_paiement(paiement, etat=None):
         verrouille.save(update_fields=["statut", "date_validation", "transaction_id_externe", "date_mise_a_jour"])
 
         confirmees = []
-        for commande in verrouille.commandes.select_for_update().order_by("pk"):
+        for commande in commandes:
             deja_payee = Paiement.objects.filter(
                 commandes=commande, statut=Paiement.Statut.VALIDE,
             ).exclude(pk=verrouille.pk).exists()
@@ -328,6 +345,126 @@ def traiter_notification_paiement(code, request):
 
     _journaliser(journal, JournalWebhook.StatutTraitement.TRAITE)
     return ResultatNotification(200, f"Paiement {paiement.reference} traité.")
+
+
+# =====================================================================
+# RÉCONCILIATION AVEC LE FOURNISSEUR (sans webhook)
+# =====================================================================
+
+#: Issues de reconcilier_paiement en plus de SUCCES, ECHEC et EN_ATTENTE.
+INJOIGNABLE = "injoignable"
+REFUSE = "refuse"
+
+
+def _marquer_reconcilie(paiement):
+    # update() : ni date_mise_a_jour ni aucun autre champ ne change.
+    Paiement.objects.filter(pk=paiement.pk).update(date_derniere_reconciliation=timezone.now())
+
+
+def reconcilier_paiement(paiement, indisponibles=None):
+    """Redemande au fournisseur l'état réel du paiement, HORS transaction
+    (aucun verrou tenu pendant l'appel réseau), puis applique le même chemin
+    que le webhook : valider_paiement ou marquer_echoue, montant et devise
+    contrôlés. Idempotent et sûr face à un webhook simultané : les
+    transitions se font sous verrou et ne s'appliquent qu'une fois.
+
+    Renvoie (issue, change) : issue = SUCCES, ECHEC, EN_ATTENTE,
+    INJOIGNABLE ou REFUSE (réponse incohérente, fournisseur inconnu) ;
+    change = le statut du paiement a changé. `indisponibles` (codes
+    fournisseur) évite de rappeler, dans la même exécution, un fournisseur
+    déjà injoignable."""
+    if indisponibles is not None and paiement.fournisseur in indisponibles:
+        return INJOIGNABLE, False
+    try:
+        etat = obtenir_fournisseur(paiement.fournisseur).verifier_transaction(paiement)
+    except FournisseurInconnu:
+        logger_securite.error("Réconciliation de %s impossible : fournisseur %s inconnu.",
+                              paiement.reference, paiement.fournisseur)
+        return REFUSE, False
+    except ErreurFournisseur as erreur:
+        logger.warning("Réconciliation de %s : fournisseur %s injoignable (%s).",
+                       paiement.reference, paiement.fournisseur, erreur)
+        if indisponibles is not None:
+            indisponibles.add(paiement.fournisseur)
+        return INJOIGNABLE, False
+    except NotificationInvalide as erreur:
+        logger_securite.error("Réconciliation de %s : réponse incohérente du fournisseur (%s).",
+                              paiement.reference, erreur)
+        _marquer_reconcilie(paiement)
+        return REFUSE, False
+
+    ancien, issue, change = paiement.statut, etat.statut, False
+    try:
+        if etat.statut == SUCCES:
+            change = valider_paiement(paiement, etat)
+        elif etat.statut == ECHEC:
+            change = marquer_echoue(paiement, motif="échec constaté par réconciliation")
+    except IncoherenceTransaction as erreur:
+        logger_securite.error("Paiement %s rejeté (source=reconciliation) : %s", paiement.reference, erreur)
+        issue = REFUSE
+    _marquer_reconcilie(paiement)
+    if change:
+        logger_securite.warning("Paiement %s : %s → %s (source=reconciliation).",
+                                paiement.reference, ancien, paiement.statut)
+    return issue, change
+
+
+def reconcilier_avant_expiration(commande, delai_de_grace_ecoule, indisponibles=None):
+    """Appelée par l'expiration (commandes.services), hors transaction,
+    avant d'annuler une commande « créée ». True si elle peut expirer.
+
+    Chaque paiement en attente de la commande est d'abord vérifié chez le
+    fournisseur : succès → paiement validé, commande confirmée, pas
+    d'expiration ; échec → paiement échoué, expiration normale ; en attente,
+    injoignable ou réponse incohérente → expiration repoussée jusqu'à la fin
+    du délai de grâce, puis faite quand même (un succès tardif deviendra un
+    remboursement par reconcilier_paiements_en_suspens)."""
+    incertain = False
+    for paiement in commande.paiements_couvrants.filter(statut=Paiement.Statut.EN_ATTENTE):
+        issue, _ = reconcilier_paiement(paiement, indisponibles)
+        if issue == SUCCES:
+            return False
+        if issue != ECHEC:
+            incertain = True
+    return delai_de_grace_ecoule or not incertain
+
+
+def reconcilier_paiements_en_suspens(maintenant=None):
+    """Tâche planifiée (tasks.reconcilier_paiements) : rattrape les webhooks
+    perdus. Vérifie chez le fournisseur les paiements en attente depuis plus
+    de PAIEMENT_RECONCILIATION_AGE_MINUTES, et les paiements annulés ou
+    échoués créés dans les PAIEMENT_RECONCILIATION_FENETRE_HEURES dernières
+    heures qui ont une transaction chez le fournisseur (un succès tardif y
+    devient une confirmation ou un remboursement, comme par webhook).
+
+    Au plus PAIEMENT_RECONCILIATION_LOT paiements par exécution, les moins
+    récemment vérifiés d'abord ; arrêt dès que le fournisseur est
+    injoignable. Renvoie (vérifiés, changés, interrompu)."""
+    maintenant = maintenant or timezone.now()
+    Statut = Paiement.Statut
+    en_attente = Q(
+        statut=Statut.EN_ATTENTE,
+        date_creation__lt=maintenant - timedelta(minutes=settings.PAIEMENT_RECONCILIATION_AGE_MINUTES),
+    )
+    clos_recemment = Q(
+        statut__in=(Statut.ANNULE, Statut.ECHOUE),
+        date_creation__gte=maintenant - timedelta(hours=settings.PAIEMENT_RECONCILIATION_FENETRE_HEURES),
+        transaction_id_externe__isnull=False,
+    ) & ~Q(transaction_id_externe="")
+    lot = list(
+        Paiement.objects.filter(en_attente | clos_recemment)
+        .order_by(F("date_derniere_reconciliation").asc(nulls_first=True), "date_creation")
+        [:settings.PAIEMENT_RECONCILIATION_LOT]
+    )
+    verifies = changes = 0
+    for paiement in lot:
+        issue, change = reconcilier_paiement(paiement)
+        if issue == INJOIGNABLE:
+            logger.warning("Réconciliation interrompue : fournisseur %s injoignable.", paiement.fournisseur)
+            return verifies, changes, True
+        verifies += 1
+        changes += change
+    return verifies, changes, False
 
 
 # =====================================================================

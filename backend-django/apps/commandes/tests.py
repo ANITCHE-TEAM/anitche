@@ -388,7 +388,7 @@ import threading
 from datetime import timedelta
 from unittest import mock, skipUnless
 
-from django.db import connection
+from django.db import OperationalError, connection
 from django.db.models import ProtectedError
 from django.test import TransactionTestCase
 from django.test.utils import CaptureQueriesContext
@@ -614,7 +614,11 @@ class ExpirationTests(DonneesCycleDeVie, APITestCase):
 
     def test_paiement_recu_apres_expiration(self):
         paiement = self.payer(self.commande, statut=Paiement.Statut.EN_ATTENTE)
+        # Toujours « en attente » chez le fournisseur simulé : la commande ne
+        # part pas dans le délai de grâce, puis expire quand même après.
         self.vieillir(31)
+        self.assertEqual(expirer_commandes_impayees(), 0)
+        self.vieillir(61)
         expirer_commandes_impayees()
         paiement.refresh_from_db()
         self.assertEqual(paiement.statut, Paiement.Statut.ANNULE)  # en attente, commande annulée
@@ -627,6 +631,44 @@ class ExpirationTests(DonneesCycleDeVie, APITestCase):
         self.assertEqual(self.commande.status, "annulee")  # jamais réactivée
         self.assertFalse(Livraison.objects.filter(commande=self.commande).exists())
         self.assertTrue(Notification.objects.filter(destinataire=self.admin, titre="Remboursement à traiter").exists())
+
+    def test_A1_interblocage_sur_une_commande_n_arrete_pas_les_suivantes(self):
+        self.commander((self.variante1, 1))
+        Commande.objects.update(created_at=timezone.now() - timedelta(minutes=31))
+        premiere, seconde = Commande.objects.order_by("pk")
+        from . import services
+        vraie = services.annuler_commande
+
+        def annuler(commande, motif, **options):
+            if commande.pk == premiere.pk:
+                raise OperationalError("deadlock detected")
+            return vraie(commande, motif, **options)
+
+        with mock.patch.object(services, "annuler_commande", side_effect=annuler), \
+                self.assertLogs("apps.commandes.services", "WARNING") as journaux:
+            self.assertEqual(expirer_commandes_impayees(), 1)
+        self.assertIn(f"Expiration de la commande {premiere.numero_commande} reportée (deadlock detected)",
+                      journaux.output[0])
+        premiere.refresh_from_db()
+        seconde.refresh_from_db()
+        self.assertEqual((premiere.status, seconde.status), ("creee", "annulee"))
+        # Reprise à l'exécution suivante.
+        self.assertEqual(expirer_commandes_impayees(), 1)
+        premiere.refresh_from_db()
+        self.assertEqual(premiere.status, "annulee")
+        self.assertEqual(self.stock(self.variante1), 10)
+
+    def test_M1_paiement_en_attente_reussi_chez_le_fournisseur_confirme_au_lieu_d_expirer(self):
+        from apps.paiements.fournisseurs.simule import definir_etat_distant
+
+        paiement = self.payer(self.commande, statut=Paiement.Statut.EN_ATTENTE)
+        definir_etat_distant(paiement.reference, "succes", int(paiement.montant))
+        self.vieillir(31)
+        self.assertEqual(expirer_commandes_impayees(), 0)
+        paiement.refresh_from_db()
+        self.commande.refresh_from_db()
+        self.assertEqual((paiement.statut, self.commande.status), ("valide", "confirmee"))
+        self.assertEqual(self.stock(self.variante1), 8)  # stock jamais restitué
 
 
 class MachineAEtatsTests(DonneesCycleDeVie, APITestCase):

@@ -362,6 +362,11 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'apps.commandes.tasks.expirer_commandes_non_payees',
         'schedule': crontab(minute='*/5'),
     },
+    # Webhooks perdus : état des paiements redemandé au fournisseur.
+    'paiements-reconcilier-paiements': {
+        'task': 'apps.paiements.tasks.reconcilier_paiements',
+        'schedule': crontab(minute='*/10'),
+    },
     # Délai de rétractation écoulé : reversements aux vendeurs disponibles.
     'paiements-rendre-reversements-disponibles': {
         'task': 'apps.paiements.tasks.rendre_reversements_disponibles',
@@ -444,6 +449,24 @@ LIVRAISON_TENTATIVES_MAX = config('LIVRAISON_TENTATIVES_MAX', default=3, cast=in
 # automatique et restitution du stock (apps.commandes.tasks). Toute commande
 # se paie en ligne : aucune exception (plus de paiement à la livraison).
 COMMANDE_DELAI_PAIEMENT_MINUTES = config('COMMANDE_DELAI_PAIEMENT_MINUTES', default=30, cast=int)
+
+# Réconciliation des paiements avec le fournisseur (apps.paiements.services,
+# docs/MODULE_PAIEMENTS.md) : rattrape un webhook perdu.
+# Commande dont le paiement est encore « en attente » chez le fournisseur
+# (ou fournisseur injoignable) à la fin du délai de paiement : expiration
+# repoussée de N minutes, puis faite quand même (un succès plus tardif
+# devient un remboursement).
+PAIEMENT_RECONCILIATION_DELAI_GRACE_MINUTES = config(
+    'PAIEMENT_RECONCILIATION_DELAI_GRACE_MINUTES', default=30, cast=int)
+# Tâche planifiée : paiements en attente depuis plus de N minutes (le client
+# a eu le temps de payer ; en deçà, le webhook arrive normalement)...
+PAIEMENT_RECONCILIATION_AGE_MINUTES = config('PAIEMENT_RECONCILIATION_AGE_MINUTES', default=15, cast=int)
+# ... et paiements annulés ou échoués créés dans les N dernières heures
+# (succès tardif constaté chez le fournisseur).
+PAIEMENT_RECONCILIATION_FENETRE_HEURES = config('PAIEMENT_RECONCILIATION_FENETRE_HEURES', default=24, cast=int)
+# Paiements vérifiés au plus par exécution (un appel au fournisseur chacun,
+# CINETPAY_TIMEOUT au plus) : 50 x 10 s reste sous l'intervalle de 10 minutes.
+PAIEMENT_RECONCILIATION_LOT = config('PAIEMENT_RECONCILIATION_LOT', default=50, cast=int)
 
 FRONTEND_BASE_URL = config('FRONTEND_BASE_URL', default='http://localhost:5173')
 
