@@ -55,6 +55,18 @@ services:
       BACKEND_BASE_URL: ${BACKEND_BASE_URL}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      # Emails (codes OTP, notifications) : serveur SMTP du fournisseur et
+      # expéditeur @anitche.com. Sans eux, prod.py refuse de démarrer
+      # (Django et Celery).
+      EMAIL_BACKEND: ${EMAIL_BACKEND}
+      EMAIL_HOST: ${EMAIL_HOST}
+      EMAIL_PORT: ${EMAIL_PORT:-587}
+      EMAIL_USE_TLS: ${EMAIL_USE_TLS:-True}
+      EMAIL_USE_SSL: ${EMAIL_USE_SSL:-False}
+      EMAIL_TIMEOUT: ${EMAIL_TIMEOUT:-10}
+      EMAIL_HOST_USER: ${EMAIL_HOST_USER}
+      EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD}
+      DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL}
       # URL de vérification des passeports QR (apps.passeport_qr).
       FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-https://anitche.com}
       DB_NAME: ${DB_NAME}
@@ -100,6 +112,19 @@ services:
       CINETPAY_API_PASSWORD: ${CINETPAY_API_PASSWORD}
       BACKEND_BASE_URL: ${BACKEND_BASE_URL}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS}
+      # Inutile au worker, mais prod.py refuse de démarrer sans elle.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      # Emails (codes OTP, notifications) : envoyés par ce worker. Sans eux,
+      # prod.py refuse de démarrer (Django et Celery).
+      EMAIL_BACKEND: ${EMAIL_BACKEND}
+      EMAIL_HOST: ${EMAIL_HOST}
+      EMAIL_PORT: ${EMAIL_PORT:-587}
+      EMAIL_USE_TLS: ${EMAIL_USE_TLS:-True}
+      EMAIL_USE_SSL: ${EMAIL_USE_SSL:-False}
+      EMAIL_TIMEOUT: ${EMAIL_TIMEOUT:-10}
+      EMAIL_HOST_USER: ${EMAIL_HOST_USER}
+      EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD}
+      DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL}
       DB_NAME: ${DB_NAME}
       DB_USER: ${DB_USER}
       DB_PASSWORD: ${DB_PASSWORD}
@@ -130,6 +155,19 @@ services:
       CINETPAY_API_PASSWORD: ${CINETPAY_API_PASSWORD}
       BACKEND_BASE_URL: ${BACKEND_BASE_URL}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS}
+      # Inutile à beat, mais prod.py refuse de démarrer sans elle.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      # Emails : beat n'en envoie aucun, mais charge prod.py, qui refuse de
+      # démarrer sans eux (Django et Celery).
+      EMAIL_BACKEND: ${EMAIL_BACKEND}
+      EMAIL_HOST: ${EMAIL_HOST}
+      EMAIL_PORT: ${EMAIL_PORT:-587}
+      EMAIL_USE_TLS: ${EMAIL_USE_TLS:-True}
+      EMAIL_USE_SSL: ${EMAIL_USE_SSL:-False}
+      EMAIL_TIMEOUT: ${EMAIL_TIMEOUT:-10}
+      EMAIL_HOST_USER: ${EMAIL_HOST_USER}
+      EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD}
+      DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL}
       DB_NAME: ${DB_NAME}
       DB_USER: ${DB_USER}
       DB_PASSWORD: ${DB_PASSWORD}
