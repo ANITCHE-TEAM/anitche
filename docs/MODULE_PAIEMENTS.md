@@ -24,14 +24,27 @@ Client ──paie en ligne (Wave, Orange Money, MTN MoMo, Moov Money, carte)─�
      versement           ─▶ « versé » : prix − commission − frais fixes ─────┴──▶ mobile money du vendeur
 ```
 
-- **Aucun paiement à la livraison** : le client paie avant ; une commande non payée expire à 30 minutes (`commandes`).
+- **Aucun paiement à la livraison** : le client paie avant ; une commande non payée expire à 30 minutes (`commandes`). Si elle a un paiement en attente, son état est d'abord **redemandé au fournisseur** (§ 8, « Réconciliation ») : un client débité dont le webhook s'est perdu n'est jamais laissé avec une commande annulée sans paiement validé ni remboursement.
 - **Tous les montants sont en FCFA entiers**, calculés côté serveur ; un montant envoyé par le client est ignoré.
 - Argent à rendre au client : un **`Remboursement`** par commande (§ 6). Argent dû au vendeur : un **`Reversement`** par commande (§ 7).
 
 ## 3. Modèles
 
-- **`Paiement`** : `reference` (`PAY-<année>-<10 hex>`, 30 caractères au plus), `client` (**PROTECT**), `commandes` (**relation** : les commandes réellement payées ; remplace la liste JSON `metadata.commandes_couvertes`), `commande` / `groupe_commande` (cible demandée, contrat API conservé), `methode` (moyen choisi par le client), **`fournisseur`** (qui encaisse : `simule`, `cinetpay`), `statut`, `montant`, `devise` (`XOF`), `transaction_id_externe`, `hash_jeton_notification` (empreinte SHA-256, jamais le jeton), `url_paiement`, `adresse_livraison`, `metadata` (motifs internes, jamais exposés, jamais alimentés par une notification).
-- **Transitions** (`services.py`, sous verrou de ligne) : `en_attente → valide | echoue | annule` ; `echoue → valide` ; `annule → valide` (succès tardif) ; `valide` est final. Les statuts `a_rembourser` et `rembourse` n'existent plus.
+- **`Paiement`** : `reference` (`PAY-<année>-<10 hex>`, 30 caractères au plus), `client` (**PROTECT**), `commandes` (**relation** : les commandes réellement payées ; remplace la liste JSON `metadata.commandes_couvertes`), `commande` / `groupe_commande` (cible demandée, contrat API conservé), `methode` (moyen choisi par le client), **`fournisseur`** (qui encaisse : `simule`, `cinetpay`), `statut`, `montant`, `devise` (`XOF`), `transaction_id_externe`, `hash_jeton_notification` (empreinte SHA-256, jamais le jeton), `url_paiement`, `adresse_livraison`, `metadata` (motifs internes, jamais exposés, jamais alimentés par une notification), `date_derniere_reconciliation` (dernier état demandé au fournisseur hors webhook ; interne, non exposé).
+- **Transitions** (`services.py`, sous verrou de ligne) : `en_attente → valide | echoue | annule` ; `echoue → valide` ; `annule → valide` (succès tardif) ; `valide` est final. Les statuts `a_rembourser` et `rembourse` n'existent plus. Origine d'un succès ou d'un échec : le webhook du fournisseur, ou la réconciliation (§ 8).
+- **Ordre des verrous, unique dans tout le code : Commandes (triées par `pk`) → Paiement.** Voir le tableau ci-dessous. L'ordre inverse, autrefois suivi par `valider_paiement`, créait un interblocage avec l'expiration (contre-audit de production, A1) : webhook en 500, paiement annulé, commande annulée, argent encaissé, aucun remboursement.
+
+| Chemin | Ordre des verrous |
+|---|---|
+| `initier_paiement` | Commandes (`select_for_update`, `order_by("pk")`) → création du Paiement ; appel au fournisseur **après** la transaction |
+| `valider_paiement` (webhook, réconciliation) | Commandes du paiement (`select_for_update(of=("self",))`, `order_by("pk")`) → Paiement → Livraison (création) → Reversement (création) → Remboursement |
+| `annuler_commande` (client, administration, expiration, boutique indisponible, `abandonner_livraison`) | Livraison → Commande (`UPDATE` conditionnel) → Stock → Paiement (`traiter_paiements_apres_annulation` → `_passer_statut`) → Reversement |
+| `marquer_echoue`, `annuler_paiement_client` | Paiement seul |
+| Retours (`retours.services`) | DemandeRetour (ou Commande à la création) → Stock → Remboursement, Reversement ; jamais le Paiement |
+| Livraison (transitions, contestation) | Livraison → Commande (`UPDATE`) ; jamais le Paiement |
+| Reversements (`paiements.reversements`) | Reversement, AjustementVendeur ; jamais Commande ni Paiement |
+
+La Livraison est prise avant la Commande par `annuler_commande`, et créée après elle par `valider_paiement`. Il n'y a pas de cycle : `valider_paiement` ne la crée que pour une commande « créée », qui n'a pas encore de fiche à verrouiller.
 - **`JournalWebhook`** : idempotence (`fournisseur`, `evenement_id` uniques) et audit ; statuts `recu`, `traite`, `ignore` (transaction non finalisée : rejouable), `erreur` (rejouable).
 - **`Remboursement`** (§ 6), **`BaremeFrais`** (§ 5), **`Reversement`** et **`AjustementVendeur`** (§ 7).
 
@@ -165,9 +178,47 @@ Interface commune : `initier(paiement)`, `lire_notification(request)`, `authenti
 
 **Règle commune** : une notification n'est qu'un signal. Chaîne obligatoire, identique pour tous les fournisseurs (`services.traiter_notification_paiement`) : lire → le paiement doit avoir été ouvert **chez ce fournisseur** → authentifier → journal d'idempotence → **redemander l'état réel au fournisseur** → contrôler montant, devise et identifiants → transition sous verrou.
 
+### Réconciliation (webhook perdu)
+
+Un webhook peut ne jamais arriver : panne du fournisseur, déploiement en cours, erreur 500, routage. Sans autre chemin, le client serait débité et sa commande annulée sans remboursement (contre-audit, M1). Deux chemins redemandent donc l'état au fournisseur (`verifier_transaction(paiement)`, sans notification). Les deux passent par `services.reconcilier_paiement` et suivent **le même chemin que le webhook** : `valider_paiement` ou `marquer_echoue`, avec le montant et la devise recontrôlés. L'appel réseau se fait hors transaction et sans verrou. Les transitions sont idempotentes : un webhook simultané, ou deux exécutions en parallèle, ne produisent qu'un seul effet.
+
+1. **Avant l'expiration d'une commande** (`commandes.services.expirer_commandes_impayees` → `reconcilier_avant_expiration`), pour chaque paiement `en_attente` :
+
+   | Réponse du fournisseur | Effet |
+   |---|---|
+   | succès | paiement validé, commande confirmée, **pas d'expiration** |
+   | échec | paiement `echoue` (`metadata.motif_echec` = « échec constaté par réconciliation »), puis expiration normale |
+   | en attente, injoignable, réponse incohérente | expiration **repoussée** jusqu'à `COMMANDE_DELAI_PAIEMENT_MINUTES` + `PAIEMENT_RECONCILIATION_DELAI_GRACE_MINUTES` (30 + 30 min), puis faite quand même : un succès plus tardif devient un remboursement (point 2) |
+
+   Un fournisseur injoignable n'est appelé qu'une fois par exécution. Les commandes suivantes sont traitées comme « incertaines ».
+
+2. **Tâche planifiée** `apps.paiements.tasks.reconcilier_paiements`, toutes les 10 minutes (`CELERY_BEAT_SCHEDULE`). Elle traite :
+   - les paiements `en_attente` depuis plus de `PAIEMENT_RECONCILIATION_AGE_MINUTES` ;
+   - les paiements `annule` ou `echoue` créés dans les `PAIEMENT_RECONCILIATION_FENETRE_HEURES` dernières heures et qui ont un `transaction_id_externe`.
+
+   Un succès constaté sur un paiement annulé suit la règle habituelle : la commande annulée donne un remboursement `commande_annulee` (un seul : verrou et `get_or_create`), et une commande déjà payée donne un remboursement `paiement_en_double`. La tâche traite au plus `PAIEMENT_RECONCILIATION_LOT` paiements, d'abord ceux jamais vérifiés, puis les moins récemment vérifiés (`date_derniere_reconciliation`) : aucun paiement n'est laissé de côté d'une exécution à l'autre. Elle **s'arrête proprement** dès que le fournisseur est injoignable.
+
+Chaque changement de statut fait par la réconciliation est journalisé dans le logger `securite` : `Paiement PAY-… : en_attente → valide (source=reconciliation).` Une incohérence de montant ou de devise y est journalisée en `ERROR` (`… rejeté (source=reconciliation)`), sans transition. Aucun `JournalWebhook` n'est créé, car il ne s'agit pas d'une notification.
+
+| Réglage (`config/settings/base.py`, variable d'environnement du même nom) | Défaut | Rôle |
+|---|---|---|
+| `PAIEMENT_RECONCILIATION_DELAI_GRACE_MINUTES` | 30 | Délai supplémentaire avant d'expirer une commande dont le paiement est encore incertain |
+| `PAIEMENT_RECONCILIATION_AGE_MINUTES` | 15 | Âge minimal d'un paiement en attente avant vérification par la tâche : en deçà, le webhook arrive normalement |
+| `PAIEMENT_RECONCILIATION_FENETRE_HEURES` | 24 | Fenêtre de vérification des paiements annulés ou échoués |
+| `PAIEMENT_RECONCILIATION_LOT` | 50 | Paiements vérifiés au plus par exécution : 50 × 10 s (`CINETPAY_TIMEOUT`) reste sous l'intervalle de 10 minutes |
+
 ### Fournisseur simulé
 
 Aucun argent ne circule ; la chaîne de sécurité est la même. Notification signée **HMAC-SHA256** de `"<horodatage>.<corps brut>"` avec `PAIEMENT_SIMULE_SECRET`, en-tête `X-Signature-Simulation: t=<unix>,v1=<hex>`, **fenêtre de 5 minutes** (rejeu refusé). Corps : `{"evenement_id", "reference", "transaction_id", "statut": "succes|echec|en_attente", "montant", "devise"}` (montant entier et devise obligatoires pour un succès). En dev, le secret vaut `dev-simulation-anitche` (public, repris par Postman) ; `prod.py` refuse ce fournisseur.
+
+**État « côté fournisseur » (réconciliation).** Le dernier état signé reçu pour un paiement devient l'état que le fournisseur simulé renvoie ensuite. Il est gardé dans le cache (Redis en dev, partagé par Django et Celery ; 3 jours). Sans état connu, la transaction est « en attente ». Pour simuler un webhook perdu ou une panne en dev :
+
+```bash
+docker compose -f infra/docker-compose.yml exec backend-django python manage.py simuler_etat_paiement PAY-2026-… succes      # ou echec, en_attente
+docker compose -f infra/docker-compose.yml exec backend-django python manage.py simuler_etat_paiement PAY-2026-… injoignable  # ErreurFournisseur
+```
+
+Ensuite, la tâche `reconcilier_paiements` (ou l'expiration de la commande) applique cet état. La commande est refusée pour un paiement ouvert chez un autre fournisseur. Les tests utilisent `fournisseurs.simule.definir_etat_distant`.
 
 ### Adaptateur CinetPay
 
@@ -240,6 +291,8 @@ Rien d'autre ne change : commandes, remboursements, reversements et frais ignore
 | D10 | Succès après remboursement revalidé | Transitions contrôlées, `valide` final | `test_D10_…` |
 | D11 | Webhooks bloqués par la limite anonyme | Limite dédiée par IP | `test_D11_…` |
 | D14 | Initiation sans limite dédiée | Scope `paiements` | `test_D14_…` |
+| A1 (contre-audit, octobre 2026) | Interblocage webhook de succès contre expiration (Paiement → Commande d'un côté, Commande → Paiement de l'autre) : webhook en 500, argent encaissé, paiement et commande annulés, aucun remboursement | Ordre unique Commandes → Paiement (§ 3) ; l'expiration rattrape `OperationalError` commande par commande | `ReconciliationConcurrenceTests.test_A1_…` (Postgres, vraie route webhook, deux ordres d'arrivée) ; `commandes` : `test_A1_interblocage_sur_une_commande_…` |
+| M1 (contre-audit, octobre 2026) | Aucune réconciliation : un webhook perdu laissait le client débité, sans commande ni remboursement | Vérification avant expiration et tâche planifiée (§ 8, « Réconciliation ») | `ReconciliationAvantExpirationTests`, `ReconciliationPlanifieeTests`, `ReconciliationConcurrenceTests` |
 
 Également : `Paiement.client` en PROTECT ; fausses URL de paiement supprimées (plus rien de factice en production) ; `is_staff` sans pouvoir (API et Django admin en lecture seule) ; montant toujours serveur ; IDOR (initier, consulter, annuler) testés ; barème déjà appliqué ni modifié (sauf sa clôture) ni supprimé, et aucun barème créé ou reprogrammé dans le passé, quel que soit le chemin de l'API (§ 4).
 
@@ -251,7 +304,7 @@ Rien d'autre ne change : commandes, remboursements, reversements et frais ignore
 | `webhook_paiement` | 3000/h | `webhook/…` | IP |
 
 - Listes sans N+1 : 4 requêtes pour la liste des paiements, 3 pour les reversements vendeur, quel que soit le nombre (testé).
-- Aucun appel réseau vers le fournisseur n'est fait sous verrou ou dans une transaction ; délai d'attente de 10 s.
+- Aucun appel réseau vers le fournisseur n'est fait sous verrou ou dans une transaction ; délai d'attente de 10 s. Cela vaut aussi pour la réconciliation : au plus `PAIEMENT_RECONCILIATION_LOT` appels toutes les 10 minutes, plus un appel par commande expirée qui a un paiement en attente, et plus aucun appel dans l'exécution dès que le fournisseur est injoignable.
 - Le traitement d'une notification CinetPay fait un appel de vérification synchrone (CinetPay attend une réponse en moins de 10 s) : à passer en tâche Celery si les mesures le justifient (§ 15).
 
 ## 13. Migrations
@@ -263,6 +316,8 @@ Rien d'autre ne change : commandes, remboursements, reversements et frais ignore
 - **paiements 0006** (frais de livraison) : `Reversement.montant_livraison` (0 pour l'existant) ; `AjustementVendeur.nature` (`retour` pour l'existant) et `commande`, contrainte « un ajustement de chaque nature par commande » (hors `retour`).
 - **paiements 0007** : `BaremeFrais.seuil_petit_article` et `frais_fixe_petit_article` (vides pour l'existant : comportement inchangé), contrainte `bareme_frais_petit_article_complet_ou_absent` ; textes d'aide « TVA incluse ».
 - **paiements 0008** (données, 28/09/2026) : le barème de la plateforme en vigueur est clôturé (`date_fin` = maintenant, rien d'autre) et le barème **14 % + 100 / 200 FCFA (seuil 3 000 FCFA), TVA incluse** créé au même instant, avec un identifiant fixe (`3f0c1a52-7d4e-4b8a-9c14-0e5b2d6a8f71`) : rejouée, elle ne fait rien. Barèmes des boutiques non touchés. Retour arrière : le barème 14 % est supprimé (aucune ligne n'y fait référence, les frais sont copiés dans `CommandeItem`) et le barème clôturé retrouve une `date_fin` vide. Limite : si ce barème avait une `date_fin` future avant la migration, le retour arrière la vide (aucun cas en base de dev).
+
+- **paiements 0009** (octobre 2026) : `Paiement.date_derniere_reconciliation`, nullable, vide pour l'existant. Ajout de colonne sans valeur par défaut ni réécriture de table. Retour arrière : la colonne est supprimée (on perd seulement l'ordre de rotation de la réconciliation).
 
 Base de dev (28/09/2026, migrée, ramenée à 0006, puis migrée de nouveau) : 1 barème de plateforme 12 % + 200 FCFA clôturé, 1 barème 14 % en vigueur, aucun barème de boutique ; les 28 articles déjà vendus gardent 12 % + 200 FCFA (40 680 FCFA de commission, 10 200 de frais fixes), les 18 reversements sont inchangés.
 
@@ -278,7 +333,7 @@ DJANGO_SETTINGS_MODULE=config.settings.ci DB_NAME=anitche_test DB_USER=postgres 
   python manage.py test apps.paiements -v 2
 ```
 
-`apps/paiements/tests.py` — 99 tests (septembre 2026) : initiation (montant serveur, moyens acceptés, paiement à la livraison refusé, IDOR, boutique indisponible, fournisseur injoignable, annulation et relance, `is_staff`, N+1), notifications (signature manquante, invalide, expirée, rejeu, fournisseur, montant et devise, vérification non finalisée, 503 puis rejeu, limites), remboursements (paiement après expiration, double paiement, annulation partielle, traitement admin), concurrence (D02, D06), frais (barème par défaut 14 % TVA incluse et ancien barème clôturé, arrondi au demi-franc supérieur, plafond, barème sans seuil inchangé, seuil à 2 999 / 3 000 / 3 001 FCFA, promotion qui passe sous le seuil, quantité supérieure à 1 jusqu'au reversement, figés, offre de lancement, barème de boutique prioritaire, seuil et frais réduit ensemble en base et à l'API, coupon, 503 sans barème, non exposés, administration), migration 0008 dans les deux sens (commande d'avant gardant 12 % + 200 FCFA, barème de boutique intact, idempotence), barème déjà appliqué (`PATCH` d'un autre champ refusé avec `bareme_deja_applique` et sans effet, valeur identique acceptée, `PUT` soumis à la même règle, clôture maintenant ou plus tard, horloge du client en retard, clôture passée ou réouverture refusées, barème déjà clôturé figé, `DELETE` refusé en 409, barème programmé modifiable et supprimable, non-administrateur 403 et anonyme 401, Django admin en lecture seule), date de début (création dans le passé refusée avec `date_debut_passee`, « maintenant » ramené à l'heure du serveur, création future, sans date : commence à l'enregistrement, sans date avec `date_fin` passée : 400 et non 500, reprogrammation d'un barème programmé vers le passé refusée par `PATCH` et `PUT`, vers une autre date future ou « maintenant » acceptée), reversements (cycle de vie, 7 jours, retour ouvert/rejeté, retour remboursé avant et après versement, ajustement imputé, versement manuel, transfert immédiat, en attente puis notifié, échoué, vue vendeur), adaptateur CinetPay (format d'initiation, carte, notification revérifiée, statut de la notification ignoré, identifiants et montant incohérents, jeton expiré, injoignable, limites, transfert), configuration de production (simulé, sandbox, clés, HTTPS).
+`apps/paiements/tests.py` — 118 tests (octobre 2026). Réconciliation et ordre des verrous (19 tests, octobre 2026) : avant expiration (succès → confirmée, échec → expirée, en attente → délai de grâce puis expiration, délai configurable, fournisseur injoignable appelé une fois, commande sans paiement sans appel), tâche planifiée (webhook perdu puis validation, échec, en attente, arrêt propre si injoignable, paiement annulé puis succès → un seul remboursement, sans `transaction_id_externe` ou hors fenêtre de 24 h ignoré, montant ou devise incohérents journalisés, commande `simuler_etat_paiement`, lot limité et rotation), concurrence PostgreSQL (A1 : webhook de succès sur la vraie route contre la tâche d'expiration, dans les deux ordres d'arrivée ; réconciliation et webhook simultanés ; tâche lancée deux fois en parallèle). Avant octobre 2026 : initiation (montant serveur, moyens acceptés, paiement à la livraison refusé, IDOR, boutique indisponible, fournisseur injoignable, annulation et relance, `is_staff`, N+1), notifications (signature manquante, invalide, expirée, rejeu, fournisseur, montant et devise, vérification non finalisée, 503 puis rejeu, limites), remboursements (paiement après expiration, double paiement, annulation partielle, traitement admin), concurrence (D02, D06), frais (barème par défaut 14 % TVA incluse et ancien barème clôturé, arrondi au demi-franc supérieur, plafond, barème sans seuil inchangé, seuil à 2 999 / 3 000 / 3 001 FCFA, promotion qui passe sous le seuil, quantité supérieure à 1 jusqu'au reversement, figés, offre de lancement, barème de boutique prioritaire, seuil et frais réduit ensemble en base et à l'API, coupon, 503 sans barème, non exposés, administration), migration 0008 dans les deux sens (commande d'avant gardant 12 % + 200 FCFA, barème de boutique intact, idempotence), barème déjà appliqué (`PATCH` d'un autre champ refusé avec `bareme_deja_applique` et sans effet, valeur identique acceptée, `PUT` soumis à la même règle, clôture maintenant ou plus tard, horloge du client en retard, clôture passée ou réouverture refusées, barème déjà clôturé figé, `DELETE` refusé en 409, barème programmé modifiable et supprimable, non-administrateur 403 et anonyme 401, Django admin en lecture seule), date de début (création dans le passé refusée avec `date_debut_passee`, « maintenant » ramené à l'heure du serveur, création future, sans date : commence à l'enregistrement, sans date avec `date_fin` passée : 400 et non 500, reprogrammation d'un barème programmé vers le passé refusée par `PATCH` et `PUT`, vers une autre date future ou « maintenant » acceptée), reversements (cycle de vie, 7 jours, retour ouvert/rejeté, retour remboursé avant et après versement, ajustement imputé, versement manuel, transfert immédiat, en attente puis notifié, échoué, vue vendeur), adaptateur CinetPay (format d'initiation, carte, notification revérifiée, statut de la notification ignoré, identifiants et montant incohérents, jeton expiré, injoignable, limites, transfert), configuration de production (simulé, sandbox, clés, HTTPS).
 
 Postman : `postman_paiements.json` (hors dépôt, reconstruite) — mise en place automatique (vendeur, produit, clients, OTP via Mailpit), parcours nominal (checkout → paiement → notification simulée signée → commande confirmée → reversement), scénarios de sécurité (IDOR, signature manquante/fausse/expirée, montant et devise falsifiés, rejeu, autre fournisseur, paiement à la livraison), annulation et relance, vue vendeur, administration (`admin_password` à renseigner ; dont [SEC] : modifier le taux du barème en vigueur → 400 `bareme_deja_applique`, taux inchangé ensuite). L'ancienne collection est archivée dans `postman_archives/`.
 
@@ -289,6 +344,7 @@ Postman : `postman_paiements.json` (hors dépôt, reconstruite) — mise en plac
 - **Compte CinetPay** : à ouvrir (RCCM) ; points à confirmer en sandbox au § 8.
 - **Remboursement et transfert automatiques** : manuels au lancement ; API de remboursement à brancher quand CinetPay la publie.
 - **Notification traitée de façon synchrone** : passer en tâche Celery si le temps de réponse de la vérification CinetPay le justifie (mesure en sandbox).
+- **Réconciliation, à confirmer en sandbox CinetPay** : la politique de rejeu des notifications (hypothèse non vérifiée), le délai après lequel une transaction non payée passe `EXPIRED`, et la limite de débit de `GET /v1/payment/{id}`. Selon ces mesures, ajuster `PAIEMENT_RECONCILIATION_*` (§ 8).
 - **Module retours** (vu a minima) : un vendeur peut encore marquer un retour « remboursé » (seul l'argent reste entre les mains de l'administration, via `Remboursement`) ; le délai de rétractation de 7 jours n'y est pas appliqué ; à traiter avec ce module.
 - **Opérateur Wave** non déductible du numéro pour un transfert : à préciser par l'admin (`operateur: "wave"`).
 
