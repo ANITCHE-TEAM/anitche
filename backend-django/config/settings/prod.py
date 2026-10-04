@@ -1,4 +1,7 @@
+from urllib.parse import urlsplit
+
 from django.core.exceptions import ImproperlyConfigured
+from django.http.request import validate_host
 
 from decouple import Csv
 
@@ -115,6 +118,25 @@ if '*' in ALLOWED_HOSTS:
         "ALLOWED_HOSTS='*' est interdit en production."
     )
 
+# L'URL de notification CinetPay (apps.paiements.fournisseurs.cinetpay) est
+# f"{BACKEND_BASE_URL}/api/paiements/webhook/...". Elle n'aboutit que si son
+# hôte est accepté par Django (sinon 400 DisallowedHost, et aucun paiement
+# n'est jamais confirmé) et si BACKEND_BASE_URL est l'origine seule : nginx
+# n'envoie à Django que les chemins qui commencent par /api/ (un préfixe
+# « /x/api/... » part vers le frontend), et un « / » final produirait
+# « //api/... », que seule la fusion des « / » par nginx rattrape.
+_url_backend = urlsplit(BACKEND_BASE_URL)
+if not _url_backend.hostname or not validate_host(_url_backend.hostname, ALLOWED_HOSTS):
+    raise ImproperlyConfigured(
+        f"L'hôte de BACKEND_BASE_URL ({_url_backend.hostname!r}) doit figurer dans "
+        "ALLOWED_HOSTS : sinon Django rejette les notifications de paiement (400)."
+    )
+if _url_backend.path or _url_backend.query or _url_backend.fragment:
+    raise ImproperlyConfigured(
+        "BACKEND_BASE_URL doit être l'origine seule, sans chemin ni « / » final "
+        "(ex. https://anitche.com) : le chemin /api/... est ajouté par le code."
+    )
+
 if not CORS_ALLOWED_ORIGINS:
     raise ImproperlyConfigured(
         "CORS_ALLOWED_ORIGINS doit être défini explicitement en production "
@@ -133,8 +155,9 @@ SECURE_SSL_REDIRECT = True
 # (http://backend-django:8000), sans passer par nginx ni TLS. Sans cette
 # ligne, l'appel reçoit un 301 vers https et l'authentification FastAPI
 # échoue. SecurityMiddleware retire le « / » initial du chemin avant de
-# tester ces motifs, d'où « ^api/ » et non « ^/api/ ». La route reste
-# bloquée publiquement par nginx.
+# tester ces motifs, d'où « ^api/ » et non « ^/api/ ». Depuis Internet, nginx
+# répond 404 sur ce chemin sans le transmettre à Django (location
+# /api/utilisateurs/jeton/verification dans infra/nginx/nginx.conf).
 SECURE_REDIRECT_EXEMPT = [r'^api/utilisateurs/jeton/verification/$']
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True

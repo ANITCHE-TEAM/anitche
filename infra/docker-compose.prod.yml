@@ -6,7 +6,8 @@ version: "3.9"
 #
 # Différences clés avec le dev :
 #   - le frontend est buildé en statique (Dockerfile.prod) et servi par Nginx
-#   - Nginx fait aussi office de reverse proxy vers Django (/api/) et FastAPI (/fast/)
+#   - Nginx fait aussi office de reverse proxy vers Django (/api/, /admin/) et
+#     FastAPI (/fast/), et sert /static/ et les médias publics (/media/)
 #   - Django tourne avec Gunicorn, pas le serveur de dev
 #   - les secrets viennent d'un fichier .env (jamais commité), pas de valeurs par défaut
 
@@ -65,10 +66,16 @@ services:
     volumes:
       # MEDIA_ROOT (config/settings/base.py) = BASE_DIR/media = /app/media
       # dans ce conteneur (WORKDIR /app, voir Dockerfile). Sans volume
-      # nommé, tout fichier KYC uploadé (recto/verso/selfie) est perdu au
-      # prochain rebuild/redeploy — seul backend-django sert ces fichiers
-      # (TelechargerDocumentKYCView), pas besoin de le monter ailleurs.
+      # nommé, tout fichier uploadé est perdu au prochain rebuild/redeploy.
+      # Les fichiers privés (KYC, pièces jointes du support, photos des
+      # retours) ne sont servis que par les vues Django protégées ; nginx
+      # monte ce volume en lecture seule et n'en sert que les dossiers
+      # publics (images des produits et catégories, logos et bannières des
+      # boutiques) : voir infra/nginx/nginx.conf.
       - anitche_media:/app/media
+      # STATIC_ROOT = /app/staticfiles : collectstatic y écrit au démarrage,
+      # nginx le sert sous /static/ (lecture seule).
+      - anitche_static:/app/staticfiles
     depends_on:
       db:
         condition: service_healthy
@@ -168,6 +175,10 @@ services:
       # ci-dessous, partagés en lecture avec Nginx via ce volume commun.
       - certbot_conf:/etc/letsencrypt:ro
       - certbot_www:/var/www/certbot:ro
+      # /static/ et médias publics sous /media/ (infra/nginx/nginx.conf),
+      # en lecture seule : nginx ne peut ni modifier ni ajouter un fichier.
+      - anitche_static:/srv/static:ro
+      - anitche_media:/srv/media:ro
     depends_on:
       - frontend
       - backend-django
@@ -194,5 +205,6 @@ services:
 volumes:
   anitche_pgdata:
   anitche_media:
+  anitche_static:
   certbot_conf:
   certbot_www:
