@@ -20,13 +20,13 @@ packaging==26.2
 pillow==12.3.0
 prompt_toolkit==3.0.52
 psycopg2-binary==2.9.12
-PyJWT==2.14.0
+PyJWT==2.15.1
 python-crontab==3.3.0
 python-dateutil==2.9.0.post0
 python-decouple==3.8
 redis==8.0.1
 six==1.17.0
-sqlparse==0.5.5
+sqlparse==0.6.0
 tzdata==2026.3
 tzlocal==5.4.4
 vine==5.1.0
