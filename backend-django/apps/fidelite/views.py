@@ -171,7 +171,7 @@ class VerifierCouponView(APIView):
 
         coupon = CouponReduction.objects.filter(code__iexact=code).first()
         # Coupon nominatif d'un autre client : même réponse qu'un code
-        # inexistant, pour ne jamais révéler qu'il existe (F5).
+        # inexistant, pour ne jamais révéler qu'il existe.
         if coupon and coupon.client_id and coupon.client_id != request.user.pk:
             coupon = None
         if not coupon:

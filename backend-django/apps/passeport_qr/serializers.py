@@ -180,15 +180,15 @@ class PasseportVendeurSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, attrs):
-        """F-21 (audit sécurité) : `produit` et `variante` restent modifiables
-        (un vendeur peut corriger une erreur de saisie), mais sans validation
-        d'appartenance ici, un vendeur pouvait réassigner un passeport
-        existant — dont `boutique` reste le sien et donc affiché comme
-        authentique — à un `produit_id` appartenant à N'IMPORTE QUEL AUTRE
-        vendeur (PATCH direct, en contournant CreerPasseportSerializer.validate
-        qui ne s'applique qu'à la création). Ça cassait la garantie même que
-        ce module est censé apporter : un passeport de traçabilité pourrait
-        certifier un produit qui n'est pas celui du vendeur affiché.
+        """`produit` et `variante` restent modifiables (un vendeur peut
+        corriger une erreur de saisie), mais sans validation d'appartenance
+        ici, un vendeur pourrait réassigner un passeport existant — dont
+        `boutique` reste le sien et donc affiché comme authentique — à un
+        `produit_id` appartenant à N'IMPORTE QUEL AUTRE vendeur (PATCH
+        direct, en contournant CreerPasseportSerializer.validate qui ne
+        s'applique qu'à la création). Cela casserait la garantie même que
+        ce module apporte : un passeport de traçabilité certifierait un
+        produit qui n'est pas celui du vendeur affiché.
         On revalide donc ici la même règle d'appartenance qu'à la création,
         et on s'assure que la variante appartient bien au produit choisi.
 

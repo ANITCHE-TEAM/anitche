@@ -218,7 +218,7 @@ SECURE_REDIRECT_EXEMPT = [r'^api/utilisateurs/jeton/verification/$']
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True
 
-# F-18 (audit sécurité) : Django tourne derrière Gunicorn, lui-même
+# Django tourne derrière Gunicorn, lui-même
 # uniquement joignable depuis le réseau Docker interne (aucun port publié
 # sur l'hôte dans docker-compose.prod.yml) — seul Nginx peut lui parler.
 # La requête qui arrive à Django est donc TOUJOURS du HTTP en interne,

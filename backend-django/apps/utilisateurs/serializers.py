@@ -82,12 +82,12 @@ class InscriptionSerializer(serializers.ModelSerializer):
 # PROFIL
 # =====================================================
 
-# Service FastAPI (F-11 : un livreur ne publie que sa propre position GPS) :
-# il ne doit plus lire l'id ici, mais sur la route interne
+# Service FastAPI (un livreur ne publie que sa propre position GPS) : il
+# doit lire l'id non pas ici, mais sur la route interne
 # jeton/verification/ (VerificationJetonServiceView), qui ne renvoie que
 # l'id et le rôle et a sa propre limite de débit (elle ne consomme pas la
-# limite 'user' du compte). backend-fastapi appelle encore profil/ tant que
-# son module 0 n'a pas basculé. Commentaire et non docstring : le docstring
+# limite 'user' du compte). TODO : backend-fastapi appelle encore profil/
+# tant que son module 0 n'a pas basculé sur cette route. Commentaire et non docstring : le docstring
 # est exporté dans schema.yaml, où une route interne n'a pas à figurer.
 class ProfilSerializer(serializers.ModelSerializer):
     """
@@ -298,14 +298,10 @@ class DocumentKYCSerializer(serializers.ModelSerializer):
         fois — sauf resoumission après un refus (statut_kyc='refuse'),
         qui remplace le dossier existant plutôt que d'en créer un second.
 
-        HARMONISATION : l'upload seul suffit désormais à soumettre la
-        demande vendeur, que ce soit la première fois ou une resoumission
-        après refus — soumettre_demande_vendeur() est appelée dans les
-        deux branches. Avant cette harmonisation, la toute première
-        soumission exigeait un second appel explicite à une vue
-        /demande-vendeur/ dédiée, depuis supprimée (devenue redondante) ;
-        la resoumission après refus, elle, transitionnait déjà
-        automatiquement.
+        L'upload seul suffit à soumettre la demande vendeur, que ce soit
+        la première fois ou une resoumission après refus —
+        soumettre_demande_vendeur() est appelée dans les deux branches ;
+        aucun second appel n'est nécessaire.
 
         CONCURRENCE : verrouille la ligne Utilisateur (select_for_update)
         pour la durée de la décision. Sans ce verrou, deux requêtes

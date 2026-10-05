@@ -74,9 +74,9 @@ def image_png(nom, taille_min_mo):
 
 class BoutiqueModeleTests(TestCase):
     def test_slug_genere_et_unique(self):
-        # Deux noms « trop proches » sont désormais refusés (nom_normalise) :
-        # une collision de slug ne survient plus qu'après un renommage, le
-        # slug n'étant jamais régénéré.
+        # Deux noms « trop proches » sont refusés (nom_normalise) : une
+        # collision de slug ne survient qu'après un renommage, le slug
+        # n'étant jamais régénéré.
         premiere = Boutique.objects.create(
             proprietaire=creer_vendeur_valide('v1@anitche.ci'), nom="Chez Awa"
         )
@@ -166,8 +166,8 @@ class BoutiqueModeleTests(TestCase):
 
         # La boutique doit être créée pour un vendeur déjà validé (sinon
         # full_clean() la refuse dès la création, voir Boutique.save()),
-        # puis on fait redescendre son KYC après coup pour obtenir le même
-        # état final que l'ancien scénario ("KYC non validé").
+        # puis on fait redescendre son KYC après coup pour obtenir l'état
+        # final voulu ("KYC non validé").
         vendeur_en_attente = creer_vendeur_valide('attente@anitche.ci')
         boutique_en_attente = Boutique.objects.create(
             proprietaire=vendeur_en_attente, nom="KYC non validé",
@@ -361,11 +361,11 @@ class MaBoutiqueAPITests(TestCase):
 
     def test_deux_vendeurs_meme_nom_de_boutique_pas_de_500(self):
         """
-        Boutique.nom est unique globalement. Avant le correctif, une
-        collision de nom entre deux vendeurs DIFFÉRENTS remontait comme
-        une django.core.exceptions.ValidationError non interceptée par
-        DRF (levée par full_clean() dans Boutique.save()) — 500 au lieu
-        d'un refus propre, puisque ce n'est pas le même compte donc pas
+        Boutique.nom est unique globalement. Une collision de nom entre
+        deux vendeurs DIFFÉRENTS ne doit pas remonter comme une
+        django.core.exceptions.ValidationError non interceptée par DRF
+        (levée par full_clean() dans Boutique.save()) — 500 au lieu d'un
+        refus propre, puisque ce n'est pas le même compte donc pas
         rattrapé par la vérification 'une seule boutique par compte'.
         """
         premier_vendeur = creer_vendeur_valide('premier@anitche.ci')
@@ -656,7 +656,7 @@ class MaBoutiqueThrottleTestCase(TestCase):
     dashboard vendeur et seraient sinon bloqués après quelques
     rafraîchissements.
 
-    DIAGNOSTIC (comme apps.fidelite.tests.FideliteThrottleTestCase) :
+    Même technique que apps.fidelite.tests.FideliteThrottleTestCase :
     ScopedRateThrottle.THROTTLE_RATES est figé comme attribut de classe
     à l'import ; on le patche directement plutôt que via
     override_settings, sans effet ici. Le cache de throttling
@@ -825,7 +825,7 @@ class AdministrationBoutiquesAPITests(TestCase):
 
     def test_suspension_par_administrateur(self):
         # Contrat : la suspension admin passe par est_suspendue (est_active
-        # est désormais la fermeture volontaire du vendeur).
+        # est la fermeture volontaire du vendeur).
         self.client.force_authenticate(user=creer_administrateur())
 
         reponse = self.client.patch(self.url_detail(), {'est_suspendue': True}, format='json')

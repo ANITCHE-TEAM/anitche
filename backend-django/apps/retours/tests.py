@@ -245,8 +245,8 @@ class RetoursAPITestCase(BaseRetourTestCase):
 class RetoursConcurrenceTestCase(TransactionTestCase):
     """A04:2025 : deux demandes de retour concurrentes sur le même article
     ne doivent jamais pouvoir cumuler une quantité retournée supérieure à
-    ce qui a été réellement acheté (même famille de protection que F-09
-    sur le stock)."""
+    ce qui a été réellement acheté (même famille de protection que
+    l'atomicité de Stock.incrementer/decrementer)."""
 
     def setUp(self):
         self.client1 = Utilisateur.objects.create_user(
@@ -368,7 +368,7 @@ class RetoursAdminTestCase(APITestCase):
     restock, la seconde est une preuve dans un litige."""
 
     def test_statut_et_montant_remboursement_readonly_dans_admin(self):
-        """F-06 : 'statut' et 'montant_remboursement' doivent rester en
+        """'statut' et 'montant_remboursement' doivent rester en
         lecture seule dans DemandeRetourAdmin, sinon un compte staff peut
         forcer une transition (ex. passer directement à 'rembourse') sans
         passer par TraiterDemandeRetourView et sa machine à états."""
@@ -396,7 +396,7 @@ class RetoursAdminTestCase(APITestCase):
 
 
 # =====================================================================
-# Diagnostic de septembre 2026 : un test par faille confirmée
+# Éligibilité, montants, transitions, photos et limites des retours
 # (docs/MODULE_RETOURS.md, § Sécurité).
 # =====================================================================
 
@@ -423,7 +423,7 @@ def image_png(nom="preuve.png"):
     return SimpleUploadedFile(nom, tampon.getvalue(), content_type="image/png")
 
 
-class RetoursDiagnosticBase(BaseRetourTestCase):
+class RetoursCycleBase(BaseRetourTestCase):
     def setUp(self):
         super().setUp()
         self.admin = Utilisateur.objects.create_user(
@@ -454,8 +454,8 @@ class RetoursDiagnosticBase(BaseRetourTestCase):
         return demande
 
 
-class EligibiliteTests(RetoursDiagnosticBase):
-    """R-a : commande livrée seulement ; R-b : délai de retour."""
+class EligibiliteTests(RetoursCycleBase):
+    """Commande livrée seulement, et dans le délai de retour."""
 
     def test_commande_confirmee_ou_expediee_refusee(self):
         for statut in (Commande.Status.CONFIRMEE, Commande.Status.EXPEDIEE, Commande.Status.PREPARATION):
@@ -504,8 +504,8 @@ class EligibiliteTests(RetoursDiagnosticBase):
         self.assertEqual(self.demander(articles=[{"commande_item_id": str(self.item1.id), "quantite": 2}]).status_code, 201)
 
 
-class MontantRembourseTests(RetoursDiagnosticBase):
-    """R-e : le client récupère ce qu'il a payé, remise du coupon déduite."""
+class MontantRembourseTests(RetoursCycleBase):
+    """Le client récupère ce qu'il a payé, remise du coupon déduite."""
 
     def setUp(self):
         super().setUp()
@@ -527,8 +527,8 @@ class MontantRembourseTests(RetoursDiagnosticBase):
         self.assertEqual(Decimal(r.data["montant_remboursement"]), Decimal("16666"))
 
 
-class TransitionsTests(RetoursDiagnosticBase):
-    """R-d, R4, R5 : qui fait quoi, et depuis quel statut."""
+class TransitionsTests(RetoursCycleBase):
+    """Qui fait quoi, et depuis quel statut."""
 
     def test_rejet_apres_reception_refuse(self):
         demande = self.demande_au_statut(DemandeRetour.Statut.RECEPTIONNE)
@@ -596,8 +596,8 @@ class TransitionsTests(RetoursDiagnosticBase):
                     self.assertEqual(self.agir(demande.id, utilisateur, action).status_code, 400)
 
 
-class NotificationEtVisibiliteTests(RetoursDiagnosticBase):
-    """R-i : le vendeur est prévenu ; R-j : un vendeur voit aussi ses retours d'acheteur."""
+class NotificationEtVisibiliteTests(RetoursCycleBase):
+    """Le vendeur est prévenu ; un vendeur voit aussi ses retours d'acheteur."""
 
     def test_vendeur_notifie_d_une_nouvelle_demande(self):
         with self.captureOnCommitCallbacks(execute=True):
@@ -620,8 +620,8 @@ class NotificationEtVisibiliteTests(RetoursDiagnosticBase):
         self.assertNotIn(r.data["id"], ids)
 
 
-class PhotosTests(RetoursDiagnosticBase):
-    """R-h / R7 : photos limitées, renommées, servies après contrôle d'accès."""
+class PhotosTests(RetoursCycleBase):
+    """Photos limitées, renommées, servies après contrôle d'accès."""
 
     def setUp(self):
         super().setUp()
@@ -680,8 +680,8 @@ class PhotosTests(RetoursDiagnosticBase):
         self.assertEqual(self.client.get(f"{URL_RETOURS}{autre.id}/photos/{r.data['id']}/").status_code, 404)
 
 
-class LimitesDeDebitTests(RetoursDiagnosticBase):
-    """R-m : limites dédiées, avec les vraies valeurs de base.py."""
+class LimitesDeDebitTests(RetoursCycleBase):
+    """Limites dédiées, avec les vraies valeurs de base.py."""
 
     def test_creation_limitee(self):
         from django.core.cache import cache
@@ -698,8 +698,8 @@ class LimitesDeDebitTests(RetoursDiagnosticBase):
         self.assertEqual(codes, [400] * n + [429])
 
 
-class RemboursementUniqueTests(RetoursDiagnosticBase):
-    """R-c : la part du vendeur n'est déduite qu'une fois par retour."""
+class RemboursementUniqueTests(RetoursCycleBase):
+    """La part du vendeur n'est déduite qu'une fois par retour."""
 
     def setUp(self):
         super().setUp()
@@ -725,8 +725,9 @@ class RemboursementUniqueTests(RetoursDiagnosticBase):
 
 
 class RemboursementConcurrentTests(TransactionTestCase):
-    """R-c confirmé en concurrence réelle : deux « rembourser » simultanés
-    répondaient 200 tous les deux et la part du vendeur était déduite deux fois."""
+    """Même règle en concurrence réelle : deux « rembourser » simultanés ne
+    répondent pas 200 tous les deux et la part du vendeur n'est déduite
+    qu'une fois."""
 
     @skipUnless(connection.vendor == "postgresql", "select_for_update exige PostgreSQL.")
     def test_deux_remboursements_simultanes(self):

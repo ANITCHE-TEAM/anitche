@@ -209,7 +209,7 @@ services:
       - "443:443"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      # F-18 : certificats émis/renouvelés par le service "certbot"
+      # Certificats émis/renouvelés par le service "certbot"
       # ci-dessous, partagés en lecture avec Nginx via ce volume commun.
       - certbot_conf:/etc/letsencrypt:ro
       - certbot_www:/var/www/certbot:ro
@@ -222,7 +222,7 @@ services:
       - backend-django
       - backend-fastapi
 
-  # F-18 : renouvelle automatiquement le certificat Let's Encrypt toutes les
+  # Renouvelle automatiquement le certificat Let's Encrypt toutes les
   # 12h (certbot n'agit que si le certificat approche de son expiration —
   # à 30 jours de l'échéance par défaut). L'émission INITIALE du certificat
   # ne passe pas par ce service : voir infra/scripts/init-lets-encrypt.sh,

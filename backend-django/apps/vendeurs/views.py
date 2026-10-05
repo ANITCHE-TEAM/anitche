@@ -108,7 +108,7 @@ class MaBoutiqueView(generics.RetrieveUpdateAPIView):
 
     Toutes les méthodes, lecture comprise, exigent un compte vendeur validé
     (403 sinon) ; consultation et mise à jour sont réservées au propriétaire,
-    et une boutique suspendue n'est plus modifiable (403).
+    et une boutique suspendue n'est pas modifiable (403).
     """
 
     serializer_class = BoutiqueSerializer
@@ -119,10 +119,10 @@ class MaBoutiqueView(generics.RetrieveUpdateAPIView):
     def get_throttles(self):
         """
         Le scope 'boutique_creation' (taux bas, pensé pour limiter les
-        tentatives de création) ne doit s'appliquer qu'au POST. Il était
-        auparavant posé via throttle_classes/throttle_scope de classe,
-        donc appliqué à GET/PATCH aussi — bloquant le dashboard vendeur
-        (consultation/mise à jour répétées en usage normal). Les autres
+        tentatives de création) ne doit s'appliquer qu'au POST : posé via
+        throttle_classes/throttle_scope de classe, il s'appliquerait aussi
+        à GET/PATCH et bloquerait le dashboard vendeur (consultation/mise à
+        jour répétées en usage normal). Les autres
         méthodes retombent sur les throttles par défaut (user/anon, voir
         REST_FRAMEWORK.DEFAULT_THROTTLE_CLASSES).
         """

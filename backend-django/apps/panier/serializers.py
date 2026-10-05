@@ -79,10 +79,10 @@ class PanierItemSerializer(serializers.ModelSerializer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if self.instance is not None and not isinstance(self.instance, (list, tuple)):
-            # Mise à jour d'une ligne : la variante n'est plus modifiable.
-            # Changer de variante contournait les contrôles de stock et de
-            # disponibilité (faits sur l'ancienne variante) : il faut
-            # supprimer la ligne et ajouter la nouvelle variante.
+            # Mise à jour d'une ligne : la variante n'est pas modifiable.
+            # Changer de variante contournerait les contrôles de stock et de
+            # disponibilité (faits sur la variante d'origine) : il faut
+            # supprimer la ligne et ajouter l'autre variante.
             self.fields['variante'].required = False
 
     def validate(self, data):

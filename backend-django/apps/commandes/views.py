@@ -104,7 +104,7 @@ class ValiderPanierView(APIView):
             # elle relit alors un panier vide et échoue proprement en 400.
             panier = Panier.objects.select_for_update().get(pk=panier.pk)
 
-            # F-10 : le coupon (s'il y en a un) est verrouillé en même temps
+            # Le coupon (s'il y en a un) est verrouillé en même temps
             # que le panier : une double soumission ne peut pas l'appliquer
             # deux fois (voir CompteFidelite.debiter_points).
             try:
@@ -197,7 +197,7 @@ class ValiderPanierView(APIView):
 
                 commandes_creees.append(commande)
 
-            # F-10 : le coupon n'est marqué utilisé qu'une fois toutes les
+            # Le coupon n'est marqué utilisé qu'une fois toutes les
             # commandes effectivement créées (dans la même transaction) —
             # grâce au verrou posé plus haut, aucune autre requête n'a pu le
             # consommer entre-temps.

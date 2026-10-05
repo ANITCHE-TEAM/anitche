@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# F-18 (audit sécurité) : émission INITIALE du certificat Let's Encrypt
+# Émission INITIALE du certificat Let's Encrypt
 # pour anitche.com / www.anitche.com.
 #
 # À lancer UNE SEULE FOIS, avant le tout premier démarrage de Nginx avec le
@@ -11,7 +11,7 @@
 # obtenu — méthode standard, documentée par Certbot lui-même.
 #
 # Ensuite, le renouvellement est automatique via le service "certbot" de
-# docker-compose.prod.yml : ce script ne sert plus qu'en cas de changement
+# docker-compose.prod.yml : ce script n'est utile qu'en cas de changement
 # de domaine ou de perte totale du volume de certificats.
 #
 # Usage : ./infra/scripts/init-lets-encrypt.sh

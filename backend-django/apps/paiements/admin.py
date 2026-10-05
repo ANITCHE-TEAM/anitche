@@ -2,7 +2,7 @@
 
 L'argent ne bouge que par apps.paiements.services / reversements (verrous,
 contrôles, journal de sécurité) et leurs endpoints réservés au rôle
-administrateur. `is_staff` ne donne accès qu'à la consultation (F-14) :
+administrateur. `is_staff` ne donne accès qu'à la consultation :
 un compte staff « technique » ne peut ni valider un paiement, ni marquer
 un remboursement effectué, ni changer un taux de commission.
 """

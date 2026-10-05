@@ -5526,7 +5526,7 @@ paths:
     get:
       operationId: support_tickets_retrieve
       description: |-
-        Détail et reclassement (category/priority, staff seulement). Plus de
+        Détail et reclassement (category/priority, staff seulement). Aucune
         suppression par l'API : un ticket est un historique de litige.
       summary: Détail d'un ticket
       parameters:
@@ -5569,7 +5569,7 @@ paths:
     put:
       operationId: support_tickets_update
       description: |-
-        Détail et reclassement (category/priority, staff seulement). Plus de
+        Détail et reclassement (category/priority, staff seulement). Aucune
         suppression par l'API : un ticket est un historique de litige.
       summary: Reclasser un ticket (équipe support)
       parameters:
@@ -6073,8 +6073,8 @@ paths:
     post:
       operationId: utilisateurs_connexion_create
       description: |-
-        F-04 (audit sécurité) : notifie le titulaire du compte à chaque
-        connexion réussie, uniquement en cas de succès (jamais sur un
+        Notifie le titulaire du compte à chaque connexion réussie,
+        uniquement en cas de succès (jamais sur un
         échec, pour ne pas alerter à tort sur une simple faute de frappe
         de mot de passe ni révéler qu'un email existe).
       summary: Connexion (email + mot de passe)
@@ -6294,16 +6294,16 @@ paths:
       description: |-
         Permet à un visiteur de créer un nouveau compte.
 
-        F-04 (audit sécurité) : la création seule ne prouve jamais que le
+        La création seule ne prouve jamais que le
         demandeur possède réellement l'adresse email fournie (contrairement
         aux flux de changement d'email/téléphone ou de mot de passe oublié,
         qui exigent tous une preuve par OTP). Un compte peut donc être créé
         avec l'email de quelqu'un d'autre, mais reste marqué
         `email_verifie=False` tant que le code envoyé sur cette adresse n'a
         pas été confirmé via VerificationOTPView (même mécanisme que les
-        autres flux OTP de ce module) — et c'est justement cet état non
-        vérifié que F-01 s'appuie dessus pour refuser toute liaison Google
-        ultérieure sur ce compte.
+        autres flux OTP de ce module) — et c'est justement sur cet état non
+        vérifié que s'appuie la connexion Google pour refuser toute liaison
+        ultérieure sur ce compte (anti pré-hijacking).
       tags:
       - Utilisateurs
       requestBody:
@@ -7217,7 +7217,7 @@ paths:
 
         Toutes les méthodes, lecture comprise, exigent un compte vendeur validé
         (403 sinon) ; consultation et mise à jour sont réservées au propriétaire,
-        et une boutique suspendue n'est plus modifiable (403).
+        et une boutique suspendue n'est pas modifiable (403).
       summary: Ma boutique
       tags:
       - Vendeurs
@@ -7315,7 +7315,7 @@ paths:
 
         Toutes les méthodes, lecture comprise, exigent un compte vendeur validé
         (403 sinon) ; consultation et mise à jour sont réservées au propriétaire,
-        et une boutique suspendue n'est plus modifiable (403).
+        et une boutique suspendue n'est pas modifiable (403).
       summary: Modifier ma boutique
       tags:
       - Vendeurs
@@ -7379,7 +7379,7 @@ paths:
 
         Toutes les méthodes, lecture comprise, exigent un compte vendeur validé
         (403 sinon) ; consultation et mise à jour sont réservées au propriétaire,
-        et une boutique suspendue n'est plus modifiable (403).
+        et une boutique suspendue n'est pas modifiable (403).
       summary: Modifier ma boutique
       tags:
       - Vendeurs
@@ -11755,7 +11755,7 @@ components:
     PatchedTarifLivraisonRequest:
       type: object
       description: |-
-        Administration. La zone et la commune d'un tarif ne changent plus
+        Administration. La zone et la commune d'un tarif ne changent pas
         après sa création (on crée un autre tarif) ; le tarif par défaut d'une
         zone ne se désactive pas : sans lui, plus aucune commande possible.
 
@@ -13293,7 +13293,7 @@ components:
     TarifLivraison:
       type: object
       description: |-
-        Administration. La zone et la commune d'un tarif ne changent plus
+        Administration. La zone et la commune d'un tarif ne changent pas
         après sa création (on crée un autre tarif) ; le tarif par défaut d'une
         zone ne se désactive pas : sans lui, plus aucune commande possible.
 
@@ -13341,7 +13341,7 @@ components:
     TarifLivraisonRequest:
       type: object
       description: |-
-        Administration. La zone et la commune d'un tarif ne changent plus
+        Administration. La zone et la commune d'un tarif ne changent pas
         après sa création (on crée un autre tarif) ; le tarif par défaut d'une
         zone ne se désactive pas : sans lui, plus aucune commande possible.
 

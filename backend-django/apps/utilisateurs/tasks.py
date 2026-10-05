@@ -116,7 +116,7 @@ def envoyer_code_otp_email(email_destinataire, code, type_usage):
 
 @shared_task
 def envoyer_notification_connexion(email_destinataire, adresse_ip, user_agent):
-    """F-04 (audit sécurité) : notifie le titulaire du compte à chaque
+    """Notifie le titulaire du compte à chaque
     connexion réussie (classique ou Google), avec l'IP et le user-agent,
     pour qu'il puisse repérer une connexion qu'il n'a pas lui-même
     initiée. Envoyée uniquement en cas de succès, jamais sur un échec

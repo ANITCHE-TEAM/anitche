@@ -67,16 +67,16 @@ class InscriptionView(generics.CreateAPIView):
     """
     Permet à un visiteur de créer un nouveau compte.
 
-    F-04 (audit sécurité) : la création seule ne prouve jamais que le
+    La création seule ne prouve jamais que le
     demandeur possède réellement l'adresse email fournie (contrairement
     aux flux de changement d'email/téléphone ou de mot de passe oublié,
     qui exigent tous une preuve par OTP). Un compte peut donc être créé
     avec l'email de quelqu'un d'autre, mais reste marqué
     `email_verifie=False` tant que le code envoyé sur cette adresse n'a
     pas été confirmé via VerificationOTPView (même mécanisme que les
-    autres flux OTP de ce module) — et c'est justement cet état non
-    vérifié que F-01 s'appuie dessus pour refuser toute liaison Google
-    ultérieure sur ce compte.
+    autres flux OTP de ce module) — et c'est justement sur cet état non
+    vérifié que s'appuie la connexion Google pour refuser toute liaison
+    ultérieure sur ce compte (anti pré-hijacking).
     """
 
     queryset = Utilisateur.objects.all()
@@ -102,8 +102,8 @@ class LoginThrottleView(TokenObtainPairView):
     throttle_scope = 'login'  # taux défini dans DEFAULT_THROTTLE_RATES
 
     def post(self, request, *args, **kwargs):
-        """F-04 (audit sécurité) : notifie le titulaire du compte à chaque
-        connexion réussie, uniquement en cas de succès (jamais sur un
+        """Notifie le titulaire du compte à chaque connexion réussie,
+        uniquement en cas de succès (jamais sur un
         échec, pour ne pas alerter à tort sur une simple faute de frappe
         de mot de passe ni révéler qu'un email existe)."""
         response = super().post(request, *args, **kwargs)
@@ -296,7 +296,7 @@ class VerificationOTPView(APIView):
         if not valide:
             raise ValidationError({"code": [message]})
 
-        # Confirmation de l'inscription (F-04) : le compte a déjà été
+        # Confirmation de l'inscription : le compte a déjà été
         # créé (email_verifie=False par défaut) ; on ne le marque vérifié
         # qu'une fois l'OTP envoyé sur cette adresse confirmé.
         if otp.type_usage == TypeUsageOTP.INSCRIPTION:
@@ -412,12 +412,12 @@ class TelechargerDocumentKYCView(APIView):
 
     SÉCURITÉ CRITIQUE (Broken Access Control) : ces documents contiennent
     des données personnelles sensibles (pièce d'identité, photo de visage).
-    Avant ce correctif, ils étaient accessibles directement via leur URL
-    MEDIA_URL, sans aucune authentification — n'importe qui connaissant ou
-    devinant le chemin du fichier pouvait le consulter. Cette vue est
-    désormais le SEUL point d'accès légitime : le champ FileField reste
-    techniquement dans MEDIA_ROOT, mais son URL brute ne doit plus jamais
-    être communiquée au frontend (voir DocumentKYCSerializer).
+    Servis directement via leur URL MEDIA_URL, ils seraient accessibles
+    sans aucune authentification — n'importe qui connaissant ou devinant
+    le chemin du fichier pourrait le consulter. Cette vue est le SEUL
+    point d'accès légitime : le champ FileField reste techniquement dans
+    MEDIA_ROOT, mais son URL brute ne doit jamais être communiquée au
+    frontend (voir DocumentKYCSerializer).
 
     Accès autorisé :
     - le propriétaire du dossier KYC (son propre document) ;
@@ -550,12 +550,11 @@ class ConfirmationMotDePasseOublieView(APIView):
         # JAMAIS varier selon que l'email existe ou non, ni selon qu'un
         # OTP est en attente ou non — sinon on réintroduit exactement la
         # fuite que DemandeMotDePasseOublieView évite volontairement plus
-        # haut ("Si ce compte existe, un code a été envoyé."). Avant ce
-        # correctif, un email inconnu renvoyait "Code invalide." tandis
-        # qu'un email connu sans OTP en attente renvoyait "Aucun code en
-        # attente." — un attaquant pouvait ainsi deviner quels emails sont
-        # inscrits en soumettant directement l'étape 2 avec des adresses
-        # au hasard, sans jamais passer par l'étape 1.
+        # haut ("Si ce compte existe, un code a été envoyé."). Avec deux
+        # messages distincts (email inconnu / aucun code en attente), un
+        # attaquant pourrait deviner quels emails sont inscrits en
+        # soumettant directement l'étape 2 avec des adresses au hasard,
+        # sans jamais passer par l'étape 1.
         message_generique = "Code invalide ou expiré."
 
         utilisateur = Utilisateur.objects.filter(
@@ -647,7 +646,7 @@ class ConnexionGoogleView(APIView):
 
         refresh = RefreshToken.for_user(utilisateur)
 
-        # F-04 (audit sécurité) : même notification de connexion que le
+        # Même notification de connexion que le
         # flux classique, uniquement en cas de succès.
         envoyer_notification_connexion.delay(
             utilisateur.email,

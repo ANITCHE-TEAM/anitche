@@ -404,10 +404,10 @@ def image_png(nom="image.png"):
 
 
 class BooleensMultipartTests(APITestCase):
-    """En multipart, DRF lisait un booléen absent comme False : une boutique
-    créée avec son logo naissait fermée, un produit ou une variante
-    inactifs. Un booléen absent est désormais ignoré : valeur par défaut du
-    modèle à la création, valeur actuelle conservée en mise à jour."""
+    """En multipart, DRF lit par défaut un booléen absent comme False (une
+    boutique créée avec son logo naîtrait fermée, un produit ou une variante
+    inactifs). Un booléen absent est ignoré : valeur par défaut du modèle à
+    la création, valeur actuelle conservée en mise à jour."""
 
     def setUp(self):
         self.vendeur = creer_utilisateur("vendeur.multipart@anitche.ci", role=Role.VENDEUR, statut_kyc=StatutKYC.VALIDE)

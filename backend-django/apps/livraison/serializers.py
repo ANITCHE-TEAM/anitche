@@ -294,7 +294,7 @@ class LivraisonAReassignerSerializer(serializers.ModelSerializer):
 # =====================================================================
 
 class TarifLivraisonSerializer(serializers.ModelSerializer):
-    """Administration. La zone et la commune d'un tarif ne changent plus
+    """Administration. La zone et la commune d'un tarif ne changent pas
     après sa création (on crée un autre tarif) ; le tarif par défaut d'une
     zone ne se désactive pas : sans lui, plus aucune commande possible.
 

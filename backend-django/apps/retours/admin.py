@@ -30,7 +30,7 @@ class DemandeRetourAdmin(admin.ModelAdmin):
     )
     list_filter = ("statut", "motif", "type_resolution", "date_creation")
     search_fields = ("numero_retour", "commande__numero_commande", "client__email", "boutique__nom")
-    # 'statut' et 'montant_remboursement' en lecture seule (F-06) : toute
+    # 'statut' et 'montant_remboursement' en lecture seule : toute
     # transition doit passer par apps.retours.services.traiter, sinon on
     # contourne sa machine à états (ex. passer directement à "rembourse"
     # sans déclencher le remboursement réel).

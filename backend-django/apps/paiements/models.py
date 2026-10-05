@@ -28,9 +28,9 @@ class Paiement(models.Model):
         MTN_MONEY = "mtn_money", "MTN Mobile Money"
         MOOV_MONEY = "moov_money", "Moov Money"
         CARTE_BANCAIRE = "carte_bancaire", "Carte Bancaire (Visa / Mastercard)"
-        # Le paiement à la livraison n'existe plus : les anciens paiements
-        # « espece_livraison » gardent leur valeur (historique) mais ne
-        # peuvent plus être créés (migration 0003 : passés annulés).
+        # Pas de paiement à la livraison : les paiements « espece_livraison »
+        # encore en base gardent leur valeur (historique, passés annulés par
+        # la migration 0003) mais aucun ne peut être créé.
 
     class Statut(models.TextChoices):
         EN_ATTENTE = "en_attente", "En attente"

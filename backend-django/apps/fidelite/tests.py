@@ -177,7 +177,7 @@ class FideliteAPITestCase(BaseFideliteTestCase):
             "montant_commande": "20000.00",
         }
 
-        # F5 : même réponse qu'un code inexistant (404), sans révéler le coupon.
+        # Même réponse qu'un code inexistant (404), sans révéler le coupon.
         response = self.client.post(url, data, format="json")
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         inexistant = self.client.post(url, {**data, "code": "INEXISTANT"}, format="json")
@@ -197,27 +197,26 @@ class FideliteThrottleTestCase(BaseFideliteTestCase):
     en abaissant temporairement leur taux, la N+1-ième requête dans la
     fenêtre doit être rejetée en 429.
 
-    DIAGNOSTIC (test préexistant, corrigé sans toucher au module) :
     override_settings(REST_FRAMEWORK=...) ne suffit pas ici. DRF fige
     ScopedRateThrottle.THROTTLE_RATES = api_settings.DEFAULT_THROTTLE_RATES
     comme attribut de CLASSE au moment de l'import de
     rest_framework.throttling (une seule fois par process de test) ; ce
     n'est pas une propriété relue à chaque requête. override_settings
-    remplace l'objet settings.REST_FRAMEWORK par un nouveau dict, mais
-    l'attribut de classe déjà résolu continue de pointer vers l'ancien
-    objet (celui de config/settings/test.py, qui met tous les taux à
-    100000/jour pour éviter les 429 parasites ailleurs dans la suite) —
-    d'où le 200/201 observé au lieu du 429 attendu. Le fix correct est
-    de patcher directement ce dict de classe pour la durée du test.
+    substitue un autre dict à settings.REST_FRAMEWORK, mais l'attribut de
+    classe déjà résolu pointe toujours vers le dict d'origine (celui de
+    config/settings/test.py, qui met tous les taux à 100000/jour pour
+    éviter les 429 parasites ailleurs dans la suite) : la requête
+    passerait en 200/201 au lieu du 429 attendu. Le test patche donc
+    directement ce dict de classe pour la durée du test.
 
     Second point d'isolation nécessaire : le cache de throttling
     (LocMemCache en test, voir config/settings/test.py) n'est jamais
-    vidé entre deux tests par Django. Comme les PK SQLite sont réutilisées
-    après le rollback de transaction propre à chaque test (client1 est
-    quasi systématiquement pk=1), l'historique de requêtes laissé par un
-    AUTRE test ayant déjà sollicité la même vue sous le même scope pour
-    ce même pk (au taux normal, non abaissé) pollue le compteur ici. On
-    repart donc d'un cache vide à chaque test de cette classe.
+    vidé entre deux tests par Django. Si un AUTRE test a déjà sollicité
+    la même vue sous le même scope pour une clé identique (même pk
+    d'utilisateur, ce qui arrive quand la base réutilise les PK après le
+    rollback, comme SQLite), son historique de requêtes pollue le
+    compteur ici. On repart donc d'un cache vide à chaque test de cette
+    classe.
     """
 
     def setUp(self):
@@ -261,7 +260,7 @@ class FideliteThrottleTestCase(BaseFideliteTestCase):
 
 
 # =====================================================================
-# Diagnostic de septembre 2026 : un test par faille confirmée
+# Gains en attente, retours, coupons et administration
 # (docs/MODULE_FIDELITE.md, § Sécurité).
 # =====================================================================
 
@@ -326,7 +325,7 @@ class GainsBase(BaseFideliteTestCase):
 
 
 class PointsEnAttenteTests(GainsBase):
-    """F-b / F1 : plus aucun point au paiement ; « en attente » à la
+    """Aucun point au paiement ; « en attente » à la
     livraison, crédités à la fin du délai de rétractation."""
 
     def test_aucun_point_au_paiement(self):
@@ -368,7 +367,7 @@ class PointsEnAttenteTests(GainsBase):
         self.assertIsNone(services.ouvrir_gain(self.commande))
         self.assertEqual(GainFidelite.objects.count(), 1)
 
-    def test_commande_creditee_au_paiement_avant_la_refonte_pas_de_second_gain(self):
+    def test_commande_deja_creditee_au_paiement_pas_de_second_gain(self):
         compte, _ = CompteFidelite.objects.get_or_create(utilisateur=self.client1)
         compte.crediter_points(25, reference_externe=self.paiement.reference)
         Commande.objects.filter(pk=self.commande.pk).update(status=Commande.Status.EXPEDIEE)
@@ -397,7 +396,7 @@ class PointsEnAttenteTests(GainsBase):
 
 
 class RetourEtPointsTests(GainsBase):
-    """F-c / F2 : retour pendant l'attente → points recalculés ; après le
+    """Retour pendant l'attente → points recalculés ; après le
     crédit → reprise plafonnée, une seule fois par retour."""
 
     def test_retour_partiel_pendant_l_attente(self):
@@ -451,7 +450,7 @@ class RetourEtPointsTests(GainsBase):
 
 
 class CouponsTests(BaseFideliteTestCase):
-    """F-d, F-e, F-f, F5 : utilisation, restitution, valeurs, confidentialité."""
+    """Utilisation, restitution, valeurs, confidentialité."""
 
     def setUp(self):
         super().setUp()
@@ -539,7 +538,7 @@ class CouponsTests(BaseFideliteTestCase):
 
 
 class AdminFideliteTests(BaseFideliteTestCase):
-    """F-g : aucun point ni journal fabriqué à la main dans l'admin."""
+    """Aucun point ni journal fabriqué à la main dans l'admin."""
 
     def test_solde_et_journal_en_lecture_seule(self):
         from .admin import CompteFideliteAdmin, TransactionFideliteAdmin

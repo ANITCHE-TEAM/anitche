@@ -180,8 +180,8 @@ class PanierTestCase(PanierBaseTestCase):
         self.assertFalse(PanierItem.objects.filter(pk=item.id).exists())
 
 
-class PanierFaillesCorrigeesTestCase(PanierBaseTestCase):
-    """Une faille confirmée au diagnostic = un test qui la bloque."""
+class PanierProtectionsTestCase(PanierBaseTestCase):
+    """Protections du panier : chaque scénario d'abus a un test qui le bloque."""
 
     def setUp(self):
         super().setUp()

@@ -1,9 +1,9 @@
 """Adaptateur CinetPay (API REST v1 : api.cinetpay.co / sandbox api.cinetpay.net).
 
 Référence : SDK officiels CinetPay (github.com/cinetpay/cinetpay-python,
-cinetpay-php-sdk v3.0.1 du 11/08/2026). L'ancienne API « site_id / apikey »
-et son en-tête x-token HMAC ont été remplacés par cette API ; l'ancienne
-documentation (docs.cinetpay.com) n'est plus en ligne. Détails et écarts :
+cinetpay-php-sdk v3.0.1 du 11/08/2026). L'API « site_id / apikey » à
+en-tête x-token HMAC est obsolète chez CinetPay et sa documentation
+(docs.cinetpay.com) est hors ligne : ne pas s'y référer. Détails et écarts :
 docs/MODULE_PAIEMENTS.md, « Adaptateur CinetPay ».
 
 - Authentification : POST /v1/oauth/login {api_key, api_password} → jeton

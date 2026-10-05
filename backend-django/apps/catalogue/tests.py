@@ -368,7 +368,7 @@ class CatalogueVendeurAPITests(BaseCatalogueTestCase):
 
 
 class StockConcurrenceTestCase(TransactionTestCase):
-    """F-09 : Stock.incrementer() doit être atomique, comme decrementer().
+    """Stock.incrementer() doit être atomique, comme decrementer().
     Nécessite TransactionTestCase (pas APITestCase/TestCase) : les threads
     doivent voir une vraie transaction commitée en base, pas la transaction
     unique enveloppant un TestCase classique."""
@@ -419,7 +419,7 @@ class StockConcurrenceTestCase(TransactionTestCase):
 
 
 # =====================================================================
-# 4. REFONTE DU MODULE (diagnostic de septembre 2026)
+# 4. ESPACES VENDEUR, PUBLIC ET ADMINISTRATION (docs/MODULE_CATALOGUE.md)
 # =====================================================================
 
 URL_V = '/api/catalogue/vendeur/'
@@ -439,7 +439,7 @@ def image_png(nom='photo.png', taille=(4, 4), octets_aleatoires=False):
 
 
 @override_settings(MEDIA_ROOT=DOSSIER_MEDIA_TESTS)
-class BaseRefonteCatalogue(BaseCatalogueTestCase):
+class CatalogueEspacesBase(BaseCatalogueTestCase):
     """produit1 (boutique1) avec une variante en stock ; produit2 (boutique2) idem."""
 
     @classmethod
@@ -468,8 +468,8 @@ class BaseRefonteCatalogue(BaseCatalogueTestCase):
         return [p['id'] for p in self.client.get(URL_P + 'produits/', params).data['results']]
 
 
-class CatalogueSuspensionTests(BaseRefonteCatalogue):
-    """C2 : boutique suspendue = lecture seule, comme ma-boutique/ et les passeports."""
+class CatalogueSuspensionTests(CatalogueEspacesBase):
+    """Boutique suspendue = lecture seule, comme ma-boutique/ et les passeports."""
 
     def test_lecture_autorisee_ecriture_refusee(self):
         image = ImageProduit.objects.create(produit=self.produit1, image=image_png())
@@ -506,9 +506,9 @@ class CatalogueSuspensionTests(BaseRefonteCatalogue):
         self.assertTrue(ImageProduit.objects.filter(pk=image.pk).exists())
 
 
-class CatalogueIsolationTests(BaseRefonteCatalogue):
+class CatalogueIsolationTests(CatalogueEspacesBase):
     def test_variante_ne_change_pas_de_produit(self):
-        # C1 : avant, la variante passait sur le produit (et la fiche) de vendeur2.
+        # Une variante ne peut pas être déplacée sur le produit (et la fiche) de vendeur2.
         self.en_tant_que(self.vendeur1)
         response = self.client.patch(
             f'{URL_V}variantes/{self.variante1.pk}/', {'produit': self.produit2.pk}, format='json',
@@ -557,9 +557,9 @@ class CatalogueIsolationTests(BaseRefonteCatalogue):
                 self.assertEqual(self.client.get(f'{URL_V}produits/{self.produit1.pk}/').status_code, 403)
 
 
-class CatalogueVisibilitePubliqueTests(BaseRefonteCatalogue):
+class CatalogueVisibilitePubliqueTests(CatalogueEspacesBase):
     def test_stock_public_reduit_a_la_disponibilite(self):
-        # C3 : ni quantité ni seuil d'alerte côté public.
+        # Ni quantité ni seuil d'alerte côté public.
         response = self.client.get(f'{URL_P}produits/{self.produit1.slug}/')
         self.assertEqual(response.data['variantes'][0]['stock'], {'est_en_stock': True})
         self.assertNotIn('quantite_disponible', response.content.decode())
@@ -570,7 +570,7 @@ class CatalogueVisibilitePubliqueTests(BaseRefonteCatalogue):
         self.assertEqual((stock_vendeur['quantite_disponible'], stock_vendeur['seuil_alerte']), (10, 3))
 
     def test_produit_sans_variante_active_masque(self):
-        # Q2 : sans variante active (ou sans variante du tout), rien n'est achetable.
+        # Sans variante active (ou sans variante du tout), rien n'est achetable.
         VarianteProduit.objects.filter(pk=self.variante1.pk).update(est_active=False)
         sans_variante = Produit.objects.create(boutique=self.boutique1, nom="Vide")
         for produit in (self.produit1, sans_variante):
@@ -592,7 +592,7 @@ class CatalogueVisibilitePubliqueTests(BaseRefonteCatalogue):
             self.assertEqual([c['nom'] for c in sous_categories], ['Chaussures'])
 
     def test_filtre_et_tri_sur_le_prix_effectif_des_variantes_actives(self):
-        # Une variante inactive très chère ne fait plus sortir produit1 ;
+        # Une variante inactive très chère ne fait pas sortir produit1 ;
         # une promo compte comme prix affiché.
         VarianteProduit.objects.create(produit=self.produit1, nom="Luxe", prix=Decimal("900000"), est_active=False)
         self.assertNotIn(self.produit1.pk, self.ids_publics(prix_min='500000'))
@@ -610,8 +610,8 @@ class CatalogueVisibilitePubliqueTests(BaseRefonteCatalogue):
         self.assertEqual(self.ids_publics(categorie=str(self.cat_chaussures.pk)), [self.produit1.pk])
 
 
-class CatalogueDesactivationTests(BaseRefonteCatalogue):
-    """Q1 : DELETE = désactivation ; l'historique n'est jamais cassé."""
+class CatalogueDesactivationTests(CatalogueEspacesBase):
+    """DELETE = désactivation ; l'historique n'est jamais cassé."""
 
     def test_delete_produit_desactive(self):
         self.en_tant_que(self.vendeur1)
@@ -631,7 +631,8 @@ class CatalogueDesactivationTests(BaseRefonteCatalogue):
         self.assertFalse(ligne.est_disponible)
 
     def test_produit_et_variante_commandes_desactivables(self):
-        # Avant : 500 (ProtectedError) sur la suppression.
+        # Les lignes de commande protègent produit et variante (PROTECT) :
+        # la désactivation ne doit pas lever ProtectedError.
         commande = Commande.objects.create(boutique=self.boutique1, client=self.client_user, montant_total=Decimal("15000"))
         CommandeItem.objects.create(
             commande=commande, variante=self.variante1, nom_produit="Pagne", prix_unitaire=Decimal("15000"), quantite=1,
@@ -668,8 +669,8 @@ class CatalogueDesactivationTests(BaseRefonteCatalogue):
             self.produit2.delete()
 
 
-class CatalogueModerationTests(BaseRefonteCatalogue):
-    """Q7 : l'administration désactive/réactive un produit, et rien d'autre ;
+class CatalogueModerationTests(CatalogueEspacesBase):
+    """L'administration désactive/réactive un produit, et rien d'autre ;
     le vendeur ne lève pas une désactivation de l'administration."""
 
     def moderer(self, produit, **corps):
@@ -779,8 +780,8 @@ class CatalogueModerationTests(BaseRefonteCatalogue):
                 Produit.objects.filter(pk=self.produit1.pk).update(est_actif=False)
 
 
-class CataloguePrixTests(BaseRefonteCatalogue):
-    """Q5 : FCFA entiers, prix > 0, prix_base ≥ 0, 0 < prix_promo < prix, poids ≥ 0."""
+class CataloguePrixTests(CatalogueEspacesBase):
+    """FCFA entiers, prix > 0, prix_base ≥ 0, 0 < prix_promo < prix, poids ≥ 0."""
 
     def creer_variante(self, **corps):
         self.en_tant_que(self.vendeur1)
@@ -837,10 +838,11 @@ class CataloguePrixTests(BaseRefonteCatalogue):
                 Produit.objects.filter(pk=self.produit1.pk).update(prix_base=Decimal("-1"))
 
 
-class CatalogueStockTests(BaseRefonteCatalogue):
+class CatalogueStockTests(CatalogueEspacesBase):
     def test_seuil_seul_nannule_pas_une_vente_concurrente(self):
-        # C4 : le vendeur a lu le stock (10) ; 3 unités sont vendues avant
-        # son enregistrement. Avant : la quantité revenait à 10.
+        # Le vendeur a lu le stock (10) ; 3 unités sont vendues avant son
+        # enregistrement. Ne changer que le seuil ne doit pas remettre la
+        # quantité à 10.
         get_object_original = StockUpdateView.get_object
 
         def lecture_puis_vente(vue):
@@ -862,7 +864,7 @@ class CatalogueStockTests(BaseRefonteCatalogue):
         self.assertEqual(response.status_code, 400)
 
 
-class CatalogueImagesTests(BaseRefonteCatalogue):
+class CatalogueImagesTests(CatalogueEspacesBase):
     def envoyer(self, fichier):
         self.en_tant_que(self.vendeur1)
         return self.client.post(f'{URL_V}produits/{self.produit1.pk}/images/', {'image': fichier}, format='multipart')
@@ -886,13 +888,13 @@ class CatalogueImagesTests(BaseRefonteCatalogue):
         response = self.envoyer(lourde)
         self.assertEqual(response.status_code, 400)
         self.assertIn('5 Mo', str(response.data['errors']['image']))
-        # Entre 3 et 5 Mo : accepté (l'ancienne limite de 3 Mo du serializer a disparu).
+        # Entre 3 et 5 Mo : accepté (seule la limite de 5 Mo s'applique).
         moyenne = image_png(taille=(1150, 1150), octets_aleatoires=True)
         self.assertTrue(3 * 1024 * 1024 < moyenne.size < 5 * 1024 * 1024)
         self.assertEqual(self.envoyer(moyenne).status_code, 201)
 
 
-class CataloguePerformanceTests(BaseRefonteCatalogue):
+class CataloguePerformanceTests(CatalogueEspacesBase):
     def compter_requetes(self, url, utilisateur=None):
         self.client.force_authenticate(utilisateur)
         with CaptureQueriesContext(connection) as requetes:
@@ -907,7 +909,7 @@ class CataloguePerformanceTests(BaseRefonteCatalogue):
             Stock.objects.filter(variante=variante).update(quantite_disponible=1)
 
     def test_listes_sans_n_plus_1(self):
-        # C7 : avant, ≈ 4 requêtes par produit (public) et 2 (vendeur).
+        # Le nombre de requêtes ne dépend pas du nombre de produits listés.
         self.ajouter_produits(3)
         public_avant = self.compter_requetes(URL_P + 'produits/')
         vendeur_avant = self.compter_requetes(URL_V + 'produits/', self.vendeur1)
@@ -916,7 +918,7 @@ class CataloguePerformanceTests(BaseRefonteCatalogue):
         self.assertEqual(self.compter_requetes(URL_V + 'produits/', self.vendeur1), vendeur_avant)
 
 
-class CatalogueDebitTests(BaseRefonteCatalogue):
+class CatalogueDebitTests(CatalogueEspacesBase):
     def test_limite_dediee_non_contournable_par_x_forwarded_for(self):
         with mock.patch.object(SimpleRateThrottle, 'THROTTLE_RATES', {'catalogue_public': '3/hour'}):
             codes = [self.client.get(URL_P + 'produits/', REMOTE_ADDR='9.9.9.9').status_code for _ in range(2)]
@@ -955,7 +957,7 @@ FRAGMENTS_SENSIBLES = (
 
 
 @skipUnless(connection.vendor == 'postgresql', "Vues SQL de la migration 0004 : PostgreSQL uniquement")
-class CatalogueVuesPubliquesTests(BaseRefonteCatalogue):
+class CatalogueVuesPubliquesTests(CatalogueEspacesBase):
     """Chaque test place un cas de visibilité, puis vérifie que la vue et
     Django donnent les mêmes produits, avec les mêmes prix affichés. Échoue
     dès qu'une règle change d'un seul côté (modèles ou migration)."""
