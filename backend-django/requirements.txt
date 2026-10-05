@@ -44,3 +44,17 @@ referencing==0.37.0
 rpds-py==2026.6.3
 typing_extensions==4.16.0
 uritemplate==4.2.0
+# Serveur WSGI de production (CMD du Dockerfile, docker-compose.prod.yml)
+gunicorn==26.2.0
+# Dépendances transitives de google-auth, requests et cryptography, épinglées
+# pour que le poste local, la CI et l'image Docker installent les mêmes versions
+cachetools==5.5.2
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.2
+idna==3.20
+pyasn1==0.6.4
+pyasn1_modules==0.4.2
+pycparser==3.0
+rsa==4.9.1
+urllib3==2.8.0
