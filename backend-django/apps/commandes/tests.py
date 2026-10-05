@@ -221,8 +221,8 @@ class CommandeAccessTestCase(APITestCase):
 class CommandeAdminTestCase(APITestCase):
     """Le statut d'une commande ne doit jamais être modifiable depuis
     l'admin Django : seul le flux réel (paiement validé → signal →
-    confirmation) doit pouvoir le faire — même principe que F-14
-    (Paiement.statut) et F-15 (Livraison.status)."""
+    confirmation) doit pouvoir le faire — même principe que
+    Paiement.statut et Livraison.status."""
 
     def test_status_et_montant_total_readonly_dans_admin(self):
         from apps.commandes.admin import CommandeAdmin
@@ -243,9 +243,8 @@ class CommandeAdminTestCase(APITestCase):
 
 
 class ValiderPanierCouponTestCase(APITestCase):
-    """F-10 (audit sécurité) : CouponReduction.est_utilise n'était jamais
-    posé à True nulle part, et rien ne reliait un coupon au flux de
-    validation de commande — un même coupon pouvait donc être appliqué un
+    """Un coupon ne s'applique qu'une fois : sans marquage est_utilise lié
+    à la validation de commande, un même coupon serait applicable un
     nombre illimité de fois. Ces tests couvrent l'intégration réelle dans
     ValiderPanierView : application du coupon, marquage est_utilise, et
     répartition de la remise au prorata entre boutiques."""
@@ -381,7 +380,7 @@ class ValiderPanierCouponTestCase(APITestCase):
         self.assertEqual(commande.montant_remise, Decimal("0.00"))
 
 # =====================================================================
-# REFONTE DU MODULE (diagnostic de septembre 2026)
+# CYCLE DE VIE D'UNE COMMANDE (docs/MODULE_COMMANDES.md)
 # =====================================================================
 
 import threading
@@ -475,7 +474,8 @@ class AdresseLivraisonTests(DonneesCycleDeVie, APITestCase):
         self.assertEqual(self.stock(self.variante1), 10)
 
     def test_corps_qui_n_est_pas_un_objet_400_comme_la_simulation(self):
-        # Avant : 500 à la validation (request.data.get sur une liste).
+        # Un corps JSON qui n'est pas un objet (liste, chaîne, nombre…) ne
+        # doit pas provoquer de 500 (request.data.get sur une liste).
         panier, _ = Panier.objects.get_or_create(utilisateur=self.client_user)
         PanierItem.objects.create(panier=panier, variante=self.variante1, quantite=1)
         self.en_tant_que(self.client_user)
@@ -495,7 +495,8 @@ class AdresseLivraisonTests(DonneesCycleDeVie, APITestCase):
         commande = Commande.objects.get()
         self.assertEqual(commande.groupe.livraison_telephone, "0700000001")
         self.en_tant_que(self.client_user)
-        # Avant : adresse vide au paiement → livraison « Abidjan, Côte d'Ivoire ».
+        # L'adresse du checkout est celle de la fiche de livraison, jamais
+        # une adresse générique (« Abidjan, Côte d'Ivoire »).
         r = self.client.post("/api/paiements/initier/", {"commande_id": str(commande.pk), "methode": "wave"},
                              format="json")
         self.assertEqual(r.status_code, 201)
@@ -530,7 +531,7 @@ class MontantsTests(DonneesCycleDeVie, APITestCase):
         self.assertEqual(CommandeItem.objects.get(variante=self.variante2).prix_unitaire, Decimal("1500"))
 
     def test_remise_en_francs_entiers(self):
-        # Avant : 10 % de 1005 → remise 100.50, total 904.50.
+        # 10 % de 1005 : remise arrondie à 100 FCFA, jamais 100.50.
         CouponReduction.objects.create(code="DIX", type_reduction="pourcentage", valeur=Decimal("10"))
         self.assertEqual(self.commander((self.variante1, 1), coupon_code="DIX").status_code, 201)
         commande = Commande.objects.get()
@@ -632,7 +633,7 @@ class ExpirationTests(DonneesCycleDeVie, APITestCase):
         self.assertFalse(Livraison.objects.filter(commande=self.commande).exists())
         self.assertTrue(Notification.objects.filter(destinataire=self.admin, titre="Remboursement à traiter").exists())
 
-    def test_A1_interblocage_sur_une_commande_n_arrete_pas_les_suivantes(self):
+    def test_interblocage_sur_une_commande_n_arrete_pas_les_suivantes(self):
         self.commander((self.variante1, 1))
         Commande.objects.update(created_at=timezone.now() - timedelta(minutes=31))
         premiere, seconde = Commande.objects.order_by("pk")
@@ -658,7 +659,7 @@ class ExpirationTests(DonneesCycleDeVie, APITestCase):
         self.assertEqual(premiere.status, "annulee")
         self.assertEqual(self.stock(self.variante1), 10)
 
-    def test_M1_paiement_en_attente_reussi_chez_le_fournisseur_confirme_au_lieu_d_expirer(self):
+    def test_paiement_en_attente_reussi_chez_le_fournisseur_confirme_au_lieu_d_expirer(self):
         from apps.paiements.fournisseurs.simule import definir_etat_distant
 
         paiement = self.payer(self.commande, statut=Paiement.Statut.EN_ATTENTE)
@@ -676,7 +677,8 @@ class MachineAEtatsTests(DonneesCycleDeVie, APITestCase):
         self.creer_donnees()
         self.commander((self.variante1, 1))
         self.commande = Commande.objects.get()
-        # L'administration ne fait plus les étapes du livreur (module livraison).
+        # Les étapes de livraison sont faites par le livreur assigné, pas par
+        # l'administration (module livraison).
         self.livreur = Utilisateur.objects.create_user(email="livreur@cmd.ci", password="x", nom="L", prenom="Ivreur",
                                                        role=Role.LIVREUR)
         self.livraison = Livraison.objects.create(commande=self.commande, adresse_livraison="x", livreur=self.livreur)
@@ -709,7 +711,8 @@ class MachineAEtatsTests(DonneesCycleDeVie, APITestCase):
         self.assertEqual(self.statut(), "livree")
 
     def test_livraison_ne_peut_pas_sauter_la_preparation(self):
-        # Avant : la commande restait « confirmée » même livrée.
+        # Une commande « confirmée » doit passer « en préparation » avant
+        # toute expédition.
         Commande.objects.filter(pk=self.commande.pk).update(status="confirmee")
         r = self.changer_livraison("expediee")
         self.assertEqual(r.status_code, 409)
@@ -729,7 +732,7 @@ class EspaceVendeurTests(DonneesCycleDeVie, APITestCase):
         self.commande_b2 = Commande.objects.get(boutique=self.boutique2)
 
     def test_le_vendeur_ne_voit_que_sa_boutique(self):
-        # Avant : liste vide (les commandes n'étaient filtrées que par client).
+        # L'espace vendeur filtre par boutique, pas par client.
         self.en_tant_que(self.vendeur1)
         r = self.client.get("/api/commandes/vendeur/")
         self.assertEqual([c["id"] for c in r.data["results"]], [str(self.commande_b1.pk)])
@@ -851,7 +854,8 @@ class DetailEtHistoriqueTests(DonneesCycleDeVie, APITestCase):
         self.assertTrue(Commande.objects.filter(numero_commande="CMD-2026-0000ABCD").exists())
 
     def test_historique_protege_contre_la_suppression(self):
-        # Avant : supprimer le compte effaçait ses commandes (CASCADE).
+        # Supprimer le compte ou la boutique ne doit jamais effacer les
+        # commandes (PROTECT, pas CASCADE).
         with self.assertRaises(ProtectedError):
             self.client_user.delete()
         with self.assertRaises(ProtectedError):
@@ -1284,8 +1288,8 @@ class PositionLivraisonCheckoutTests(DonneesCycleDeVie, APITestCase):
                 self.assertIn("latitude", adresse.errors)
 
     def test_erreurs_d_adresse_sur_des_cles_a_points_a_la_validation(self):
-        # Avant : « telephone » à la validation, « adresse_livraison.telephone »
-        # à la simulation. Désormais la même clé des deux côtés.
+        # Validation et simulation renvoient la même clé d'erreur
+        # (« adresse_livraison.telephone »).
         adresse = {**ADRESSE_LIVRAISON, "telephone": "abc"}
         for url in (URL_VALIDER, URL_SIMULER):
             with self.subTest(url):

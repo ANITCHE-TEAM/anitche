@@ -1,7 +1,7 @@
 # Module livraison — contrat et règles
 
 > Périmètre : backend Django, `backend-django/apps/livraison/` (et ses points de contact dans `commandes`, `paiements`, `notifications`, `utilisateurs`).
-> État : refonte de septembre 2026. **« Livrée » déclenche de l'argent** (délai de rétractation de 7 jours puis reversement au vendeur) : toute la conception part de là.
+> Principe : **« livrée » déclenche de l'argent** (délai de rétractation de 7 jours puis reversement au vendeur) : toute la conception part de là.
 
 ## 1. Ce sur quoi le module s'appuie, et qui s'appuie sur lui
 
@@ -56,7 +56,7 @@ Le livreur doit, à chaque transition, être **assigné**, avoir le **rôle livr
 |---|---|---|
 | GET | `` | Administration : toutes, filtres `?status=` et `?contestation=ouverte`. Livreur : les siennes. Tout autre compte : celles de ses commandes |
 | GET | `<uuid>/` | Même règle d'accès |
-| GET | `<uuid>/historique/` | Même règle d'accès ; **404** pour un tiers (avant : 200 avec une liste vide). `acteur` (rôle) remplace l'identifiant ; l'administration voit aussi `effectue_par` |
+| GET | `<uuid>/historique/` | Même règle d'accès ; **404** pour un tiers. `acteur` (rôle) remplace l'identifiant ; l'administration voit aussi `effectue_par` |
 | PATCH | `<uuid>/statut/` | Livreur ou administration (`EstLivreurOuAdministrateur`, puis contrôle fin dans le service). Corps : `status`, `commentaire?` (obligatoire pour `echouee`), `code?` (obligatoire pour `livree`). **200** : la livraison (représentation de l'appelant). **400** / **403** : § 4. **409** : commande pas prête. **429** : limite `livraison_statut` |
 | POST | `<uuid>/contester/` | Client de la commande uniquement (404 sinon). Corps : `motif`. **201** : la contestation. **400** : pas livrée, délai de 7 jours écoulé, déjà contestée. **429** : limite `livraison_contestation` |
 
@@ -127,7 +127,7 @@ La commande et la livraison restent « livrées » : la contestation fondée est
 
 ## 9. Frais de livraison
 
-Mis en place en septembre 2026 (avant : aucun frais, `montant_total` = articles − remise). Code : `apps/livraison/frais.py` (tarif applicable, frais d'une commande), `apps/commandes/services.calculer_checkout` (seul calcul des montants du checkout), `apps/paiements/reversements.py` (livraison offerte), `apps/retours/services.frais_livraison_a_rembourser`.
+Les commandes antérieures aux frais de livraison (septembre 2026) n'en portent aucun (`montant_total` = articles − remise). Code : `apps/livraison/frais.py` (tarif applicable, frais d'une commande), `apps/commandes/services.calculer_checkout` (seul calcul des montants du checkout), `apps/paiements/reversements.py` (livraison offerte), `apps/retours/services.frais_livraison_a_rembourser`.
 
 ### Règles
 
@@ -163,10 +163,10 @@ Création et modification des tarifs sont tracées (`modifie_par`, journal `secu
 
 1. **Code de livraison (client).** Afficher `code_livraison` dans le suivi quand `status` = `en_cours` (il arrive aussi par email), avec la consigne : le donner au livreur **à la remise du colis seulement**.
 2. **Livreur : saisie du code.** « Livrée » envoie `{"status": "livree", "code": "123456"}`. **400** : code manquant ou faux (`detail` annonce les essais restants, `code_essais_restants` dans la fiche), puis code bloqué, il faut proposer « échouée ». « Échouée » exige un `commentaire` (motif), sinon **400**.
-3. **`livreur` devient un objet** (avant : un identifiant). Client : `{prenom, telephone}` (téléphone non nul pendant `en_cours` seulement) ; vendeur et livreur : `{prenom}` ; administration : `{id, prenom, nom}`.
+3. **`livreur` est un objet** (pas un identifiant). Client : `{prenom, telephone}` (téléphone non nul pendant `en_cours` seulement) ; vendeur et livreur : `{prenom}` ; administration : `{id, prenom, nom}`.
 4. **Nouveaux champs** : `numero_commande`, `adresse` (structurée : commune, quartier, point de repère, téléphone), `date_livraison_estimee`, et pour le client `contestation` et `date_limite_contestation`. `adresse_livraison` et `telephone_contact` sont conservés.
 5. **Nouveau statut `annulee`** : fiches des commandes annulées (y compris les anciennes, reprises par migration). Libellé et couleur à prévoir.
-6. **Historique** : `effectue_par` est remplacé par `acteur` (`livreur`, `administration`, `systeme`, `client`) ; l'administration garde `effectue_par`. Un tiers reçoit **404** (avant : 200 avec une liste vide).
+6. **Historique** : `effectue_par` est remplacé par `acteur` (`livreur`, `administration`, `systeme`, `client`) ; l'administration garde `effectue_par`. Un tiers reçoit **404**.
 7. **Contestation (client)** : bouton « Je n'ai pas reçu mon colis » tant que `date_limite_contestation` n'est pas passée et que `contestation` est `null` → `POST <id>/contester/` (`motif`). Afficher ensuite l'état de `contestation.statut`.
 8. **Livreur** : après « livrée » ou « annulée », l'adresse et le téléphone du client arrivent vides (`""` / `null`) : ne pas les mettre en cache côté app.
 9. **Espace vendeur** : nouvel écran de suivi, `GET /api/livraison/vendeur/`.
@@ -174,31 +174,31 @@ Création et modification des tarifs sont tracées (`modifie_par`, journal `secu
 11. **Administration** : ne plus proposer de transitions libres (400 / 403, § 4).
 12. **Erreurs à prévoir** : **429** au-delà de 120 changements de statut par heure et par compte, ou de 10 contestations par heure.
 13. **Frais de livraison (§ 9).** Checkout : **ne plus demander la zone** (champ ignoré par le serveur). Menu déroulant des communes construit depuis `GET /api/livraison/tarifs/` (`communes`, avec le tarif de chacune), plus une entrée « Autre ville (hors Abidjan) » avec saisie libre de la ville au tarif `autres_villes`. Pour Abidjan, **toujours passer par le menu** : une saisie libre (« Riviera », « Le Plateau », « Abidjan ») n'est pas reconnue et part au tarif hors Abidjan. Afficher les montants et la `zone` déduite renvoyés par `POST /api/commandes/simuler-frais/` avant le paiement (frais par commande, « livraison offerte »). `adresse` contient `zone` (déduite). Back-office : écran des tarifs (`admin/tarifs/`), où l'ajout d'un tarif de commune en zone Abidjan étend le district.
-14. **Format d'erreur unifié (septembre 2026).** Les refus (400, 403, 409) portaient avant un simple `{"detail": …}` : ils suivent désormais le format commun `{success: false, status_code, detail, errors}`, `errors` toujours un objet clé → liste de messages (`{}` si aucun champ n'est en cause) ; le message reste dans `detail`. Assignation à un livreur inexistant → **400** `errors.livreur_id`.
+14. **Format d'erreur unifié (septembre 2026).** Les refus (400, 403, 409) suivent le format commun `{success: false, status_code, detail, errors}`, `errors` toujours un objet clé → liste de messages (`{}` si aucun champ n'est en cause) ; le message reste dans `detail`. Assignation à un livreur inexistant → **400** `errors.livreur_id`.
 15. **Point GPS (septembre 2026).** `adresse` porte `latitude` et `longitude` (nombres, ou `null` sans point) pour le client, le livreur et l'administration ; jamais dans la vue vendeur. App livreur : ouvrir la navigation vers ce point quand il existe, sinon se guider à l'adresse texte ; comme le reste de l'adresse, il arrive `null` après « livrée » ou « annulée » (ne pas le garder en cache).
 16. **Suivi GPS du livreur (FastAPI, septembre 2026).** Pendant `en_cours` seulement : l'app livreur publie sa position, le client et l'administration la suivent en direct (WebSocket) avec une distance et un temps restants **indicatifs**, calculés seulement si le client a donné son point GPS au checkout (sinon `null`). Même périmètre que `/api/livraison/<id>/` ; le vendeur ne suit pas ses ventes. Contrat, codes machine et codes de fermeture : [`MODULE_SUIVI_GPS.md`](./MODULE_SUIVI_GPS.md) et [`GUIDE_FRONTEND.md` § 12](./GUIDE_FRONTEND.md#12-service-fastapi-fast).
 
-## 11. Sécurité — failles corrigées (diagnostic de septembre 2026)
+## 11. Sécurité — risques couverts
 
-Chaque constat a été confirmé par un test jetable sur PostgreSQL avant correction, et chacun a son test permanent dans `apps/livraison/tests.py`.
+Chaque risque a son test permanent dans `apps/livraison/tests.py`.
 
-| # | Faille | Correction | Test |
-|---|---|---|---|
-| D1 | Le livreur seul déclarait « livrée » et déclenchait le reversement | Code de livraison du client obligatoire (haché, 5 essais) ; contestation pendant 7 jours | `CodeDeLivraisonTests`, `ContestationTests` |
-| D2 | N'importe quel utilisateur assignable (Django admin), dont le vendeur de la commande | Assignation par l'API ou par le Django admin restreint : livreur actif, jamais le propriétaire ; revérifié à chaque transition | `AssignationTests` |
-| D3 | Un ex-livreur gardait la main sur ses livraisons | Rôle livreur vérifié à chaque transition ; retrait par l'API | `RoleLivreurTests` |
-| D4 | Transitions libres de l'administration (sortie de « livrée » après ouverture du reversement) | L'administration suit la table ; « livrée » et « annulée » définitifs | `TransitionsAdministrationTests` |
-| D5 | Fiche d'une commande annulée restée « en attente », coordonnées visibles, modifiable | Statut `annulee` dans la transaction d'annulation ; migration des fiches existantes | `AnnulationTests` |
-| D6 | « Échouée » sans issue (commande et reversement bloqués) | Nouvelle tentative (3 au plus) ou abandon → annulation et remboursement | `EchecTests` |
-| D7 | Le vendeur ne voyait aucune livraison | Lecture seule de sa boutique, sans code | `IsolationEtSuiviTests` |
-| D8 | Historique : 200 vide pour un tiers, `effectue_par` exposé au client | 404 ; rôle à la place de l'identifiant | `IsolationEtSuiviTests` |
-| D9 | Suivi pauvre (id du livreur, adresse d'une ligne, aucune estimation) | Prénom, téléphone pendant la tournée, adresse structurée, date estimée | `IsolationEtSuiviTests` |
-| D10 | Coordonnées du client conservées par le livreur après la livraison | Masquées une fois livrée ou annulée | `IsolationEtSuiviTests` |
-| D12 | N+1 sur la liste (`commande.groupe`) | `select_related` complet, nombre de requêtes constant | `PerformanceEtLimitesTests` |
-| D14 | Pas de limite dédiée | `livraison_statut` 120/h, `livraison_contestation` 10/h | `PerformanceEtLimitesTests` |
-| D15 | « Livrée » et « échouée » simultanées : livraison échouée, commande livrée, reversement ouvert | Transitions sous `select_for_update` ; la seconde requête voit le nouvel état (400) | `ConcurrenceTests` |
+| Risque | Protection | Test |
+|---|---|---|
+| Le livreur seul déclare « livrée » et déclenche le reversement | Code de livraison du client obligatoire (haché, 5 essais) ; contestation pendant 7 jours | `CodeDeLivraisonTests`, `ContestationTests` |
+| N'importe quel utilisateur assignable (Django admin), dont le vendeur de la commande | Assignation par l'API ou par le Django admin restreint : livreur actif, jamais le propriétaire ; revérifié à chaque transition | `AssignationTests` |
+| Un ex-livreur garde la main sur ses livraisons | Rôle livreur vérifié à chaque transition ; retrait par l'API | `RoleLivreurTests` |
+| Transitions libres de l'administration (sortie de « livrée » après ouverture du reversement) | L'administration suit la table ; « livrée » et « annulée » définitifs | `TransitionsAdministrationTests` |
+| Fiche d'une commande annulée restée « en attente », coordonnées visibles, modifiable | Statut `annulee` dans la transaction d'annulation ; migration des fiches existantes | `AnnulationTests` |
+| « Échouée » sans issue (commande et reversement bloqués) | Nouvelle tentative (3 au plus) ou abandon → annulation et remboursement | `EchecTests` |
+| Le vendeur ne voit aucune livraison | Lecture seule de sa boutique, sans code | `IsolationEtSuiviTests` |
+| Historique : 200 vide pour un tiers, `effectue_par` exposé au client | 404 ; rôle à la place de l'identifiant | `IsolationEtSuiviTests` |
+| Suivi pauvre (id du livreur, adresse d'une ligne, aucune estimation) | Prénom, téléphone pendant la tournée, adresse structurée, date estimée | `IsolationEtSuiviTests` |
+| Coordonnées du client conservées par le livreur après la livraison | Masquées une fois livrée ou annulée | `IsolationEtSuiviTests` |
+| N+1 sur la liste (`commande.groupe`) | `select_related` complet, nombre de requêtes constant | `PerformanceEtLimitesTests` |
+| Pas de limite dédiée | `livraison_statut` 120/h, `livraison_contestation` 10/h | `PerformanceEtLimitesTests` |
+| « Livrée » et « échouée » simultanées : livraison échouée, commande livrée, reversement ouvert | Transitions sous `select_for_update` ; la seconde requête voit le nouvel état (400) | `ConcurrenceTests` |
 
-Vérifié et correct dès le diagnostic : `is_staff` sans rôle admin n'a aucun pouvoir (API et Django admin), un livreur désactivé est refusé par le JWT (401).
+Également vérifié : `is_staff` sans rôle admin n'a aucun pouvoir (API et Django admin), un livreur désactivé est refusé par le JWT (401).
 
 ## 12. Limites de débit et performance
 
@@ -206,7 +206,7 @@ Vérifié et correct dès le diagnostic : `is_staff` sans rôle admin n'a aucun 
 - `livraison_contestation` : 10/heure par compte.
 - Listes paginées (20) ; `select_related("commande__groupe", "livreur", "contestation")` : nombre de requêtes constant quel que soit le nombre de livraisons (testé pour les quatre rôles).
 - Ordre des verrous : fiche de livraison, puis commande, pour l'annulation comme pour les transitions (pas d'interblocage entre une annulation et une expédition simultanées).
-- **Fiche orpheline (octobre 2026, H1).** Une seule exception à cet ordre, voulue. Quand `annuler_commande` ne trouve aucune fiche, il la relit **après** l'`UPDATE` de la commande (Commande → Livraison). La raison : une validation de paiement concurrente (webhook ou réconciliation) a pu confirmer la commande et créer sa fiche « en attente » pendant que cet `UPDATE` attendait son verrou, puis l'`UPDATE` réévalué a annulé la commande confirmée (motif client ou administration). Sans cette seconde lecture, la fiche restait « en attente » sur une commande annulée : assignable à un livreur, visible dans le suivi du client, et aucune action de l'API ne pouvait plus l'annuler. `annuler_livraison_de` renvoie maintenant la fiche lue (ou `None`). Ordre inverse sans risque réel : la fiche vient de naître, sans livreur ; seule une assignation par l'administration dans la même milliseconde (qui verrouille la fiche et sa commande dans la même requête, `_verrouiller`) pourrait s'interbloquer avec elle, ce qui donnerait un 500 et un nouvel essai, sans incohérence. **Écartée** : verrouiller la commande avant la fiche dans `annuler_commande`, qui inverserait l'ordre face à toutes les transitions de livraison.
+- **Fiche orpheline.** Une seule exception à cet ordre, voulue. Quand `annuler_commande` ne trouve aucune fiche, il la relit **après** l'`UPDATE` de la commande (Commande → Livraison). La raison : une validation de paiement concurrente (webhook ou réconciliation) a pu confirmer la commande et créer sa fiche « en attente » pendant que cet `UPDATE` attendait son verrou, puis l'`UPDATE` réévalué a annulé la commande confirmée (motif client ou administration). Sans cette seconde lecture, la fiche resterait « en attente » sur une commande annulée : assignable à un livreur, visible dans le suivi du client, et aucune action de l'API ne pourrait l'annuler. `annuler_livraison_de` renvoie la fiche lue (ou `None`). Ordre inverse sans risque réel : la fiche vient de naître, sans livreur ; seule une assignation par l'administration dans la même milliseconde (qui verrouille la fiche et sa commande dans la même requête, `_verrouiller`) pourrait s'interbloquer avec elle, ce qui donnerait un 500 et un nouvel essai, sans incohérence. **Écartée** : verrouiller la commande avant la fiche dans `annuler_commande`, qui inverserait l'ordre face à toutes les transitions de livraison.
 - La vérification du code (`check_password`, PBKDF2 en production) coûte quelques dizaines de millisecondes par essai, bornée par les 5 essais et la limite de débit.
 
 ## 13. Migrations
@@ -217,7 +217,7 @@ Vérifié et correct dès le diagnostic : `is_staff` sans rôle admin n'a aucun 
 - **paiements 0005** : motif de remboursement `livraison_non_recue`.
 - **Frais de livraison (§ 9)** : **livraison 0004** (`TarifLivraison` + tarifs initiaux provisoires), **commandes 0008** (`Commande.frais_livraison`, `livraison_offerte`, `frais_livraison_vendeur` ; `GroupeCommande.livraison_zone`), **vendeurs 0005** (`Boutique.livraison_offerte`), **livraison 0005** (communes du district d'Abidjan, une zone par commune, un défaut par zone), **retours 0004** (`DemandeRetour.frais_livraison_rembourses`), **paiements 0006** (`Reversement.montant_livraison` ; `AjustementVendeur.nature` et `commande`, un ajustement de chaque nature par commande). Les commandes existantes gardent 0 de frais et une zone vide.
 - **Point GPS du lieu de livraison (§ 5)** : **commandes 0009** (`GroupeCommande.livraison_latitude` / `livraison_longitude`, facultatifs, les deux ou aucun ; voir [`MODULE_COMMANDES.md`](./MODULE_COMMANDES.md) § 12). Aucune migration côté livraison : le point n'est pas copié dans la fiche.
-- **livraison 0006** (données, octobre 2026) : fiches **orphelines** (§ 12, H1). Même règle que 0003 : toute fiche non terminée (ni livrée ni annulée) d'une commande annulée passe `annulee`, avec une ligne d'historique `systeme` (« Commande annulée (reprise des données : fiche orpheline). ») et sans code de livraison. Une fiche livrée, ou celle d'une commande active, n'est jamais touchée. **Idempotente** : rejouée, elle ne trouve plus rien (testé). **Retour arrière : sans effet** (`RunPython.noop`) : l'état « en attente » d'une fiche orpheline n'a rien à restaurer, et l'historique garde la trace de la reprise. Aucun changement de schéma.
+- **livraison 0006** (données, octobre 2026) : fiches **orphelines** (§ 12). Même règle que 0003 : toute fiche non terminée (ni livrée ni annulée) d'une commande annulée passe `annulee`, avec une ligne d'historique `systeme` (« Commande annulée (reprise des données : fiche orpheline). ») et sans code de livraison. Une fiche livrée, ou celle d'une commande active, n'est jamais touchée. **Idempotente** : rejouée, elle ne trouve plus rien (testé). **Retour arrière : sans effet** (`RunPython.noop`) : l'état « en attente » d'une fiche orpheline n'a rien à restaurer, et l'historique garde la trace de la reprise. Aucun changement de schéma.
 
 En dev : `docker exec anitche-backend python manage.py migrate`, puis **redémarrer le worker Celery** (`docker restart infra-celery-worker-1`) pour qu'il connaisse la tâche d'envoi du code.
 
@@ -230,15 +230,15 @@ docker exec -e DJANGO_SETTINGS_MODULE=config.settings.ci -e DB_NAME=anitche_test
   python manage.py test apps.livraison -v 2
 ```
 
-`apps/livraison/tests.py` — 73 tests : parcours et isolation historiques (adaptés au nouveau contrat), code de livraison (sans code, faux code, blocage, haché et chiffré, visibilité, effacement, email), assignation (date estimée, réassignation, livraison terminée, propriétaire, non-livreur ou inactif, réservée à l'administration, donnée existante, Django admin), rôle livreur (retrait immédiat, par le Django admin aussi, nomination, refus du vendeur, réservé à l'administration, compte désactivé), transitions de l'administration, échec (motif, nouvelle tentative, limite, abandon, remboursement), annulation (administration, client, annulation refusée, migration), contestation (suspension, alerte, périmètre, délai, décisions, retour clos), isolation et suivi (vendeur, historique, client, livreur, `is_staff`, Django admin), performance (N+1, limites de débit), concurrence (D15). Tests adaptés hors module : `commandes` (`MachineAEtatsTests` : les étapes passent par un livreur, avec le code) et `notifications` (transition par le service).
+`apps/livraison/tests.py` — 73 tests : parcours et isolation historiques (adaptés au nouveau contrat), code de livraison (sans code, faux code, blocage, haché et chiffré, visibilité, effacement, email), assignation (date estimée, réassignation, livraison terminée, propriétaire, non-livreur ou inactif, réservée à l'administration, donnée existante, Django admin), rôle livreur (retrait immédiat, par le Django admin aussi, nomination, refus du vendeur, réservé à l'administration, compte désactivé), transitions de l'administration, échec (motif, nouvelle tentative, limite, abandon, remboursement), annulation (administration, client, annulation refusée, migration), contestation (suspension, alerte, périmètre, délai, décisions, retour clos), isolation et suivi (vendeur, historique, client, livreur, `is_staff`, Django admin), performance (N+1, limites de débit), concurrence (« livrée » et « échouée » simultanées). Tests adaptés hors module : `commandes` (`MachineAEtatsTests` : les étapes passent par un livreur, avec le code) et `notifications` (transition par le service).
 
 Suite complète : **578 tests, OK, aucun « skipped »** (26/09/2026).
 
-**Fiche orpheline (§ 12, H1, octobre 2026)** — `AnnulationTests.test_migration_des_fiches_orphelines` (90 tests au total dans `apps/livraison/tests.py`) : migration 0006 appliquée deux fois, fiche orpheline `annulee` sans code avec **une seule** ligne d'historique `systeme`, fiche livrée et fiche d'une commande active intactes. La course elle-même est testée sur PostgreSQL dans `paiements.ReconciliationConcurrenceTests.test_annulation_par_le_client_pendant_la_validation_du_paiement` (vraies routes d'annulation et de webhook) : fiche `annulee` avec son historique, un seul remboursement, stock restitué une fois. Suite complète : **900 tests, OK, aucun « skipped »** (04/10/2026).
+**Fiche orpheline (§ 12)** — `AnnulationTests.test_migration_des_fiches_orphelines` (90 tests au total dans `apps/livraison/tests.py`) : migration 0006 appliquée deux fois, fiche orpheline `annulee` sans code avec **une seule** ligne d'historique `systeme`, fiche livrée et fiche d'une commande active intactes. La course elle-même est testée sur PostgreSQL dans `paiements.ReconciliationConcurrenceTests.test_annulation_par_le_client_pendant_la_validation_du_paiement` (vraies routes d'annulation et de webhook) : fiche `annulee` avec son historique, un seul remboursement, stock restitué une fois. Suite complète : **900 tests, OK, aucun « skipped »** (04/10/2026).
 
 **Frais de livraison (§ 9)** — 41 tests : `livraison.TarifsDeLivraisonTests` (normalisation des communes, communes du district créées par migration, zone déduite de la commune, tarif applicable, commune désactivée restée à Abidjan, une zone par commune en base, livraison offerte, grille publique, administration réservée, traçabilité, validations, pas de suppression), `commandes.FraisDeLivraisonCheckoutTests` (frais par commande, commune d'Abidjan écrite de plusieurs façons → abidjan, ville hors Abidjan déclarée « abidjan » → tarif hors Abidjan et l'inverse, ville hors Abidjan avec tarif propre, tarif inactif, montants du client ignorés, 503 sans tarif, livraison offerte, frais figés, coupon sans effet sur les frais), `commandes.SimulationDuCheckoutTests` (mêmes montants que la validation, aucune écriture, part du vendeur jamais exposée, refus, limite dédiée), `paiements.FraisDeLivraisonFinancesTests` (frais hors reversement, livraison offerte déduite et plafonnée, reste dû après livraison seulement, annulation, contestation fondée, frais rendus pour un retour imputable au vendeur une fois par commande et facturés au vendeur, motifs sans frais, points de fidélité hors frais), `retours.RetoursConcurrenceTestCase` (deux demandes simultanées : frais rendus une seule fois, PostgreSQL), `vendeurs.MaBoutiqueAPITests` (option du vendeur). Tests existants adaptés : adresses sans zone, montants attendus frais compris (`FRAIS_ABIDJAN`), tarifs recréés dans les `TransactionTestCase` (`livraison.tests.recreer_tarifs_initiaux`, comme le barème). Suite complète : **728 tests, OK, aucun « skipped »** (27/09/2026).
 
-**Point GPS du lieu de livraison (§ 5)** — `livraison.PositionLivraisonTests`, 5 tests : client et administration le voient à tout statut ; livreur assigné pendant `en_attente`, `expediee`, `en_cours`, `echouee`, masqué (détail et liste) après `livree` et `annulee`, et après une vraie livraison avec code ; autre livreur : 404 ; vendeur : jamais (livraisons et commandes, à tout statut) ; sans point : `null`. `test_suivi_client` adapté : l'objet `adresse` contient désormais `latitude` et `longitude` (`null` pour ce checkout sans point). Suite complète : **835 tests, OK, aucun « skipped »** (27/09/2026).
+**Point GPS du lieu de livraison (§ 5)** — `livraison.PositionLivraisonTests`, 5 tests : client et administration le voient à tout statut ; livreur assigné pendant `en_attente`, `expediee`, `en_cours`, `echouee`, masqué (détail et liste) après `livree` et `annulee`, et après une vraie livraison avec code ; autre livreur : 404 ; vendeur : jamais (livraisons et commandes, à tout statut) ; sans point : `null`. `test_suivi_client` adapté : l'objet `adresse` contient `latitude` et `longitude` (`null` pour ce checkout sans point). Suite complète : **835 tests, OK, aucun « skipped »** (27/09/2026).
 
 Postman : dossier **10. Frais de livraison** de `postman_livraison.json` (grille publique, administration des tarifs et refus, simulation, frais figés après changement de tarif, livraison offerte jusqu'au reversement, remises en état) ; plus de `zone` dans les checkouts des collections (et un scénario « zone abidjan déclarée pour une ville de l'intérieur → tarif hors Abidjan »), montants attendus frais compris (`postman_paiements.json`, `postman_retours.json`).
 
@@ -288,7 +288,7 @@ Postman : `postman_livraison.json` (hors dépôt, reconstruite ; l'ancienne est 
 
 - Une seule source de vérité : une commande annulée ne peut plus avoir de livraison active, et une livraison déjà partie **bloque** l'annulation au lieu d'être oubliée.
 - Même transaction, donc pas d'état intermédiaire visible, et verrou pris sur la fiche avant la commande, dans le même ordre que les transitions de livraison.
-- Une fiche créée par une validation de paiement concurrente, après la première lecture, est relue et annulée dans la même transaction (§ 12, H1) : une commande annulée n'a jamais de fiche active, même sous concurrence.
+- Une fiche créée par une validation de paiement concurrente, après la première lecture, est relue et annulée dans la même transaction (§ 12) : une commande annulée n'a jamais de fiche active, même sous concurrence.
 
 ### Pourquoi un forfait par zone et commune, figé dans la commande
 

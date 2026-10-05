@@ -4,7 +4,7 @@ from decouple import Csv, config
 from celery.schedules import crontab
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
-# ATTENTION : un niveau plus profond que l'ancien settings.py (config/settings/base.py)
+# ATTENTION : ce fichier est dans config/settings/, d'où les trois .parent
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 
@@ -124,7 +124,7 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
-# Ça reste dans base.py et non dev.py : la config en elle-même (où pointent les fichiers) ne change pas entre dev et prod, seule la façon de servir ces fichiers change (voir étape 2). En prod, c'est un serveur web (nginx, S3...) qui prendra le relais — pas Django.
+# Ça reste dans base.py et non dev.py : la config en elle-même (où pointent les fichiers) ne change pas entre dev et prod, seule la façon de servir ces fichiers change (config/urls.py en DEBUG). En prod, c'est Nginx qui sert les médias publics (infra/nginx/nginx.conf) — pas Django.
 
 
 
@@ -174,7 +174,7 @@ REST_FRAMEWORK = {
         # essayer des codes hors de la limite de la validation.
         'commande_simulation': '120/hour',
         # Fidélité (A04:2025 / A07:2025) : sans limite dédiée, ces deux
-        # endpoints ne dépendaient que du taux générique 'user' (300/heure).
+        # endpoints ne dépendraient que du taux générique 'user' (300/heure).
         # coupon_verification borne le bourrinage de codes au hasard sur
         # VerifierCouponView (l'espace de codes générés reste très grand,
         # mais un taux dédié plus bas est une défense en profondeur peu
@@ -201,8 +201,8 @@ REST_FRAMEWORK = {
         # paiement en attente (un checkout normal en consomme 1 à 3).
         'paiements': '20/hour',
         # Notifications des fournisseurs de paiement, par IP : elles
-        # arrivent toutes des mêmes serveurs. Avant, la limite anonyme
-        # (50/heure) refusait des paiements réels au-delà de 50 par heure.
+        # arrivent toutes des mêmes serveurs : la limite anonyme (50/heure)
+        # refuserait des paiements réels au-delà de 50 par heure.
         # Chaque notification reste authentifiée puis revérifiée.
         'webhook_paiement': '3000/hour',
         # Livraison, par utilisateur : changements de statut (un livreur en

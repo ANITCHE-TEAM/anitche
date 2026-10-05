@@ -191,7 +191,7 @@ class InitiationTests(Donnees, APITestCase):
         self.assertEqual(autre.post(f"/api/paiements/{paiement.pk}/annuler/").status_code, 404)
         self.assertEqual(autre.get("/api/paiements/").data["count"], 0)
 
-    def test_D01_commande_payee_seule_puis_via_son_groupe_refusee(self):
+    def test_commande_payee_seule_puis_via_son_groupe_refusee(self):
         self.payer(self.commande_a)
         r = self.initier(groupe_commande_id=str(self.groupe.pk))
         self.assertEqual(r.status_code, 400)
@@ -229,7 +229,7 @@ class InitiationTests(Donnees, APITestCase):
         self.assertEqual(Paiement.objects.get().statut, Paiement.Statut.ECHOUE)
         self.assertEqual(self.initier(commande_id=str(self.commande_a.pk)).status_code, 201)
 
-    def test_D09_reponse_client_sans_donnees_internes(self):
+    def test_reponse_client_sans_donnees_internes(self):
         paiement = self.payer(self.commande_a)
         self.notifier_succes(paiement, marchand_interne="brut")
         donnees = self.api(self.client1).get(f"/api/paiements/{paiement.pk}/").data
@@ -276,7 +276,7 @@ class NotificationTests(Donnees, APITestCase):
         self.assertEqual(self.commande.status, Commande.Status.CONFIRMEE)
         self.assertTrue(Livraison.objects.filter(commande=self.commande).exists())
         self.assertEqual(Reversement.objects.get(commande=self.commande).statut, Reversement.Statut.EN_ATTENTE_LIVRAISON)
-        # Aucun point au paiement : ils naissent à la livraison (apps.fidelite, F1).
+        # Aucun point au paiement : ils naissent à la livraison (apps.fidelite).
         self.assertFalse(CompteFidelite.objects.filter(utilisateur=self.client1, solde_points__gt=0).exists())
         self.assertTrue(est_payee(self.commande))
 
@@ -296,17 +296,17 @@ class NotificationTests(Donnees, APITestCase):
         r = self.notifier_succes(self.paiement, evenement_id="evt-1")
         self.assertEqual((r.status_code, r.data["message"]), (200, "Événement déjà traité."))
         self.assertEqual(JournalWebhook.objects.filter(evenement_id="evt-1").count(), 1)
-        # Aucun point au paiement : ils naissent à la livraison (apps.fidelite, F1).
+        # Aucun point au paiement : ils naissent à la livraison (apps.fidelite).
         self.assertFalse(CompteFidelite.objects.filter(utilisateur=self.client1, solde_points__gt=0).exists())
 
-    def test_D03_notification_d_un_autre_fournisseur_refusee(self):
+    def test_notification_d_un_autre_fournisseur_refusee(self):
         Paiement.objects.filter(pk=self.paiement.pk).update(fournisseur="cinetpay")
         self.assertEqual(self.notifier_succes(self.paiement).status_code, 404)
         self.paiement.refresh_from_db()
         self.assertEqual(self.paiement.statut, Paiement.Statut.EN_ATTENTE)
         self.assertEqual(self.api().post(url_webhook("inconnu"), {}, format="json").status_code, 404)
 
-    def test_D04_devise_ou_montant_differents_refuses(self):
+    def test_devise_ou_montant_differents_refuses(self):
         self.assertEqual(self.notifier_succes(self.paiement, devise="EUR").status_code, 400)
         self.assertEqual(self.notifier(self.paiement.reference, montant=1).status_code, 400)
         self.assertEqual(self.notifier(self.paiement.reference, montant=None).status_code, 401)  # montant absent
@@ -314,7 +314,7 @@ class NotificationTests(Donnees, APITestCase):
         self.assertEqual(self.paiement.statut, Paiement.Statut.EN_ATTENTE)
         self.assertEqual(JournalWebhook.objects.filter(statut_traitement="erreur").count(), 2)
 
-    def test_D05_une_notification_ne_change_jamais_les_commandes_payees(self):
+    def test_une_notification_ne_change_jamais_les_commandes_payees(self):
         (autre,) = self.commander((self.variante1, 1), client=self.client2)
         self.notifier(self.paiement.reference, statut="echec", commandes_couvertes=[str(autre.pk)],
                       metadata={"commandes_couvertes": [str(autre.pk)]})
@@ -323,13 +323,13 @@ class NotificationTests(Donnees, APITestCase):
         self.assertEqual(autre.status, Commande.Status.CREEE)
         self.assertEqual(list(self.paiement.commandes.all()), [self.commande])
 
-    def test_D10_paiement_valide_jamais_revalide_ni_echoue(self):
+    def test_paiement_valide_jamais_revalide_ni_echoue(self):
         self.notifier_succes(self.paiement)
         self.notifier_succes(self.paiement)  # autre événement
         self.notifier(self.paiement.reference, statut="echec")
         self.paiement.refresh_from_db()
         self.assertEqual(self.paiement.statut, Paiement.Statut.VALIDE)
-        # Aucun point au paiement : ils naissent à la livraison (apps.fidelite, F1).
+        # Aucun point au paiement : ils naissent à la livraison (apps.fidelite).
         self.assertFalse(CompteFidelite.objects.filter(utilisateur=self.client1, solde_points__gt=0).exists())
         self.assertEqual(Notification.objects.filter(destinataire=self.client1, titre="Paiement confirmé").count(), 1)
 
@@ -357,7 +357,7 @@ class NotificationTests(Donnees, APITestCase):
             self.assertEqual(self.notifier_succes(self.paiement, evenement_id="evt-503").status_code, 503)
         self.assertEqual(self.notifier_succes(self.paiement, evenement_id="evt-503").status_code, 200)
 
-    def test_D11_notifications_non_soumises_a_la_limite_anonyme(self):
+    def test_notifications_non_soumises_a_la_limite_anonyme(self):
         from apps.core.tests import taux_de_production
 
         taux = {**taux_de_production(), "anon": "2/hour"}
@@ -367,7 +367,7 @@ class NotificationTests(Donnees, APITestCase):
         self.assertEqual(codes, [200] * 4)
         self.assertEqual(taux_de_production()["webhook_paiement"], "3000/hour")
 
-    def test_D14_initiation_limitee(self):
+    def test_initiation_limitee(self):
         from apps.core.tests import taux_de_production
 
         taux = {**taux_de_production(), "paiements": "2/hour"}
@@ -407,7 +407,7 @@ class RemboursementTests(Donnees, APITestCase):
         self.assertFalse(CompteFidelite.objects.filter(utilisateur=self.client1, solde_points__gt=0).exists())
         self.assertTrue(Notification.objects.filter(destinataire=self.admin, titre="Remboursement à traiter").exists())
 
-    def test_D01b_second_paiement_d_une_commande_deja_payee_rembourse(self):
+    def test_second_paiement_d_une_commande_deja_payee_rembourse(self):
         premier = self.payer(self.commande_a)
         self.api(self.client1).post(f"/api/paiements/{premier.pk}/annuler/")
         second = self.payer(groupe=self.groupe)
@@ -428,7 +428,7 @@ class RemboursementTests(Donnees, APITestCase):
         self.assertEqual(self.commande_a.status, Commande.Status.CONFIRMEE)
         self.assertEqual(Remboursement.objects.get().paiement, second)
 
-    def test_D08_annulation_partielle_d_un_groupe_paye(self):
+    def test_annulation_partielle_d_un_groupe_paye(self):
         paiement = self.payer(groupe=self.groupe)
         self.notifier_succes(paiement)
         annuler_commande(self.commande_a, Commande.MotifAnnulation.CLIENT)
@@ -492,23 +492,23 @@ class ConcurrenceTests(Donnees, TransactionTestCase):
             fil.join()
         return sorted(resultats)
 
-    def test_D02_initiations_concurrentes_un_seul_paiement(self):
+    def test_initiations_concurrentes_un_seul_paiement(self):
         codes = self.en_parallele(lambda i: self.initier(commande_id=str(self.commande.pk)).status_code, 4)
         self.assertEqual(codes, [201, 400, 400, 400])
         self.assertEqual(Paiement.objects.count(), 1)
 
-    def test_D06_succes_concurrents_une_seule_validation(self):
+    def test_succes_concurrents_une_seule_validation(self):
         paiement = self.payer(self.commande)
         codes = self.en_parallele(lambda i: self.notifier_succes(paiement, evenement_id=f"evt-c{i}").status_code, 3)
         self.assertEqual(codes, [200, 200, 200])
-        # Aucun point au paiement : ils naissent à la livraison (apps.fidelite, F1).
+        # Aucun point au paiement : ils naissent à la livraison (apps.fidelite).
         self.assertFalse(CompteFidelite.objects.filter(utilisateur=self.client1, solde_points__gt=0).exists())
         self.assertEqual(Reversement.objects.count(), 1)
         self.assertEqual(Notification.objects.filter(destinataire=self.client1, titre="Paiement confirmé").count(), 1)
 
 
 # =====================================================================
-# RÉCONCILIATION AVEC LE FOURNISSEUR (M1) ET ORDRE DES VERROUS (A1)
+# RÉCONCILIATION AVEC LE FOURNISSEUR ET ORDRE DES VERROUS
 # =====================================================================
 
 def vieillir_commandes(*commandes, minutes):
@@ -818,11 +818,12 @@ class ReconciliationConcurrenceTests(DonneesReconciliation, TransactionTestCase)
             self.assertEqual((commande_statut, remboursements, self.stock()), ("confirmee", 0, 47))
         return commande_statut
 
-    def test_A1_webhook_de_succes_contre_expiration_qui_tient_la_commande(self):
-        """Contre-audit A1 : l'expiration annule la commande (verrou de
-        ligne) puis s'arrête juste avant de toucher au paiement ; le webhook
-        arrive à ce moment. Ancien ordre (Paiement puis Commandes) :
-        interblocage, webhook en 500, paiement annulé sans remboursement."""
+    def test_webhook_de_succes_contre_expiration_qui_tient_la_commande(self):
+        """L'expiration annule la commande (verrou de ligne) puis s'arrête
+        juste avant de toucher au paiement ; le webhook arrive à ce moment.
+        Avec l'ordre inverse (Paiement puis Commandes), ce scénario
+        produirait un interblocage, un webhook en 500 et un paiement annulé
+        sans remboursement."""
         from apps.commandes.tasks import expirer_commandes_non_payees
 
         vieillir_commandes(self.commande, minutes=61)  # délai de grâce écoulé, fournisseur « en attente »
@@ -845,7 +846,7 @@ class ReconciliationConcurrenceTests(DonneesReconciliation, TransactionTestCase)
         self.assertEqual(self.verifier_invariant(), "annulee")
         self.assertEqual(Remboursement.objects.get().motif, "commande_annulee")
 
-    def test_A1_webhook_de_succes_qui_tient_les_verrous_contre_expiration(self):
+    def test_webhook_de_succes_qui_tient_les_verrous_contre_expiration(self):
         """Le webhook tient la commande et le paiement ; l'expiration (le
         fournisseur répondait encore « en attente ») attend, puis trouve la
         commande confirmée et n'y touche pas."""
@@ -1906,7 +1907,7 @@ class ReconciliationReponsesCinetPayTests(ReponsesCinetPay, DonneesReconciliatio
         with mock.patch("requests.request", side_effect=self.repondre):
             return expirer_commandes_non_payees()
 
-    def test_404_sur_p1_n_empeche_plus_la_tache_de_valider_p2(self):
+    def test_404_sur_p1_n_empeche_pas_la_tache_de_valider_p2(self):
         with self.assertLogs("securite", "ERROR") as journaux:
             self.assertEqual(self.reconcilier(), "2 paiement(s) vérifié(s), 1 statut(s) changé(s).")
         self.assertEqual(self.verifications(), [self.p1.reference, self.p2.reference])
@@ -1917,7 +1918,7 @@ class ReconciliationReponsesCinetPayTests(ReponsesCinetPay, DonneesReconciliatio
         self.assertIn(f"Réconciliation de {self.p1.reference} : transaction refusée par le fournisseur cinetpay",
                       journaux.output[0])
 
-    def test_404_sur_p1_n_empeche_plus_l_expiration_de_valider_p2(self):
+    def test_404_sur_p1_n_empeche_pas_l_expiration_de_valider_p2(self):
         vieillir_commandes(self.c1, self.c2, minutes=31)
         with self.assertLogs("securite", "ERROR"):
             self.assertEqual(self.expirer(), "0 commande(s) non payée(s) annulée(s).")

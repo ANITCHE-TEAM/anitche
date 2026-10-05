@@ -267,7 +267,7 @@ class LivraisonTestCase(DonneesLivraison, APITestCase):
         self.assertEqual(signaux_recus[0]["ancien_status"], Statut.EN_ATTENTE)
         self.assertEqual(signaux_recus[0]["effectue_par"], self.livreur)
 
-    # ---------- F-05 : validation des transitions de statut ----------
+    # ---------- Validation des transitions de statut ----------
 
     def test_livreur_ne_peut_pas_sauter_une_etape(self):
         """EN_ATTENTE -> LIVREE directement doit être refusé pour un livreur."""
@@ -292,8 +292,8 @@ class LivraisonTestCase(DonneesLivraison, APITestCase):
 
 
 class CodeDeLivraisonTests(DonneesLivraison, APITestCase):
-    """D1 — « livrée » (qui déclenche le reversement) exige le code donné
-    par le client : avant, le livreur seul pouvait la déclarer."""
+    """« Livrée » (qui déclenche le reversement) exige le code donné par le
+    client : le livreur seul ne peut pas la déclarer."""
 
     def setUp(self):
         self.creer_donnees()
@@ -356,8 +356,8 @@ class CodeDeLivraisonTests(DonneesLivraison, APITestCase):
 
 
 class AssignationTests(DonneesLivraison, APITestCase):
-    """A / D2 — assignation par l'administration ; jamais le propriétaire
-    de la boutique (avant : n'importe quel utilisateur, depuis le Django admin)."""
+    """Assignation par l'administration, à un livreur actif ; jamais au
+    propriétaire de la boutique."""
 
     def setUp(self):
         self.creer_donnees()
@@ -405,7 +405,8 @@ class AssignationTests(DonneesLivraison, APITestCase):
             self.assertEqual(self.assigner(utilisateur, self.livreur.pk).status_code, 403)
 
     def test_vendeur_deja_assigne_ne_peut_pas_livrer_sa_commande(self):
-        """Donnée existante (assignation libre de l'ancien Django admin)."""
+        """Fiche déjà assignée au propriétaire de la boutique (donnée
+        existante en base, créée hors du service d'assignation)."""
         Utilisateur.objects.filter(pk=self.vendeur.pk).update(role=Role.LIVREUR)
         self.vendeur.refresh_from_db()
         Livraison.objects.filter(pk=self.livraison.pk).update(livreur=self.vendeur)
@@ -427,7 +428,7 @@ class AssignationTests(DonneesLivraison, APITestCase):
 
 
 class RoleLivreurTests(DonneesLivraison, APITestCase):
-    """D / D3 — nommer / retirer un livreur ; le retrait est immédiat."""
+    """Nommer / retirer un livreur ; le retrait est immédiat."""
 
     def setUp(self):
         self.creer_donnees()
@@ -485,8 +486,9 @@ class RoleLivreurTests(DonneesLivraison, APITestCase):
 
 
 class TransitionsAdministrationTests(DonneesLivraison, APITestCase):
-    """D4 — l'administration suit la même table (avant : transitions
-    libres, y compris sortir d'une livraison livrée après le reversement)."""
+    """L'administration suit la même table de transitions : pas de saut
+    d'étape, et jamais de sortie d'une livraison livrée (reversement en
+    cours)."""
 
     def setUp(self):
         self.creer_donnees()
@@ -508,8 +510,8 @@ class TransitionsAdministrationTests(DonneesLivraison, APITestCase):
 
 
 class EchecTests(DonneesLivraison, APITestCase):
-    """D6 — échec : nouvelle tentative (au plus LIVRAISON_TENTATIVES_MAX)
-    ou abandon (commande annulée, remboursement). Avant : impasse."""
+    """Échec : nouvelle tentative (au plus LIVRAISON_TENTATIVES_MAX) ou
+    abandon (commande annulée, remboursement)."""
 
     def setUp(self):
         self.creer_donnees()
@@ -570,8 +572,8 @@ class EchecTests(DonneesLivraison, APITestCase):
 
 
 class AnnulationTests(DonneesLivraison, APITestCase):
-    """D5 — commande annulée : la fiche passe « annulée » (avant : restait
-    « en attente », coordonnées du client toujours visibles du livreur)."""
+    """Commande annulée : la fiche passe « annulée » et le livreur ne voit
+    plus les coordonnées du client."""
 
     def setUp(self):
         self.creer_donnees()
@@ -616,7 +618,7 @@ class AnnulationTests(DonneesLivraison, APITestCase):
     def test_migration_des_fiches_orphelines(self):
         """Fiche non terminée d'une commande annulée (créée par une validation
         de paiement concurrente à l'annulation) : passée « annulée ».
-        Rejouée, la reprise ne fait plus rien ; une fiche livrée, ou celle
+        Rejouée, la reprise ne change rien ; une fiche livrée, ou celle
         d'une commande active, n'est jamais touchée."""
         import importlib
         from django.apps import apps as registre
@@ -720,7 +722,7 @@ class ContestationTests(DonneesLivraison, APITestCase):
 
 
 class IsolationEtSuiviTests(DonneesLivraison, APITestCase):
-    """D7, D8, D9, D10 — ce que chacun voit."""
+    """Ce que chacun voit."""
 
     def setUp(self):
         self.creer_donnees()
@@ -864,7 +866,7 @@ class PositionLivraisonTests(DonneesLivraison, APITestCase):
 
 
 class PerformanceEtLimitesTests(DonneesLivraison, APITestCase):
-    """D12 (N+1) et D14 (limite de débit dédiée)."""
+    """Pas de N+1 et limite de débit dédiée."""
 
     def setUp(self):
         self.creer_donnees()
@@ -914,9 +916,9 @@ class PerformanceEtLimitesTests(DonneesLivraison, APITestCase):
 
 
 class ConcurrenceTests(DonneesLivraison, TransactionTestCase):
-    """D15 — « livrée » et « échouée » simultanés : une seule l'emporte,
-    livraison et commande restent cohérentes (avant : livraison « échouée »,
-    commande « livrée », reversement ouvert)."""
+    """« Livrée » et « échouée » simultanés : une seule l'emporte, livraison
+    et commande restent cohérentes (jamais une livraison « échouée » avec
+    une commande « livrée » et un reversement ouvert)."""
 
     def setUp(self):
         self.creer_donnees()

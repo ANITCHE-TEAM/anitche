@@ -66,7 +66,7 @@ class Commande(models.Model):
     # frais_livraison (FCFA entiers). Somme payée en ligne, et montant
     # remboursé quand la commande est annulée.
     montant_total = models.DecimalField(max_digits=12, decimal_places=2)
-    # F-10 : trace, par commande (donc par boutique), le coupon appliqué au
+    # Trace, par commande (donc par boutique), le coupon appliqué au
     # panier et la part de remise qui lui revient. Un coupon s'applique au
     # panier entier (potentiellement multi-boutique) ; sa remise est donc
     # répartie proportionnellement entre les commandes générées, plutôt que

@@ -80,7 +80,7 @@ class SupportTicketListCreateView(ScopedOnPostMixin, generics.ListCreateAPIView)
     ),
 )
 class SupportRetrieveUpdateView(generics.RetrieveUpdateAPIView):
-    """Détail et reclassement (category/priority, staff seulement). Plus de
+    """Détail et reclassement (category/priority, staff seulement). Aucune
     suppression par l'API : un ticket est un historique de litige."""
 
     permission_classes = [IsAuthenticated]

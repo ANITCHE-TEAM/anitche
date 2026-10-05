@@ -23,8 +23,8 @@ class CompteFideliteAdmin(admin.ModelAdmin):
     list_display = ("utilisateur", "solde_points", "points_cumules_total", "palier", "date_creation")
     list_filter = ("palier", "date_creation")
     search_fields = ("utilisateur__email",)
-    # Solde et palier en lecture seule : modifier le solde ici fabriquait des
-    # points sans transaction d'audit (F-g).
+    # Solde et palier en lecture seule : modifier le solde ici fabriquerait
+    # des points sans transaction d'audit.
     readonly_fields = ("id", "utilisateur", "solde_points", "points_cumules_total", "palier",
                        "date_creation", "date_mise_a_jour")
 

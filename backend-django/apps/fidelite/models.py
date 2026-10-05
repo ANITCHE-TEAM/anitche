@@ -90,7 +90,7 @@ class CompteFidelite(models.Model):
         double dépense de points / coupon émis en trop.
 
         `type_transaction` permet à un appelant (ex: la reprise de points
-        suite à un remboursement, voir signals.py) d'auditer correctement
+        après un remboursement, voir signals.py) d'auditer correctement
         le mouvement plutôt que de le classer à tort comme une conversion
         volontaire en coupon (TypeTransaction.DEPENSE, la valeur par défaut
         conservée pour ne pas casser l'appelant historique).

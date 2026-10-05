@@ -107,7 +107,7 @@ class UtilisateurAdmin(UserAdmin):
 
     # Champs consultables mais non modifiables.
     readonly_fields = (
-        # F-16 : 'statut_kyc' en lecture seule ici. La validation d'un
+        # 'statut_kyc' en lecture seule ici. La validation d'un
         # vendeur doit passer par apps.vendeurs.admin.DemandeVendeurAdmin
         # (actions valider_les_demandes / refuser_les_demandes), qui
         # appelle valider_demande_vendeur() — verrouillage + cohérence

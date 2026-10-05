@@ -6,8 +6,8 @@ from apps.retours.signals import retour_status_change
 
 logger = logging.getLogger(__name__)
 
-# Les points ne sont plus crédités au paiement (une commande payée puis
-# annulée gardait ses points) : ils naissent à la livraison, « en attente »
+# Aucun point n'est crédité au paiement (une commande payée puis annulée
+# garderait ses points) : ils naissent à la livraison, « en attente »
 # pendant le délai de rétractation (apps.fidelite.services).
 
 

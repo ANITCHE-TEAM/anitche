@@ -94,12 +94,12 @@ class SupportTicketTestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_vendor_sees_own_ticket_without_vendor_field(self):
-        """Trou corrigé : un vendeur qui ouvre son propre ticket (ex: souci
-        de paiement, sans lien avec une boutique donc `vendor` reste null)
-        doit continuer à le voir dans sa propre liste et pouvoir y accéder
-        en détail. Avant le correctif de get_visible_tickets(), la branche
-        VENDEUR ne filtrait QUE sur vendor__proprietaire=user et ce ticket
-        devenait invisible pour son propre créateur."""
+        """Un vendeur qui ouvre son propre ticket (ex: souci de paiement,
+        sans lien avec une boutique donc `vendor` reste null) doit le voir
+        dans sa propre liste et pouvoir y accéder en détail : dans
+        get_visible_tickets(), la branche VENDEUR ne filtre pas QUE sur
+        vendor__proprietaire=user, sinon ce ticket serait invisible pour
+        son propre créateur."""
         ticket_perso = SupportTicket.objects.create(
             created_by=self.vendor_user,
             subject="Mon paiement vendeur a échoué",
@@ -120,7 +120,7 @@ class SupportTicketTestCase(APITestCase):
         self.assertEqual(response_detail.status_code, status.HTTP_200_OK)
 
     def test_vendor_can_message_on_own_ticket(self):
-        """Corollaire du correctif : TicketMessageListCreateView s'appuie sur
+        """Corollaire du test précédent : TicketMessageListCreateView s'appuie sur
         get_visible_tickets(), donc un vendeur doit pouvoir répondre sur son
         propre ticket, pas seulement le consulter."""
         ticket_perso = SupportTicket.objects.create(
@@ -136,9 +136,9 @@ class SupportTicketTestCase(APITestCase):
         self.assertEqual(response.data["author_role"], TicketMessage.AuthorRole.VENDOR)
 
     def test_vendor_still_sees_dispute_against_own_boutique(self):
-        """Non-régression : le correctif ajoute created_by=user en OR, il ne
-        doit pas retirer la visibilité déjà existante sur les litiges ouverts
-        par un client contre la boutique du vendeur."""
+        """La branche VENDEUR de get_visible_tickets() ajoute created_by=user
+        en OR : elle ne retire pas la visibilité sur les litiges ouverts par
+        un client contre la boutique du vendeur."""
         self.client.force_authenticate(user=self.vendor_user)
         url = reverse("support:ticket-detail", args=[self.ticket.id])
         response = self.client.get(url)
@@ -187,8 +187,8 @@ class SupportTicketTestCase(APITestCase):
         self.assertTrue(SupportTicket.objects.filter(pk=self.ticket.id).exists())
 
     def test_admin_cannot_delete_ticket_through_the_api(self):
-        """S4 : un ticket est un historique de litige ; plus de suppression
-        par l'API, même pour l'administration (Django admin seulement)."""
+        """Un ticket est un historique de litige ; aucune suppression par
+        l'API, même pour l'administration (Django admin seulement)."""
         self.client.force_authenticate(user=self.admin_user)
         url = reverse("support:ticket-detail", args=[self.ticket.id])
         response = self.client.delete(url)
@@ -446,7 +446,7 @@ class TicketAttachmentTestCase(APITestCase):
 
 
 # =====================================================================
-# Diagnostic de septembre 2026 : un test par faille confirmée
+# Tickets, notes internes, pièces jointes, statuts et limites du support
 # (docs/MODULE_SUPPORT.md, § Sécurité).
 # =====================================================================
 
@@ -471,7 +471,7 @@ def png(nom="capture.png"):
     return SimpleUploadedFile(nom, tampon.getvalue(), content_type="image/png")
 
 
-class SupportDiagnosticBase(APITestCase):
+class SupportTicketsBase(APITestCase):
     def setUp(self):
         creer = Utilisateur.objects.create_user
         self.client_user = creer(email="c@support.ci", password="testpass123", nom="C", prenom="C", role=Role.CLIENT)
@@ -509,8 +509,9 @@ class SupportDiagnosticBase(APITestCase):
         return self.client.patch(f"{URL}tickets/{(ticket or self.ticket).id}/status/", {"status": value}, format="json")
 
 
-class TestsCollectesTests(SupportDiagnosticBase):
-    """S-a : la classe de tests des messages était imbriquée, jamais exécutée."""
+class TestsCollectesTests(SupportTicketsBase):
+    """La classe de tests des messages est au niveau du module : imbriquée
+    dans une autre classe, elle ne serait jamais exécutée."""
 
     def test_classe_des_messages_au_niveau_du_module(self):
         import apps.support.tests as module
@@ -518,8 +519,8 @@ class TestsCollectesTests(SupportDiagnosticBase):
         self.assertFalse(hasattr(module.SupportTicketTestCase, "TicketMessageTestCase"))
 
 
-class TicketLieACommandeTests(SupportDiagnosticBase):
-    """S-b / S1 : un ticket vise SA commande ou SON produit acheté."""
+class TicketLieACommandeTests(SupportTicketsBase):
+    """Un ticket vise SA commande ou SON produit acheté."""
 
     def test_lien_commande_et_produit_achete(self):
         r = self.create_ticket(order=str(self.order.id), product=self.produit.id)
@@ -560,8 +561,8 @@ class TicketLieACommandeTests(SupportDiagnosticBase):
         self.assertEqual((ticket.order_id, ticket.priority), (self.order.id, "high"))
 
 
-class NotesInternesTests(SupportDiagnosticBase):
-    """S-c / S5 : le staff écrit des notes internes, jamais le client."""
+class NotesInternesTests(SupportTicketsBase):
+    """Le staff écrit des notes internes, jamais le client."""
 
     def test_staff_cree_une_note_interne_invisible_du_client(self):
         r = self.post_message(self.agent, "Vérifier le transporteur", is_internal_note=True)
@@ -576,8 +577,8 @@ class NotesInternesTests(SupportDiagnosticBase):
         self.assertFalse(TicketMessage.objects.get(pk=r.data["id"]).is_internal_note)
 
 
-class PiecesJointesTests(SupportDiagnosticBase):
-    """S-d / S6 : pièces jointes sur ses propres messages, jamais sur une
+class PiecesJointesTests(SupportTicketsBase):
+    """Pièces jointes sur ses propres messages, jamais sur une
     note interne, type calculé, nom UUID, 5 au plus, téléchargement contrôlé."""
 
     def setUp(self):
@@ -641,8 +642,8 @@ class PiecesJointesTests(SupportDiagnosticBase):
         self.assertEqual(self.client.get(f"{URL}attachments/{piece.id}/").status_code, 404)
 
 
-class StatutsEtAssignationTests(SupportDiagnosticBase):
-    """S-e / S2 / S3 : table de transitions, prise en charge, réassignation."""
+class StatutsEtAssignationTests(SupportTicketsBase):
+    """Table de transitions, prise en charge, réassignation."""
 
     def test_ferme_est_definitif(self):
         self.assertEqual(self.set_status(self.agent, "closed").status_code, 200)
@@ -691,8 +692,8 @@ class StatutsEtAssignationTests(SupportDiagnosticBase):
         self.assertEqual(self.client.patch(url, {"satisfaction_rating": 5}, format="json").status_code, 200)
 
 
-class FilDeDiscussionTests(SupportDiagnosticBase):
-    """S-g / S-h : ticket fermé, statut automatique, lecture, notifications."""
+class FilDeDiscussionTests(SupportTicketsBase):
+    """Ticket fermé, statut automatique, lecture, notifications."""
 
     def test_message_sur_ticket_ferme_refuse(self):
         SupportTicket.objects.filter(pk=self.ticket.pk).update(status="closed")
@@ -728,8 +729,8 @@ class FilDeDiscussionTests(SupportDiagnosticBase):
         self.assertIsNotNone(TicketMessage.objects.get(pk=message["id"]).read_at)
 
 
-class LimitesDeDebitTests(SupportDiagnosticBase):
-    """S-h : limites dédiées (vraies valeurs de base.py)."""
+class LimitesDeDebitTests(SupportTicketsBase):
+    """Limites dédiées (vraies valeurs de base.py)."""
 
     def test_creation_de_tickets_limitee(self):
         from apps.core.tests import taux_de_production

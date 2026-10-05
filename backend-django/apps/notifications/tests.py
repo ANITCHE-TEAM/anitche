@@ -212,7 +212,7 @@ class NotificationSignauxTestCase(BaseNotificationTestCase):
 
 
 # =====================================================================
-# Diagnostic de septembre 2026 : un test par faille confirmée
+# Envoi après commit, préférences, isolation et alertes métier
 # (docs/MODULE_NOTIFICATIONS.md, § Sécurité).
 # =====================================================================
 
@@ -228,7 +228,7 @@ from .services import alerter_stock_bas
 
 @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
 class EnvoiApresCommitTests(BaseNotificationTestCase):
-    """N-b : email par Celery après le commit, jamais pour une action annulée."""
+    """Email par Celery après le commit, jamais pour une action annulée."""
 
     def test_aucun_email_si_la_transaction_est_annulee(self):
         with self.captureOnCommitCallbacks(execute=True):
@@ -278,9 +278,9 @@ class EnvoiApresCommitTests(BaseNotificationTestCase):
 
 
 class PreferencesTests(BaseNotificationTestCase):
-    """N-d : l'in-app ne se désactive plus ; seul l'email est un choix."""
+    """L'in-app ne se désactive pas ; seul l'email est un choix."""
 
-    def test_in_app_et_sms_ne_sont_plus_des_preferences(self):
+    def test_in_app_et_sms_ne_sont_pas_des_preferences(self):
         self.client.force_authenticate(user=self.client1)
         url = reverse("notifications:notification-preferences")
         reponse = self.client.patch(url, {"in_app_actif": False, "sms_actif": False, "email_actif": False}, format="json")
@@ -291,7 +291,7 @@ class PreferencesTests(BaseNotificationTestCase):
 
 
 class IsolationTests(BaseNotificationTestCase):
-    """N-a (correct dès le diagnostic) : chaque notification n'est visible et
+    """Chaque notification n'est visible et
     modifiable que par son destinataire."""
 
     def test_notification_d_autrui_introuvable(self):
@@ -307,7 +307,7 @@ class IsolationTests(BaseNotificationTestCase):
 
 
 class StockBasTests(DonneesCycleDeVie, APITestCase):
-    """N3 : seuil_alerte enfin utilisé — alerte au franchissement, une fois."""
+    """seuil_alerte : alerte au vendeur au franchissement, une seule fois."""
 
     def setUp(self):
         self.creer_donnees()
@@ -348,7 +348,7 @@ class StockBasTests(DonneesCycleDeVie, APITestCase):
 
 
 class AnnulationTests(DonneesCycleDeVie, APITestCase):
-    """N4 : le client est prévenu de toute annulation ; le vendeur seulement
+    """Le client est prévenu de toute annulation ; le vendeur seulement
     si la commande était payée."""
 
     def setUp(self):

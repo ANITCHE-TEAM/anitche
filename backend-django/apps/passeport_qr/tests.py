@@ -171,10 +171,9 @@ class PasseportAPITestCase(BasePasseportTestCase):
 
 
 class PasseportReassignationProduitTestCase(BasePasseportTestCase):
-    """F-21 (audit sécurité) : un vendeur ne doit pas pouvoir, via PATCH,
-    réassigner un passeport existant à un produit qui n'est pas le sien —
-    ce qui casserait la garantie d'authenticité que ce module est censé
-    apporter (le passeport resterait affiché sous SA boutique, tout en
+    """Un vendeur ne doit pas pouvoir, via PATCH, réassigner un passeport
+    existant à un produit qui n'est pas le sien — ce qui casserait la
+    garantie d'authenticité que ce module apporte (le passeport resterait affiché sous SA boutique, tout en
     certifiant le produit d'un autre vendeur)."""
 
     def setUp(self):
@@ -207,8 +206,8 @@ class PasseportReassignationProduitTestCase(BasePasseportTestCase):
     def test_vendeur_peut_toujours_corriger_vers_un_autre_produit_de_sa_propre_boutique(self):
         # Cas légitime : un produit de la MÊME boutique reste autorisé (en
         # remettant aussi la variante à zéro, puisque variante1 est liée à
-        # l'ancien produit1 — changer de produit sans y toucher serait
-        # justement l'incohérence que le correctif détecte à raison).
+        # produit1 — changer de produit sans y toucher serait justement
+        # l'incohérence que la validation refuse à raison).
         autre_produit_meme_boutique = Produit.objects.create(
             boutique=self.boutique1,
             nom="Masque Baoulé (variante fabrication)",
@@ -244,7 +243,7 @@ class PasseportAccesTestCase(BasePasseportTestCase):
         self.assertEqual(self.client.get(URL_LISTE).status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_is_staff_ne_donne_aucun_pouvoir_metier(self):
-        # Avant : `user.is_staff` suffisait pour créer sur le produit d'autrui.
+        # `user.is_staff` ne suffit jamais pour créer sur le produit d'autrui.
         staff_client = creer_utilisateur("staff@anitche.ci", role=Role.CLIENT, is_staff=True)
         self.client.force_authenticate(staff_client)
         response = self.client.post(URL_LISTE, {"produit_id": self.produit2.id}, format="json")
@@ -258,7 +257,7 @@ class PasseportAccesTestCase(BasePasseportTestCase):
         self.assertFalse(PasseportProduit.objects.filter(produit=self.produit2).exists())
 
     def test_administration_admin_et_super_admin(self):
-        # Avant : super_admin était refusé à la création (seul role == "admin" passait).
+        # admin et super_admin créent tous deux (pas seulement role == "admin").
         for role in (Role.ADMIN, Role.SUPER_ADMIN):
             with self.subTest(role=role):
                 administrateur = creer_utilisateur(f"{role}@anitche.ci", role=role)
@@ -682,7 +681,7 @@ class PasseportVerificationPubliqueTestCase(BasePasseportTestCase):
         self.assertNotIn("suspend", response.content.decode().lower())
 
     def test_passeport_sans_variante_dun_produit_sans_variante_active(self):
-        # Avant : « disponible à la vente » et lien vers une fiche catalogue en 404.
+        # Jamais « disponible à la vente » ni de lien vers une fiche catalogue en 404.
         passeport = self.creer_passeport(numero_lot="LOT-SANS-VARIANTE")
         VarianteProduit.objects.filter(pk=self.variante1.pk).update(est_active=False)
         self.assertEqual(self.client.get(f"/api/catalogue/produits/{self.produit1.slug}/").status_code, 404)
@@ -760,13 +759,13 @@ class PasseportScanTestCase(BasePasseportTestCase):
         return HistoriqueScanPasseport.objects.latest("date_scan").adresse_ip
 
     def test_x_forwarded_for_forge_ignore_sans_proxy(self):
-        # Avant : l'en-tête du client était enregistré tel quel.
+        # Sans proxy de confiance, l'en-tête envoyé par le client est ignoré.
         response = self.verifier(REMOTE_ADDR="41.66.10.20", HTTP_X_FORWARDED_FOR="6.6.6.6")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(self.derniere_ip(), "41.66.10.0")
 
-    def test_chaine_x_forwarded_for_ne_provoque_plus_de_500(self):
-        # Avant : "a, b" (forme produite par un proxy) était écrit dans une colonne inet → 500.
+    def test_chaine_x_forwarded_for_ne_provoque_pas_de_500(self):
+        # "a, b" (forme produite par un proxy) ne doit jamais finir tel quel dans une colonne inet.
         response = self.verifier(HTTP_X_FORWARDED_FOR="41.66.1.2, 172.70.1.1")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
@@ -784,7 +783,7 @@ class PasseportScanTestCase(BasePasseportTestCase):
         self.assertIsNone(tronquer_adresse_ip(None))
 
     def test_compteur_et_historique_ecrits_ensemble_ou_pas_du_tout(self):
-        # Avant : le compteur était incrémenté même si l'historique échouait.
+        # Si l'historique échoue, le compteur n'est pas incrémenté.
         with mock.patch.object(HistoriqueScanPasseport.objects, "create", side_effect=RuntimeError("panne")):
             response = self.verifier()
         self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -848,7 +847,7 @@ class PasseportConcurrenceTestCase(DonneesPasseport, TransactionTestCase):
         return resultats
 
     def test_scans_simultanes_aucun_increment_perdu(self):
-        # Avant : 80 scans simultanés donnaient ~25 dans nb_scans.
+        # 80 scans simultanés : nb_scans doit valoir exactement 80.
         passeport = self.creer_passeport()
         url = url_verification(passeport.code_passeport)
 

@@ -47,8 +47,9 @@ def _compte_de(utilisateur):
 # =====================================================================
 
 def _deja_credite_au_paiement(commande):
-    """Commandes payées avant la refonte : leurs points ont été crédités au
-    paiement (référence = paiement). Elles n'ouvrent pas de second gain."""
+    """Commandes dont les points ont déjà été crédités au paiement
+    (transaction GAIN de référence = paiement, données antérieures au gain
+    à la livraison). Elles n'ouvrent pas de second gain."""
     references = list(commande.paiements_couvrants.values_list("reference", flat=True))
     return bool(references) and TransactionFidelite.objects.filter(
         compte__utilisateur_id=commande.client_id,

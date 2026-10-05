@@ -18,8 +18,8 @@ class CommandeAdmin(admin.ModelAdmin):
     # commande ne doit changer que via le flux réel (paiement validé →
     # signal paiement_valide → confirmation, ou transitions de livraison)
     # — jamais par une édition libre dans l'admin, qui contournerait tout
-    # contrôle de paiement (même principe que F-14 sur Paiement.statut et
-    # F-15 sur Livraison.status, déjà verrouillés ailleurs dans le projet).
+    # contrôle de paiement (même principe que Paiement.statut et
+    # Livraison.status, non modifiables dans leurs admins respectifs).
     # Frais de livraison figés au checkout : inclus dans le montant payé et
     # dans le reversement (livraison offerte), jamais modifiables après coup.
     readonly_fields = (
@@ -43,8 +43,8 @@ class CommandeItemAdmin(admin.ModelAdmin):
     # CommandeItem est un snapshot de ce qui a été réellement commandé et
     # facturé à l'instant T : l'éditer après coup romprait la cohérence
     # avec Commande.montant_total (calculé une seule fois à la création à
-    # partir de ces mêmes lignes, désormais verrouillé aussi) et avec
-    # Paiement.montant (F-14). Une correction légitime passe par un
+    # partir de ces mêmes lignes, lui aussi en lecture seule) et avec
+    # Paiement.montant. Une correction légitime passe par un
     # remboursement/avoir, jamais par une réécriture silencieuse de
     # l'historique.
     readonly_fields = ("id", "commande", "variante", "nom_produit", "prix_unitaire", "quantite")

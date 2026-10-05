@@ -83,7 +83,7 @@ Point d'entrée unique des transitions : `apps/vendeurs/services.py`. L'API et l
 
 Un compte hors file d'attente renvoie **404** sur les deux routes de décision.
 
-**Format d'erreur unifié (septembre 2026).** Les refus des routes de décision (auto-approbation → **403**, transition impossible → **400**) renvoyaient `{"message": …}` : ils suivent désormais le format commun `{success: false, status_code, detail, errors}` (message dans `detail`, `errors` toujours un objet clé → liste de messages), comme toutes les autres erreurs de l'API.
+**Format d'erreur unifié (septembre 2026).** Les refus des routes de décision (auto-approbation → **403**, transition impossible → **400**) suivent le format commun `{success: false, status_code, detail, errors}` (message dans `detail`, `errors` toujours un objet clé → liste de messages), comme toutes les autres erreurs de l'API.
 
 ## 5. Dépendances avec les autres modules
 
@@ -101,7 +101,7 @@ Aucune spec détaillée vendeur n'est présente dans `docs/` (le backlog des 18 
 3. **Motif obligatoire au refus**, optionnel à la validation (traçabilité côté `commentaire_admin`).
 4. **Fermeture vendeur et suspension admin sont deux champs distincts** (`est_active` / `est_suspendue`). Pendant une suspension, la boutique est entièrement gelée côté vendeur (lecture seule, 403 sur toute écriture, `est_active` compris). L'administration, elle, ne modifie jamais le contenu de la boutique.
    - ⚠️ **Dette connue** : pendant une suspension, **personne ne peut corriger le contenu** via l'API — ni le vendeur (gelé), ni l'administration (`administration/boutiques/<id>/` n'accepte que `est_suspendue`). Seule issue aujourd'hui : lever la suspension pour laisser le vendeur corriger. (Le django-admin `/admin/` permet techniquement d'éditer tous les champs à un compte staff disposant des permissions Django : c'est un accès technique, pas un flux métier.) À traiter si un besoin de modération de contenu apparaît.
-   - ~~Les écritures du **catalogue** ne testaient pas `est_suspendue`.~~ **Résolu** (refonte du catalogue, septembre 2026) : `BoutiqueDuVendeurNonSuspendue` (`apps/vendeurs/permissions.py`, partagée avec `passeport_qr`) refuse toute écriture (403) d'un vendeur dont la boutique est suspendue ; la lecture reste possible. Voir `MODULE_CATALOGUE.md`.
+   - ~~Les écritures du **catalogue** ne testaient pas `est_suspendue`.~~ **Résolu** : `BoutiqueDuVendeurNonSuspendue` (`apps/vendeurs/permissions.py`, partagée avec `passeport_qr`) refuse toute écriture (403) d'un vendeur dont la boutique est suspendue ; la lecture reste possible. Voir `MODULE_CATALOGUE.md`.
 5. **Un livreur ou un administrateur ne peut pas devenir vendeur** : le modèle utilisateur ne porte qu'un rôle unique, donc la validation refuse d'écraser ces rôles. À arbitrer si le cas se présente.
 6. **Aucune rétrogradation** d'un vendeur déjà validé n'est prévue (pas de flux « retirer le statut vendeur » dans le projet). L'administration peut seulement suspendre la boutique.
 

@@ -89,7 +89,7 @@ class InscriptionTests(TestCase):
 
     def test_nouveau_compte_est_non_verifie_par_defaut(self):
         """
-        F-04 : la simple création du compte ne doit jamais suffire à le
+        La simple création du compte ne doit jamais suffire à le
         marquer vérifié — sans quoi n'importe qui pourrait s'approprier
         l'email d'un tiers en s'inscrivant simplement avec.
         """
@@ -106,7 +106,7 @@ class InscriptionTests(TestCase):
 
     def test_inscription_genere_un_otp_de_type_inscription(self):
         """
-        F-04 : une inscription doit toujours déclencher la génération
+        Une inscription doit toujours déclencher la génération
         d'un CodeOTP de type 'inscription', pour que l'email fourni
         puisse être prouvé ensuite via /verification-otp/.
         """
@@ -130,7 +130,7 @@ class InscriptionTests(TestCase):
     @patch('apps.utilisateurs.views.envoyer_code_otp_email.delay')
     def test_inscription_envoie_le_code_a_ladresse_fournie(self, mock_envoi):
         """
-        F-04 : le code doit partir sur l'adresse indiquée à l'inscription
+        Le code doit partir sur l'adresse indiquée à l'inscription
         — c'est justement cette adresse que l'on cherche à prouver.
         """
 
@@ -169,7 +169,7 @@ class InscriptionTests(TestCase):
 
 class VerificationOTPInscriptionTests(TestCase):
     """
-    F-04 : vérifie que la confirmation d'un OTP d'inscription via
+    Vérifie que la confirmation d'un OTP d'inscription via
     /verification-otp/ marque bien le compte comme vérifié, et que
     rien d'autre ne peut le faire à sa place.
     """
@@ -274,7 +274,7 @@ class ConnexionTests(TestCase):
 
     @patch('apps.utilisateurs.views.envoyer_notification_connexion.delay')
     def test_connexion_reussie_envoie_une_notification(self, mock_envoi):
-        """F-04 : une connexion réussie doit notifier le titulaire du
+        """Une connexion réussie doit notifier le titulaire du
         compte (IP + user-agent), pour qu'il repère une connexion qu'il
         n'a pas initiée lui-même."""
 
@@ -290,7 +290,7 @@ class ConnexionTests(TestCase):
 
     @patch('apps.utilisateurs.views.envoyer_notification_connexion.delay')
     def test_connexion_echouee_nenvoie_aucune_notification(self, mock_envoi):
-        """F-04 : un échec d'authentification ne doit jamais déclencher
+        """Un échec d'authentification ne doit jamais déclencher
         cette notification (ni alerter à tort sur une faute de frappe, ni
         servir à énumérer les emails existants)."""
 
@@ -421,8 +421,8 @@ class ProfilTests(TestCase):
     def test_profil_expose_id(self):
         """
         L'id fait partie du contrat public du profil (schema.yaml) et doit
-        rester présent et correct. FastAPI (F-11) le lit désormais sur la
-        route interne jeton/verification/ (VerificationJetonServiceTests).
+        rester présent et correct. FastAPI doit le lire sur la route
+        interne jeton/verification/ (VerificationJetonServiceTests).
         """
 
         self.client.force_authenticate(user=self.utilisateur)
@@ -866,9 +866,8 @@ class ConnexionGoogleTests(TestCase):
         tokens JWT valides après vérification Google.
 
         email_verifie=True est nécessaire ici : un compte avec un
-        mot de passe réel mais non vérifié est désormais refusé par
-        le garde-fou anti pré-hijacking (voir F-01 / test dédié
-        ci-dessous), ce n'est pas le cas que ce test veut couvrir.
+        mot de passe réel mais non vérifié est refusé par le garde-fou
+        anti pré-hijacking (voir le test dédié ci-dessous), ce n'est pas le cas que ce test veut couvrir.
         """
 
         mock_verify.return_value = self.infos_google
@@ -891,7 +890,7 @@ class ConnexionGoogleTests(TestCase):
     @patch('apps.utilisateurs.views.envoyer_notification_connexion.delay')
     @patch('apps.utilisateurs.views.google_id_token.verify_oauth2_token')
     def test_connexion_google_reussie_envoie_une_notification(self, mock_verify, mock_envoi):
-        """F-04 : la connexion Google réussie doit envoyer la même
+        """La connexion Google réussie doit envoyer la même
         notification que la connexion classique."""
 
         mock_verify.return_value = self.infos_google
@@ -915,7 +914,7 @@ class ConnexionGoogleTests(TestCase):
     @patch('apps.utilisateurs.views.google_id_token.verify_oauth2_token')
     def test_compte_non_verifie_avec_mot_de_passe_refuse_liaison(self, mock_verify):
         """
-        F-01 (pré-hijacking) : un compte pré-créé par un tiers avec
+        Pré-hijacking : un compte pré-créé par un tiers avec
         un mot de passe réel, jamais vérifié, ne doit jamais être
         auto-lié à une connexion Google portant le même email.
         """
@@ -1116,7 +1115,7 @@ class RevocationTokensTests(TestCase):
 
 
 class UtilisateurAdminTestCase(TestCase):
-    """F-16 : la validation KYC/vendeur doit passer par
+    """La validation KYC/vendeur doit passer par
     apps.vendeurs.admin.DemandeVendeurAdmin, pas par une édition libre
     de statut_kyc depuis l'admin général des utilisateurs."""
 
@@ -1295,10 +1294,9 @@ class UploadKYCTests(TestCase):
 
     def test_premiere_soumission_passe_directement_en_attente(self):
         """
-        Harmonisation : la toute première soumission KYC suffit
-        désormais à elle seule à passer statut_kyc à en_attente, comme
-        la resoumission après refus — la vue /demande-vendeur/ séparée
-        qui aurait autrement été nécessaire a été supprimée.
+        La toute première soumission KYC suffit à elle seule à passer
+        statut_kyc à en_attente, comme la resoumission après refus —
+        aucun second appel n'est nécessaire.
         """
         from apps.utilisateurs.models import StatutKYC
 
@@ -1310,11 +1308,12 @@ class UploadKYCTests(TestCase):
         self.utilisateur.refresh_from_db()
         self.assertEqual(self.utilisateur.statut_kyc, StatutKYC.EN_ATTENTE)
 
-    def test_compte_bancaire_plus_collecte(self):
+    def test_compte_bancaire_non_collecte(self):
         """
         Reversements aux vendeurs en mobile money uniquement (module
-        paiements) : le compte bancaire n'est plus collecté. Un ancien
-        client qui l'envoie encore n'est pas bloqué, la valeur est ignorée.
+        paiements) : le compte bancaire n'est pas collecté. Un client
+        (frontend) qui l'envoie quand même n'est pas bloqué, la valeur est
+        ignorée.
         """
         from apps.utilisateurs.models import DocumentKYC
 
@@ -1683,8 +1682,8 @@ class UtilisateurManagerTestCase(TestCase):
         self.assertEqual(admin.role, Role.ADMIN)
 
     def test_create_user_classique_garde_le_role_client_par_defaut(self):
-        """Non-régression : create_user (inscription normale) ne doit pas
-        être affecté par ce correctif et garder le rôle par défaut du modèle."""
+        """create_user (inscription normale) n'est pas concerné par le rôle
+        forcé de create_superuser et garde le rôle par défaut du modèle."""
         client = Utilisateur.objects.create_user(
             email="client-normal@anitche.ci",
             password="TestPassword123!",
@@ -1696,7 +1695,7 @@ class UtilisateurManagerTestCase(TestCase):
         self.assertFalse(client.is_superuser)
 
 # =====================================================
-# PASSE 2 (septembre 2026) : chiffrement, IP, OTP, email vérifié, limites
+# Chiffrement, IP, OTP, email vérifié, limites
 # =====================================================
 
 import importlib
@@ -1746,8 +1745,8 @@ def creer_dossier(utilisateur, **champs):
 
 
 class ChiffrementDonneesKYCTests(TestCase):
-    """1.1 : numero_mobile_money chiffré au repos (Fernet). Le compte
-    bancaire n'est plus collecté (migration 0009)."""
+    """numero_mobile_money chiffré au repos (Fernet). Le compte bancaire
+    n'est pas collecté (colonne retirée par la migration 0009)."""
 
     def setUp(self):
         self.utilisateur = Utilisateur.objects.create_user(
@@ -1755,7 +1754,7 @@ class ChiffrementDonneesKYCTests(TestCase):
         )
 
     def test_depot_chiffre_en_base_et_lisible_par_lapplication(self):
-        # Avant : les deux valeurs étaient stockées en clair.
+        # La valeur n'apparaît jamais en clair dans la colonne.
         client = APIClient()
         client.force_authenticate(self.utilisateur)
         response = client.post('/api/utilisateurs/upload-kyc/', {
@@ -1783,8 +1782,8 @@ class ChiffrementDonneesKYCTests(TestCase):
         self.assertIn('numero_mobile_money', response.data['errors'])
 
     def test_valeur_illisible_jamais_ecrasee(self):
-        # Avant : une clé erronée faisait lire « [valeur illisible…] », et
-        # la sauvegarde suivante chiffrait ce message à la place de la donnée.
+        # Une clé erronée fait lire « [valeur illisible…] » : la sauvegarde
+        # suivante ne doit jamais chiffrer ce message à la place de la donnée.
         dossier = creer_dossier(self.utilisateur)
         jeton_etranger = Fernet(Fernet.generate_key()).encrypt(b'0101010101').decode()
         ecrire_jeton_brut(dossier, 'numero_mobile_money', jeton_etranger)
@@ -1862,7 +1861,7 @@ class MigrationChiffrementKYCTests(TransactionTestCase):
 
 
 class NotificationConnexionIPTests(TestCase):
-    """1.2 : l'IP de la notification vient de adresse_ip_client (proxy de confiance)."""
+    """L'IP de la notification vient de adresse_ip_client (proxy de confiance)."""
 
     def setUp(self):
         self.client = APIClient()
@@ -1871,7 +1870,8 @@ class NotificationConnexionIPTests(TestCase):
         )
 
     def test_connexion_par_mot_de_passe(self):
-        # Avant : REMOTE_ADDR, c'est-à-dire l'IP du conteneur Nginx en production.
+        # Derrière le proxy de confiance : l'IP du client, jamais REMOTE_ADDR
+        # (l'IP du conteneur Nginx en production).
         with avec_proxys(1), patch('apps.utilisateurs.views.envoyer_notification_connexion.delay') as envoi:
             response = self.client.post(
                 '/api/utilisateurs/connexion/', {'email': 'notif@anitche.ci', 'password': 'TestPassword123!'},
@@ -1903,7 +1903,7 @@ class NotificationConnexionIPTests(TestCase):
 
 class MessageOTPDureeTests(TestCase):
     def test_duree_affichee_egale_a_la_duree_reelle(self):
-        # Avant : « 10 minutes » en dur (réglage OTP_DUREE_VALIDITE_MINUTES inexistant).
+        # La durée du message vient de CodeOTP.DUREE_VALIDITE_MINUTES, jamais d'une valeur en dur.
         Utilisateur.objects.create_user(email='otp-duree@anitche.ci', password='TestPassword123!', nom='O', prenom='D')
         with patch.object(CodeOTP, 'DUREE_VALIDITE_MINUTES', 3):
             APIClient().post('/api/utilisateurs/mot-de-passe-oublie/', {'email': 'otp-duree@anitche.ci'})
@@ -1999,7 +1999,7 @@ class DocumentKYCAbsentDuStockageTests(TestCase):
 
 
 class EmailVerifieTests(TestCase):
-    """Q1 : connexion libre, actions sensibles réservées aux emails vérifiés."""
+    """Connexion libre, actions sensibles réservées aux emails vérifiés."""
 
     def setUp(self):
         self.client = APIClient()
@@ -2048,8 +2048,8 @@ class EmailVerifieTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
 
-class InscriptionPasse2Tests(TestCase):
-    """Q2 : téléphone retiré de l'inscription ; limite dédiée par IP."""
+class InscriptionSansTelephoneTests(TestCase):
+    """Pas de téléphone à l'inscription ; limite dédiée par IP."""
 
     def setUp(self):
         cache.clear()
@@ -2080,7 +2080,7 @@ class InscriptionPasse2Tests(TestCase):
 
 
 class LimitesOTPSepareesTests(TestCase):
-    """Q5 : envoi et vérification des codes comptés séparément."""
+    """Envoi et vérification des codes comptés séparément."""
 
     def setUp(self):
         cache.clear()
@@ -2090,7 +2090,7 @@ class LimitesOTPSepareesTests(TestCase):
         )
 
     def test_verification_possible_apres_plusieurs_envois(self):
-        # Avant : un seul compteur 'otp' ; quelques demandes de code bloquaient la vérification.
+        # Deux compteurs distincts : épuiser les envois ne bloque pas la vérification.
         taux = {'otp_envoi': '2/hour', 'otp_verification': '10/hour'}
         self.client.force_authenticate(self.utilisateur)
         with patch.object(SimpleRateThrottle, 'THROTTLE_RATES', taux):
@@ -2116,7 +2116,7 @@ class LimitesOTPSepareesTests(TestCase):
 
 
 class RafraichissementLimiteTests(TestCase):
-    """Q6 : le rafraîchissement ne partage plus le compteur 'anon' de l'API."""
+    """Le rafraîchissement a sa propre limite et ne partage pas le compteur 'anon' de l'API."""
 
     def test_limite_dediee(self):
         cache.clear()
@@ -2136,7 +2136,7 @@ class RafraichissementLimiteTests(TestCase):
 
 class TelephoneNonVerifieSansSMSTests(TestCase):
     def test_changement_de_telephone_ne_le_marque_pas_verifie(self):
-        # Décision d'équipe (Q7) : le code part sur l'email, pas au numéro.
+        # Décision d'équipe : le code part sur l'email, pas au numéro.
         utilisateur = Utilisateur.objects.create_user(
             email='tel-sms@anitche.ci', password='TestPassword123!', nom='T', prenom='S', email_verifie=True,
         )

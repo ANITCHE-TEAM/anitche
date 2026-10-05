@@ -107,7 +107,7 @@ class CreerDemandeRetourSerializer(serializers.Serializer):
     motif = serializers.ChoiceField(choices=DemandeRetour.Motif.choices, default=DemandeRetour.Motif.PRODUIT_DEFECTUEUX)
     # Seul le remboursement est traité de bout en bout (argent rendu, part du
     # vendeur réduite) : échange et avoir restent en base pour l'historique
-    # mais ne sont plus proposés.
+    # mais ne sont pas proposés.
     type_resolution = serializers.ChoiceField(
         choices=[DemandeRetour.TypeResolution.REMBOURSEMENT],
         default=DemandeRetour.TypeResolution.REMBOURSEMENT,

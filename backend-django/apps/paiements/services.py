@@ -199,7 +199,7 @@ def valider_paiement(paiement, etat=None):
 
     Ordre des verrous, unique dans tout le code : Commandes (triées par pk)
     PUIS Paiement, comme initier_paiement et annuler_commande. L'ordre
-    inverse créait un interblocage avec l'expiration (contre-audit, A1)."""
+    inverse créerait un interblocage avec l'expiration."""
     from apps.commandes.services import confirmer_commande
     from apps.livraison.models import Livraison
 

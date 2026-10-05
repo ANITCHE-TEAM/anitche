@@ -78,7 +78,7 @@ def ajouter_article(panier, variante, quantite):
 
     Retourne la ligne créée ou mise à jour. CONCURRENCE : le verrou sur la
     ligne Panier sérialise les ajouts d'un même panier — deux ajouts
-    simultanés de la même variante ne créent plus deux lignes, et la
+    simultanés de la même variante ne créent jamais deux lignes, et la
     quantité cumulée est vérifiée contre le stock sur une valeur à jour.
     """
     with transaction.atomic():

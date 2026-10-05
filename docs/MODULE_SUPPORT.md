@@ -1,7 +1,7 @@
 # Module support — contrat et règles
 
 > Périmètre : backend Django, `backend-django/apps/support/` (identifiants en anglais dans ce module, convention d'origine conservée) et ses points de contact dans `commandes`, `catalogue`, `notifications`.
-> État : refonte de septembre 2026. Un ticket est souvent la trace d'un **litige** : il doit rester complet, et n'être lu que par les personnes concernées.
+> Principe : un ticket est souvent la trace d'un **litige** : il doit rester complet, et n'être lu que par les personnes concernées.
 
 ## 1. Rôles
 
@@ -68,30 +68,30 @@ Le frontend oriente le client : sur une commande livrée dans le délai, les bou
 
 1. **Création** : proposer de lier le ticket à une commande (`order`) et à un produit de cette commande (`product`). La réponse contient `order`, `product`, `vendor`.
 2. **Orientation** (§ 5) avant le formulaire de ticket.
-3. **Pièces jointes** : `file` est une **URL d'API authentifiée** (avant : `/media/…`) ; la charger avec le jeton. Ne plus envoyer `file_type` (calculé). Le bouton « joindre » n'apparaît que sur ses propres messages, 5 au plus.
+3. **Pièces jointes** : `file` est une **URL d'API authentifiée** (pas un chemin `/media/…`) ; la charger avec le jeton. Ne plus envoyer `file_type` (calculé). Le bouton « joindre » n'apparaît que sur ses propres messages, 5 au plus.
 4. **Suppression** : retirer tout bouton « Supprimer » (**405**).
 5. **Statuts** : ne proposer que les transitions de § 3 ; « Fermé » est définitif ; masquer la saisie de message sur un ticket fermé. Noter seulement quand le ticket est résolu ou fermé.
 6. **Back-office support** : file des tickets non assignés, bouton « Prendre en charge » (`assign/`), réassignation par l'administration, case « note interne » (`is_internal_note`).
-7. **Messages** : `read_at` est désormais renseigné (« Lu à … »).
+7. **Messages** : `read_at` est renseigné (« Lu à … »).
 8. **Erreurs à prévoir** : **429** au-delà de 10 tickets, 60 messages ou 20 pièces jointes par heure.
-9. **Format d'erreur unifié (septembre 2026).** Les refus portaient avant un simple `{"detail": …}` : ils suivent désormais le format commun `{success: false, status_code, detail, errors}`, `errors` toujours un objet clé → liste de messages (`{}` si aucun champ n'est en cause). Note hors de 1 à 5 ou non entière → **400** `errors.satisfaction_rating` ; ticket pas encore résolu ou déjà noté → **400** (message dans `detail`) ; note par un autre que le créateur → **403**.
+9. **Format d'erreur unifié (septembre 2026).** Les refus suivent le format commun `{success: false, status_code, detail, errors}`, `errors` toujours un objet clé → liste de messages (`{}` si aucun champ n'est en cause). Note hors de 1 à 5 ou non entière → **400** `errors.satisfaction_rating` ; ticket pas encore résolu ou déjà noté → **400** (message dans `detail`) ; note par un autre que le créateur → **403**.
 
-## 7. Sécurité — failles corrigées (diagnostic de septembre 2026)
+## 7. Sécurité — risques couverts
 
-Chaque constat a été confirmé par un test jetable sur PostgreSQL avant correction ; chacun a son test permanent dans `apps/support/tests.py`.
+Chaque risque a son test permanent dans `apps/support/tests.py`.
 
-| # | Faille | Correction | Test |
-|---|---|---|---|
-| S-a | 4 tests (dont les notes internes) jamais exécutés (classe imbriquée) | Classe au niveau du module, tests adaptés (pagination) | `TestsCollectesTests` |
-| S-b | Impossible de lier un ticket à une commande ou un produit | `order` / `product` vérifiés (siens, achetés) | `TicketLieACommandeTests` |
-| S-c | Le staff ne pouvait pas écrire de note interne | `is_internal_note` réservé au staff | `NotesInternesTests` |
-| S-d | Un client listait et ajoutait des pièces jointes sur une note interne ou le message d'un autre ; `file_type` au choix du client ; nom d'origine sur disque ; `/media/` public en dev, absent en production | Auteur seulement, notes internes invisibles, type calculé, UUID, téléchargement authentifié, 5 par message | `PiecesJointesTests` |
-| S-e | Toutes les transitions permises (fermé → ouvert) ; un agent pouvait agir sur tout ticket non assigné sans le prendre ; aucune assignation par l'API | Table de transitions, prise en charge automatique, `assign/` | `StatutsEtAssignationTests` |
-| S-f | Suppression définitive par le staff (y compris un agent) | **405** pour tous | `SupportTicketTestCase` |
-| S-g | Messages sur un ticket fermé, note avant résolution, `read_at` jamais renseigné | Refus, lecture marquée | `FilDeDiscussionTests`, `StatutsEtAssignationTests` |
-| S-h | Aucune limite dédiée, aucune notification | Limites dédiées ; notifications (nouveau ticket, réponses) | `LimitesDeDebitTests`, `FilDeDiscussionTests` |
+| Risque | Protection | Test |
+|---|---|---|
+| Tests (dont les notes internes) jamais exécutés (classe imbriquée) | Classe au niveau du module | `TestsCollectesTests` |
+| Ticket impossible à lier à une commande ou un produit, ou lié à ceux d'autrui | `order` / `product` vérifiés (siens, achetés) | `TicketLieACommandeTests` |
+| Note interne écrite par le client, ou impossible pour le staff | `is_internal_note` réservé au staff | `NotesInternesTests` |
+| Un client liste et ajoute des pièces jointes sur une note interne ou le message d'un autre ; `file_type` au choix du client ; nom d'origine sur disque ; `/media/` public en dev, absent en production | Auteur seulement, notes internes invisibles, type calculé, UUID, téléchargement authentifié, 5 par message | `PiecesJointesTests` |
+| Toutes les transitions permises (fermé → ouvert) ; un agent agissant sur tout ticket non assigné sans le prendre ; aucune assignation par l'API | Table de transitions, prise en charge automatique, `assign/` | `StatutsEtAssignationTests` |
+| Suppression définitive par le staff (y compris un agent) | **405** pour tous | `SupportTicketTestCase` |
+| Messages sur un ticket fermé, note avant résolution, `read_at` jamais renseigné | Refus, lecture marquée | `FilDeDiscussionTests`, `StatutsEtAssignationTests` |
+| Aucune limite dédiée, aucune notification | Limites dédiées ; notifications (nouveau ticket, réponses) | `LimitesDeDebitTests`, `FilDeDiscussionTests` |
 
-Vérifié et correct dès le diagnostic : isolation client / vendeur sur la liste et le détail, pas de N+1 (les listes n'exposent que des identifiants), `is_staff` sans pouvoir.
+Également vérifié : isolation client / vendeur sur la liste et le détail, pas de N+1 (les listes n'exposent que des identifiants), `is_staff` sans pouvoir.
 
 ## 8. Notifications
 
