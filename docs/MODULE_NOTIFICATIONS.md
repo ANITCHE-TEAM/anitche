@@ -1,7 +1,7 @@
 # Module notifications — contrat et règles
 
 > Périmètre : backend Django, `backend-django/apps/notifications/` (et ses appelants : `paiements`, `livraison`, `commandes`, `retours`, `fidelite`, `support`).
-> État : refonte de septembre 2026. Une notification accompagne des événements d'argent et de livraison : **elle doit refléter ce qui a réellement été enregistré**, jamais plus, et ne jamais ralentir ni bloquer l'action elle-même.
+> Principe : une notification accompagne des événements d'argent et de livraison : **elle doit refléter ce qui a réellement été enregistré**, jamais plus, et ne jamais ralentir ni bloquer l'action elle-même.
 
 ## 1. Principe d'envoi
 
@@ -55,7 +55,7 @@ admin.py      consultation seule
 | GET | `compteur/` | `{"non_lues": n}` |
 | PATCH | `<uuid>/lire/` | **404** pour la notification d'un autre compte |
 | POST | `toutes-lues/` | `{"message", "nb_modifiees"}` |
-| GET / PATCH | `preferences/` | **`{"id", "email_actif", "date_mise_a_jour"}`** (avant : aussi `in_app_actif`, `sms_actif`) |
+| GET / PATCH | `preferences/` | **`{"id", "email_actif", "date_mise_a_jour"}`** (ni `in_app_actif` ni `sms_actif`) |
 
 Représentation : `id`, `titre`, `message`, `type_notification(_display)`, `canal(_display)`, `est_lu`, `date_lecture`, `lien_redirection`, `metadata`, `date_creation`. Aucune donnée sensible : montants, numéros de commande, de retour ou de ticket ; jamais d'email, de téléphone ni de code (le code de livraison n'est que dans l'email dédié au client et dans le suivi de livraison).
 
@@ -63,25 +63,25 @@ Représentation : `id`, `titre`, `message`, `type_notification(_display)`, `cana
 
 1. **Préférences** : ne proposer que « Recevoir les emails » (`email_actif`). `in_app_actif` et `sms_actif` disparaissent de la réponse (envoyés, ils sont ignorés).
 2. **Nouveaux types à afficher** : `stock` (vendeur : stock bas, rupture ; `metadata.variante_id`, `quantite_disponible`, `seuil_alerte`), annulations de commande (`type: commande`), retours, points crédités (`systeme`), support.
-3. **Paiement de plusieurs commandes** : `lien_redirection` vaut `/commandes` (avant : `/commandes/` avec un identifiant vide).
+3. **Paiement de plusieurs commandes** : `lien_redirection` vaut `/commandes` (jamais `/commandes/` avec un identifiant vide).
 4. **Délai des emails** : ils arrivent quelques secondes après l'action (worker Celery), plus pendant la requête ; aucun effet sur les temps de réponse.
-5. **Administration** : les alertes n'arrivent plus par email ; prévoir un badge sur le compteur de notifications du back-office.
+5. **Administration** : les alertes n'arrivent pas par email ; prévoir un badge sur le compteur de notifications du back-office.
 
-## 6. Sécurité — failles corrigées (diagnostic de septembre 2026)
+## 6. Sécurité — risques couverts
 
-Chaque constat a été confirmé par un test jetable sur PostgreSQL avant correction ; chacun a son test permanent dans `apps/notifications/tests.py`.
+Chaque risque a son test permanent dans `apps/notifications/tests.py`.
 
-| # | Faille | Correction | Test |
-|---|---|---|---|
-| N-b | `send_mail` synchrone dans la requête et sous verrou (validation de paiement, livraison) ; email envoyé même si la transaction était annulée ; pannes masquées | Email après commit par Celery, réessais | `EnvoiApresCommitTests` |
-| N-c | Un email par alerte et par administrateur | Alertes administration in-app | `EnvoiApresCommitTests` |
-| N-d | `in_app_actif=False` effaçait toute trace (remboursement, livraison) ; `sms_actif` sans effet | Préférence email seule | `PreferencesTests` |
-| N-e | Email, téléphone et contenu des messages dans les journaux | Identifiants seulement | `EnvoiApresCommitTests` |
-| N-g | Aucune notification à l'annulation d'une commande | Client, et vendeur si payée | `AnnulationTests` |
-| N-h | `seuil_alerte` branché sur rien | Alerte au franchissement, rupture | `StockBasTests` |
-| N-i | Notification modifiable dans le Django admin | Consultation seule | — |
+| Risque | Protection | Test |
+|---|---|---|
+| `send_mail` synchrone dans la requête et sous verrou (validation de paiement, livraison) ; email envoyé même si la transaction est annulée ; pannes masquées | Email après commit par Celery, réessais | `EnvoiApresCommitTests` |
+| Un email par alerte et par administrateur | Alertes administration in-app | `EnvoiApresCommitTests` |
+| Une préférence in-app qui efface toute trace (remboursement, livraison) ; une préférence SMS sans effet | Préférence email seule | `PreferencesTests` |
+| Email, téléphone et contenu des messages dans les journaux | Identifiants seulement | `EnvoiApresCommitTests` |
+| Aucune notification à l'annulation d'une commande | Client, et vendeur si payée | `AnnulationTests` |
+| `seuil_alerte` sans effet | Alerte au franchissement, rupture | `StockBasTests` |
+| Notification modifiable dans le Django admin | Consultation seule | — |
 
-Vérifié et correct dès le diagnostic : isolation par destinataire sur la liste, le compteur, « lire » et « tout lire » (`IsolationTests`).
+Également vérifié : isolation par destinataire sur la liste, le compteur, « lire » et « tout lire » (`IsolationTests`).
 
 ## 7. Limites de débit et performance
 
@@ -113,8 +113,8 @@ Postman : `postman_notifications.json` (hors dépôt, nouvelle). **Aucun compte 
 
 ### Pourquoi Celery après le commit
 
-- **Justesse** : un email ne part que pour ce qui a été enregistré. Avant, un paiement dont la transaction échouait pouvait avoir déjà envoyé « Paiement confirmé ».
-- **Performance et concurrence** : un serveur SMTP lent (secondes) prolongeait des transactions qui tiennent des verrous (validation de paiement, statut de livraison) ; sous charge, toutes les requêtes sur les mêmes lignes attendaient.
+- **Justesse** : un email ne part que pour ce qui a été enregistré. Envoyé pendant la requête, un « Paiement confirmé » pourrait partir pour un paiement dont la transaction échoue ensuite.
+- **Performance et concurrence** : un serveur SMTP lent (secondes) prolongerait des transactions qui tiennent des verrous (validation de paiement, statut de livraison) ; sous charge, toutes les requêtes sur les mêmes lignes attendraient.
 - **Fiabilité** : une panne SMTP est réessayée, et visible dans les journaux du worker, au lieu d'être avalée (`fail_silently=True`).
 - C'est déjà le mécanisme utilisé pour le code de livraison et les OTP : un seul modèle dans le projet.
 

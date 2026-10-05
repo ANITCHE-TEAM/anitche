@@ -58,7 +58,7 @@ Accès :
 - Produit inactif → `errors.produit_id` ; variante inactive → `errors.variante_id`. En modification, seul un **nouveau** rattachement à un produit/une variante inactifs est refusé : un produit désactivé après coup n'empêche pas de corriger les autres champs.
 - Lot déjà couvert par un passeport → `errors.numero_lot` (aussi en PATCH, et en cas de course entre deux requêtes : c'est la contrainte qui tranche, voir § 6).
 - `certifie_authentique` demandé par un vendeur → `errors.statut_certification`.
-- F-21 : réassignation (PATCH) vers le produit d'une autre boutique, ou vers une variante d'un autre produit.
+- Réassignation (PATCH) vers le produit d'une autre boutique, ou vers une variante d'un autre produit.
 
 ### Représentation vendeur
 `id`, `code_passeport`, `produit`, `produit_nom`, `variante`, `boutique`, `numero_lot`, `origine_geographique`, `materiaux_utilises`, `date_fabrication`, `artisan_createur`, `statut_certification`, `statut_certification_display`, `nb_scans`, `dernier_scan`, `url_verification_publique`, `est_actif`, `desactive_par` (lecture seule), `date_creation`.
@@ -98,12 +98,12 @@ Ce label engage la plateforme : **seule l'administration l'attribue**, à la cr�
 
 ## 6. Concurrence
 
-- **Scans simultanés** : incrément SQL `F("nb_scans") + 1` dans la même transaction que l'historique. Testé : 80 scans parallèles donnent `nb_scans = 80` (auparavant ~25).
+- **Scans simultanés** : incrément SQL `F("nb_scans") + 1` dans la même transaction que l'historique. Testé : 80 scans parallèles donnent `nb_scans = 80`.
 - **Création simultanée du même lot** : la vérification du serializer donne un message clair ; si deux requêtes passent la vérification en même temps, la contrainte `passeport_unique_par_lot` refuse la seconde, convertie en 400 `errors.numero_lot` (reconnue par le nom de contrainte, jamais une 500). Testé avec 6 requêtes parallèles : une seule 201.
 
 ## 7. Adresse IP et limite de débit
 
-Chaîne de production déclarée (commentaires F-18 de `infra/nginx/nginx.conf`) : **Cloudflare → Nginx → Gunicorn/Django**. Django n'est joignable que via Nginx (aucun port publié).
+Chaîne de production déclarée (commentaires de `infra/nginx/nginx.conf`) : **Cloudflare → Nginx → Gunicorn/Django**. Django n'est joignable que via Nginx (aucun port publié).
 
 - **Nginx** : le module `real_ip` remplace `$remote_addr` par `CF-Connecting-IP` **uniquement** pour les connexions venant des plages Cloudflare (`set_real_ip_from`). Un client qui contourne Cloudflare ne peut donc pas forger cet en-tête ; si Cloudflare est retiré, le bloc devient sans effet. Chaque `location` **écrase** `X-Forwarded-For` avec `$remote_addr`.
 - **Django** : `REST_FRAMEWORK['NUM_PROXIES']` = `0` par défaut (dev, tests : seul `REMOTE_ADDR` compte), `1` en production (`prod.py`).
@@ -140,7 +140,7 @@ Avant ce correctif, `X-Forwarded-For` était lu tel quel : IP falsifiable dans l
 
 - **Niveau 2 — durée de conservation de l'historique des scans** : aucune purge. L'IP est tronquée, mais IP réseau + user-agent + date restent des données de connexion. Prévoir une tâche Celery de purge (durée à fixer, conformité loi ivoirienne n° 2013-450 sur les données personnelles) et, à forte volumétrie, un partitionnement par date (voir `ARCHITECTURE_HAUTE_ECHELLE_100K.md`).
 - **Plages Cloudflare** dans `nginx.conf` : relevées le 2026-09-25, à revérifier périodiquement (https://www.cloudflare.com/ips/). Une plage manquante ne crée pas de faille, mais regroupe des visiteurs sous une IP Cloudflare dans les limites de débit.
-- Cloudflare n'est matérialisé dans le dépôt que par des commentaires (F-18) ; rien n'empêche d'atteindre l'origine sans passer par lui. Le réglage Nginx reste sûr dans les deux cas. Restreindre l'origine aux IP Cloudflare (pare-feu hôte) relève de l'infrastructure.
+- Cloudflare n'est matérialisé dans le dépôt que par des commentaires ; rien n'empêche d'atteindre l'origine sans passer par lui. Le réglage Nginx reste sûr dans les deux cas. Restreindre l'origine aux IP Cloudflare (pare-feu hôte) relève de l'infrastructure.
 - Le point d'entrée public reste soumis à l'authentification JWT par défaut : un jeton expiré envoyé par un client connecté donne 401 au lieu du certificat.
 - **À faire lors de la reprise du module `utilisateurs`** : la notification de connexion (`apps/utilisateurs/views.py`, envoi de `envoyer_notification_connexion`) lit encore `request.META['REMOTE_ADDR']` directement. Derrière Nginx, c'est l'IP du conteneur Nginx, pas celle de l'utilisateur. Elle doit passer par `adresse_ip_client()` (`apps/core/reseau.py`), seule source de l'IP client du projet.
 - Le routeur FastAPI `scan_qr` est vide, contrairement à ce qu'annonce `ANALYSE_BACKEND.md`.
@@ -157,7 +157,7 @@ DJANGO_SETTINGS_MODULE=config.settings.ci DB_NAME=anitche_test DB_USER=postgres 
 
 Vérifier dans la sortie `-v 2` que `test_scans_simultanes_aucun_increment_perdu` et `test_creations_simultanees_du_meme_lot_une_seule_acceptee` affichent `ok` et non `skipped`.
 
-Couverture : accès (client, anonyme, `is_staff`, admin/super_admin, vendeur non validé, boutique suspendue, passeports d'autrui), certification, révocation, désactivation/réactivation selon l'origine (§ 5 bis, y compris modification concurrente et contrainte en base), migration 0005, unicité par lot (API, base, concurrence), produit/variante inactifs, vérification publique (6 cas non vendables, produit sans variante active ou sans variante, équivalence avec la fiche catalogue, révoqué, 404, champs exposés, URL calculée, nombre de requêtes), IP (en-tête forgé, chaîne multi-adresses, proxy de confiance, troncature), atomicité du scan, limite de débit dédiée, collision de code, F-21.
+Couverture : accès (client, anonyme, `is_staff`, admin/super_admin, vendeur non validé, boutique suspendue, passeports d'autrui), certification, révocation, désactivation/réactivation selon l'origine (§ 5 bis, y compris modification concurrente et contrainte en base), migration 0005, unicité par lot (API, base, concurrence), produit/variante inactifs, vérification publique (6 cas non vendables, produit sans variante active ou sans variante, équivalence avec la fiche catalogue, révoqué, 404, champs exposés, URL calculée, nombre de requêtes), IP (en-tête forgé, chaîne multi-adresses, proxy de confiance, troncature), atomicité du scan, limite de débit dédiée, collision de code, réassignation vers le produit d'autrui.
 
 ## 12. Migration `0003_passeport_par_lot_sans_image_ni_url`
 

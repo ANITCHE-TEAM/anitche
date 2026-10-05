@@ -1,7 +1,7 @@
 # Module fidélité — contrat et règles
 
 > Périmètre : backend Django, `backend-django/apps/fidelite/` (et ses points de contact dans `commandes`, `livraison`, `retours`, `paiements`).
-> État : refonte de septembre 2026. **Un point est une promesse de réduction, donc de l'argent** : il ne doit naître que d'un achat définitivement acquis.
+> Principe : **un point est une promesse de réduction, donc de l'argent** : il ne doit naître que d'un achat définitivement acquis.
 
 ## 1. Ce sur quoi le module s'appuie, et qui s'appuie sur lui
 
@@ -40,7 +40,7 @@ gain crédité ──► retour remboursé après le crédit → reprise plafonn
 - Une commande annulée (client, expiration, administration, boutique indisponible, livraison échouée) n'est jamais livrée : elle **n'a jamais de gain**.
 - **Crédit** : même moment que le reversement au vendeur devenu disponible (délai écoulé, aucun retour ni contestation ouverts), tâche `fidelite-crediter-points-echus` à la minute 15 de chaque heure (celle des reversements tourne à la minute 10).
 - **Idempotence** : un gain par commande (`OneToOne`), une transaction par (compte, type, référence) en base (gain : numéro de commande ; reprise : numéro de retour ; conversion : code du coupon). Le crédit se fait sous verrou du gain.
-- **Commandes payées avant la refonte** : leurs points ont été crédités au paiement ; à la livraison, aucun second gain n'est ouvert (transaction de gain déjà présente pour le paiement).
+- **Commandes dont les points ont déjà été crédités au paiement** (données antérieures au gain à la livraison) : à la livraison, aucun second gain n'est ouvert (transaction de gain déjà présente pour le paiement).
 
 ## 4. Coupons
 
@@ -68,25 +68,25 @@ Toutes les vues filtrent par `request.user` (IDOR vérifié).
 1. **Plus de points au paiement** : les afficher « en attente » après la livraison (`points_en_attente` dans `mon-compte/`, détail par commande dans `points-en-attente/` avec `date_disponibilite`), puis crédités 7 jours après la livraison. Supprimer tout message « vous avez gagné X points » au paiement.
 2. **Statuts de gain** : `en_attente` (date de disponibilité), `credite`, `annule` (`motif_annulation` : retour remboursé, colis non reçu).
 3. **Nouveau type de transaction** `reprise` (« Reprise (achat remboursé) »).
-4. **`verifier-coupon/`** : un coupon nominatif d'un autre client renvoie désormais **404** « n'existe pas » (avant : 400 « nominatif »). Nouveau message 400 « Vous avez déjà utilisé ce coupon ».
+4. **`verifier-coupon/`** : un coupon nominatif d'un autre client renvoie **404** « n'existe pas » (pas de 400 « nominatif »). Nouveau message 400 « Vous avez déjà utilisé ce coupon ».
 5. **Coupon rendu** : après l'annulation de tout un checkout, le coupon réapparaît utilisable dans `mes-coupons/` (`est_utilise: false`).
 6. **Format d'erreur unifié (septembre 2026).** `verifier-coupon/` ne renvoie plus `{"valide": false, "detail": …}` en cas de refus : code inexistant (ou nominatif d'un autre client) → **404** au format commun `{success: false, status_code, detail, errors}`, `errors` toujours un objet clé → liste de messages (`{}` si aucun champ n'est en cause), message dans `detail` ; coupon inapplicable (déjà utilisé, montant minimum, expiré…) → **400** avec le motif dans `errors.code`. La réponse **200** garde `valide: true`.
 
-## 7. Sécurité — failles corrigées (diagnostic de septembre 2026)
+## 7. Sécurité — risques couverts
 
-Chaque constat a été confirmé par un test jetable sur PostgreSQL avant correction ; chacun a son test permanent dans `apps/fidelite/tests.py`.
+Chaque risque a son test permanent dans `apps/fidelite/tests.py`.
 
-| # | Faille | Correction | Test |
-|---|---|---|---|
-| F-b | Points crédités au paiement et gardés après annulation remboursée (idem administration, contestation fondée) → points fabriqués, convertibles en coupons | Points « en attente » à la livraison, crédités après le délai de rétractation ; annulés si contestation fondée | `PointsEnAttenteTests` |
-| F-c | Reprise sur retour non idempotente (signal rejoué) | Recalcul pendant l'attente ; reprise unique par retour, contrainte d'unicité | `RetourEtPointsTests` |
-| F-d | Coupon perdu à l'annulation ou à l'expiration de la commande | Restitution si tout le checkout est annulé | `CouponsTests` |
-| F-e | Coupon public fermé à tous après le premier usage | Limite globale + une utilisation par client | `CouponsTests` |
-| F-f | Coupon à 150 % ou négatif accepté | Contraintes en base, remise plafonnée au montant | `CouponsTests` |
-| F-g | Solde modifiable dans l'admin sans trace, journal falsifiable | Admin en lecture seule | `AdminFideliteTests` |
-| F-h | `verifier-coupon/` révélait les coupons nominatifs d'autrui | Réponse identique à un code inexistant | `CouponsTests` |
+| Risque | Protection | Test |
+|---|---|---|
+| Points crédités au paiement et gardés après annulation remboursée (idem administration, contestation fondée) → points fabriqués, convertibles en coupons | Points « en attente » à la livraison, crédités après le délai de rétractation ; annulés si contestation fondée | `PointsEnAttenteTests` |
+| Reprise sur retour non idempotente (signal rejoué) | Recalcul pendant l'attente ; reprise unique par retour, contrainte d'unicité | `RetourEtPointsTests` |
+| Coupon perdu à l'annulation ou à l'expiration de la commande | Restitution si tout le checkout est annulé | `CouponsTests` |
+| Coupon public fermé à tous après le premier usage | Limite globale + une utilisation par client | `CouponsTests` |
+| Coupon à 150 % ou négatif accepté | Contraintes en base, remise plafonnée au montant | `CouponsTests` |
+| Solde modifiable dans l'admin sans trace, journal falsifiable | Admin en lecture seule | `AdminFideliteTests` |
+| `verifier-coupon/` révélant les coupons nominatifs d'autrui | Réponse identique à un code inexistant | `CouponsTests` |
 
-Constat du module paiements (« points sur tout le groupe, commandes annulées comprises ») : déjà corrigé avant cette refonte (seules les commandes confirmées étaient transmises), et sans objet désormais (points par commande livrée).
+« Points sur tout le groupe, commandes annulées comprises » (module paiements) : sans objet, les points sont ouverts par commande livrée.
 
 ## 8. Migrations
 

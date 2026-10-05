@@ -72,7 +72,7 @@ FastAPI (recherche, listes publiques) ne lit pas les tables du catalogue : il li
 | GET | `produits/` | Liste paginée des produits visibles. Filtres : `recherche` (nom, description, nom de boutique), `categorie` (slug **ou** id ; une catégorie au slug numérique comme « 2024 » est trouvée), `boutique` (slug ou id), `prix_min`, `prix_max` (entiers). Tri : `tri=prix_asc`, `prix_desc`, `date_asc` (défaut : plus récents) |
 | GET | `produits/<slug>/` | Fiche : variantes actives, images, boutique, catégorie |
 
-- **Prix affiché, filtré et trié** = plus petit prix effectif (promo comprise) des **variantes actives** (`prix_min` dans la liste). Une variante inactive n'influence plus ni filtre ni tri.
+- **Prix affiché, filtré et trié** = plus petit prix effectif (promo comprise) des **variantes actives** (`prix_min` dans la liste). Une variante inactive n'influence ni filtre ni tri.
 - **Stock public** : `variantes[].stock` vaut uniquement `{"est_en_stock": bool}`. Ni `quantite_disponible` ni `seuil_alerte` (données internes du vendeur, exploitables par un concurrent). Même règle que le panier.
 - Liste : `en_stock` = au moins une variante active en stock.
 
@@ -122,7 +122,7 @@ Règle : **DELETE = désactivation** (204). En filet de sécurité pour le Djang
 ## 5. Stock et concurrence
 
 - Checkout (`commandes.ValiderPanierView`) : verrou `select_for_update` sur les lignes de stock, puis `decrementer()` (UPDATE conditionnel, jamais de stock négatif).
-- Mise à jour par le vendeur (`StockUpdateSerializer.update`) : relit la ligne **sous le même verrou** et **n'écrit que les champs envoyés**. Auparavant, modifier seulement `seuil_alerte` réécrivait la quantité lue en début de requête : des ventes faites entre-temps « réapparaissaient » en stock.
+- Mise à jour par le vendeur (`StockUpdateSerializer.update`) : relit la ligne **sous le même verrou** et **n'écrit que les champs envoyés** : modifier seulement `seuil_alerte` ne réécrit pas la quantité lue en début de requête (sinon des ventes faites entre-temps « réapparaîtraient » en stock).
 - `quantite_disponible` envoyée par le vendeur reste une valeur **absolue** (voir dette § 9).
 
 ## 6. Désactivation, réactivation et modération
@@ -140,14 +140,14 @@ Règle : **DELETE = désactivation** (204). En filet de sécurité pour le Djang
 
 ## 7. Performance
 
-- Liste publique : `select_related` boutique et catégorie, images préchargées, prix minimum (`Min` + `Coalesce`) et disponibilité (`Exists`) calculés en SQL. **Nombre de requêtes constant**, quel que soit le nombre de produits (avant : ≈ 4 requêtes par produit).
-- Liste vendeur : `select_related('categorie', 'boutique__proprietaire')`, images et `variantes__stock` préchargées (avant : ≈ 2 requêtes par produit, dues à `est_achetable`).
+- Liste publique : `select_related` boutique et catégorie, images préchargées, prix minimum (`Min` + `Coalesce`) et disponibilité (`Exists`) calculés en SQL. **Nombre de requêtes constant**, quel que soit le nombre de produits.
+- Liste vendeur : `select_related('categorie', 'boutique__proprietaire')`, images et `variantes__stock` préchargées (`est_achetable` sans requête supplémentaire par produit).
 - Fiche : variantes actives préchargées (`Prefetch(..., to_attr='variantes_actives')`), sous-catégories actives préchargées.
 - Pagination : 20 par page (réglage global).
 
 ## 8. Limite de débit
 
-`catalogue_public` : **1200/heure par IP** pour un visiteur (par compte s'il est connecté), sur toutes les routes publiques du catalogue. Auparavant, le catalogue partageait le taux `anon` (50/heure) avec toute l'API : quelques minutes de navigation suffisaient à l'épuiser, surtout derrière le CGNAT des opérateurs mobiles, où beaucoup de clients partagent une IP publique. L'identifiant du visiteur passe par `REST_FRAMEWORK['NUM_PROXIES']` : changer `X-Forwarded-For` ne contourne pas la limite (testé).
+`catalogue_public` : **1200/heure par IP** pour un visiteur (par compte s'il est connecté), sur toutes les routes publiques du catalogue. Avec le taux `anon` (50/heure) partagé avec toute l'API, quelques minutes de navigation suffiraient à l'épuiser, surtout derrière le CGNAT des opérateurs mobiles, où beaucoup de clients partagent une IP publique. L'identifiant du visiteur passe par `REST_FRAMEWORK['NUM_PROXIES']` : changer `X-Forwarded-For` ne contourne pas la limite (testé).
 
 ## 9. Dette connue
 
@@ -158,24 +158,24 @@ Règle : **DELETE = désactivation** (204). En filet de sécurité pour le Djang
 - **Produit rangé dans une catégorie inactive** : il reste visible et filtrable par l'id de sa catégorie (vue `catalogue_produit_public` comprise). À décider (masquer, ou interdire le rattachement à une catégorie inactive) ; la vue et le test de parité suivront.
 - Les images de catégorie et la gestion des catégories ne passent que par le Django admin (aucune API).
 
-## 10. Changements de contrat (refonte de septembre 2026)
+## 10. Points du contrat à connaître côté frontend
 
-| Avant | Après |
+| Point | Comportement |
 |---|---|
-| Vendeur suspendu : toutes les écritures acceptées | 403 sur toute écriture, lecture possible |
-| `produit` d'une variante modifiable (y compris vers le produit d'un autre vendeur) | 400 `errors.produit` |
-| Fiche publique : `stock` complet (`id`, `quantite_disponible`, `seuil_alerte`, `est_en_stock`, `date_mise_a_jour`) | `stock` = `{"est_en_stock": bool}` |
-| DELETE produit/variante = suppression (500 si commandé ; passeports et paniers effacés) | DELETE = désactivation, 204 |
-| Produit sans variante active visible (`est_achetable: true`, `variantes: []`) | Absent des listes, fiche 404 |
-| Prix nuls, négatifs, promo incohérente, poids négatif, centimes acceptés | 400 (et contraintes en base) |
-| Pas de modération par l'API | `administration/produits/<id>/` (`est_actif` seulement) ; nouveau champ `desactive_par` (lecture seule côté vendeur) ; vendeur : 403 sur la levée d'une désactivation de l'administration |
-| Images : 3 Mo (serializer), nombre illimité | 5 Mo (règle du modèle), 10 par produit |
-| Sous-catégories inactives publiques | Masquées |
-| Filtres et tri de prix sur `prix`/`prix_base`, variantes inactives comprises | Prix effectif minimum des variantes actives |
-| `categorie=<nombre>` : id uniquement | id **ou** slug |
-| Limite publique `anon` 50/h (partagée) | `catalogue_public` 1200/h |
+| Vendeur suspendu | 403 sur toute écriture, lecture possible |
+| `produit` d'une variante | Non modifiable : 400 `errors.produit` |
+| Fiche publique : `stock` | `{"est_en_stock": bool}` seulement (ni quantité ni seuil) |
+| DELETE produit/variante | Désactivation, 204 (commandes, passeports et paniers conservés) |
+| Produit sans variante active | Absent des listes, fiche 404 |
+| Prix nuls, négatifs, promo incohérente, poids négatif, centimes | 400 (et contraintes en base) |
+| Modération | `administration/produits/<id>/` (`est_actif` seulement) ; champ `desactive_par` (lecture seule côté vendeur) ; vendeur : 403 sur la levée d'une désactivation de l'administration |
+| Images | 5 Mo (règle du modèle), 10 par produit |
+| Sous-catégories inactives | Masquées |
+| Filtres et tri de prix | Prix effectif minimum des variantes actives |
+| `categorie=<nombre>` | id **ou** slug |
+| Limite publique | `catalogue_public` 1200/h (pas le taux `anon` partagé) |
 
-Collections Postman adaptées : `postman_paiements.json` et `postman_0_setup_vendeur.json` lisent désormais `v.stock.est_en_stock` sur la fiche publique.
+Collections Postman : `postman_paiements.json` et `postman_0_setup_vendeur.json` lisent `v.stock.est_en_stock` sur la fiche publique.
 
 ## 11. Tests
 
@@ -199,7 +199,7 @@ Vues SQL (`CatalogueVuesPubliquesTests`) : pour chaque cas de visibilité (produ
 
 - **catalogue 0003** `desactivation_et_regles_de_prix` :
   1. vérifie les données : prix de base négatifs, prix ≤ 0, promo incohérente, poids négatif. S'il y en a, **s'arrête et liste les ids** ; aucune correction automatique (fixer un prix est une décision du vendeur) ;
-  2. ajoute `desactive_par` ; les produits déjà inactifs sont attribués au **vendeur** (avant cette refonte, seul le vendeur pouvait désactiver un produit par l'API) ;
+  2. ajoute `desactive_par` ; les produits déjà inactifs sont attribués au **vendeur** (avant cette migration, seul le vendeur pouvait désactiver un produit par l'API) ;
   3. ajoute les contraintes du § 2.
 - **passeport_qr 0006** et **support 0005** : `on_delete=PROTECT` (aucune opération SQL, la règle est appliquée par Django).
 

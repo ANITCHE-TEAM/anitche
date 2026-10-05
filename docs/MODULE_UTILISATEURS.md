@@ -3,7 +3,7 @@
 > Périmètre : backend Django, `backend-django/apps/utilisateurs/`.
 > Document vivant : à corriger dès qu'une règle est arbitrée en réunion.
 >
-> Passe 2 (septembre 2026) : diagnostic confirmé par tests, puis refonte (chiffrement des données financières du KYC, email vérifié obligatoire pour les actions sensibles, limites de débit séparées, IP réelle dans la notification de connexion). Les changements visibles par le frontend sont regroupés au § 11.
+> Points saillants : chiffrement des données financières du KYC, email vérifié obligatoire pour les actions sensibles, limites de débit séparées, IP réelle dans la notification de connexion. Ce qui concerne le frontend est regroupé au § 11.
 
 ## 1. Rôle du module et dépendances
 
@@ -29,7 +29,7 @@ Le module dépend de `apps/core` (validateurs de fichiers, `CheminUploadUUID`, `
 - **`DocumentKYC`** (un par utilisateur) : `type_piece`, `piece_identite_recto`, `piece_identite_verso`, `selfie`, **`numero_mobile_money` (chiffré)** — numéro sur lequel ANITCHE reverse au vendeur —, `adresse`, `date_soumission`, `date_traitement`, `commentaire_admin`.
   - Fichiers stockés sous un nom UUID. Pièce d'identité : JPEG, PNG, PDF, **10 Mo**, signature binaire vérifiée. Selfie : JPEG, PNG, WebP, **5 Mo**.
   - `numero_mobile_money` est un `EncryptedCharField` (§ 4) : jamais en clair en base ni dans ses sauvegardes, relu en clair par l'application. Longueur métier validée par l'API : 20 caractères.
-  - **Plus de `compte_bancaire`** (migration 0009, septembre 2026) : les reversements aux vendeurs se font en mobile money uniquement ([`MODULE_PAIEMENTS.md`](./MODULE_PAIEMENTS.md) § 7). Le champ n'est plus collecté ni stocké ; un client qui l'envoie encore n'est pas bloqué (valeur ignorée).
+  - **Plus de `compte_bancaire`** (migration 0009, septembre 2026) : les reversements aux vendeurs se font en mobile money uniquement ([`MODULE_PAIEMENTS.md`](./MODULE_PAIEMENTS.md) § 7). Le champ n'est ni collecté ni stocké ; un client qui l'envoie quand même n'est pas bloqué (valeur ignorée).
 - **`CodeOTP`** : `code_hash` (jamais en clair), `type_usage` (`inscription`, `mdp_oublie`, `changement_email`, `changement_telephone`), `nouvelle_valeur`, `date_expiration`, `nombre_tentatives`, `utilise`.
 
 ## 3. Endpoints — `/api/utilisateurs/`
@@ -68,7 +68,7 @@ FastAPI ne valide pas lui-même les JWT : il transmet le jeton du client à `GET
 | Compte désactivé | **401**, `errors.code = ["user_inactive"]` (SimpleJWT ; constaté, et non 404) |
 | Au-delà de la limite | **429** avec `Retry-After`, que FastAPI relaie tel quel |
 
-- **Limite dédiée** `service_fastapi` (600/h par compte) : `throttle_classes` remplace les limites par défaut, donc ces appels **ne consomment pas** la limite `user` (300/h) du compte, et inversement. Avant, FastAPI appelait `profil/` : le suivi GPS épuisait la limite générale de l'utilisateur.
+- **Limite dédiée** `service_fastapi` (600/h par compte) : `throttle_classes` remplace les limites par défaut, donc ces appels **ne consomment pas** la limite `user` (300/h) du compte, et inversement. Si FastAPI appelait `profil/`, le suivi GPS épuiserait la limite générale de l'utilisateur.
 - Distincte de `profil/`, qui reste inchangé (son `id` fait partie du contrat public). On ne peut pas distinguer, sur `profil/`, un appel de FastAPI d'un appel du client.
 - **Hors schéma OpenAPI** (`@extend_schema(exclude=True)`) : aucun chemin dans `schema.yaml`. Pour la même raison, la note sur FastAPI de `ProfilSerializer` est un commentaire et non un docstring (drf-spectacular exporte les docstrings des serializers dans le schéma).
 - **Production** : FastAPI appelle Django directement sur le réseau Docker, en HTTP (`http://backend-django:8000`), sans nginx. D'où `SECURE_REDIRECT_EXEMPT` dans `prod.py` (cette seule route échappe à la redirection HTTPS) et `backend-django` dans `ALLOWED_HOSTS` (`infra/.env`, sinon 400 DisallowedHost). En dev, l'hôte à utiliser est `http://anitche-backend:8000`, déjà dans `ALLOWED_HOSTS` de `dev.py` (URL à configurer côté FastAPI, module 0).
@@ -142,7 +142,7 @@ La connexion reste possible sans email vérifié (navigation, panier). Sont refu
 
 Déblocage : saisir le code d'inscription dans `verification-otp/` (`type_usage = inscription`) ; code expiré ou perdu → `renvoyer-code-inscription/`.
 
-Adresse mal saisie à l'inscription : la personne ne reçoit aucun code et ne peut pas corriger son email depuis ce compte (le changement de contact exige un email vérifié). Ce n'est pas un blocage : elle se réinscrit avec la bonne adresse (le téléphone n'étant plus demandé à l'inscription, aucune donnée unique ne l'en empêche). Le compte erroné reste non vérifié ; sa suppression relève de la dette niveau 2 du § 12.
+Adresse mal saisie à l'inscription : la personne ne reçoit aucun code et ne peut pas corriger son email depuis ce compte (le changement de contact exige un email vérifié). Ce n'est pas un blocage : elle se réinscrit avec la bonne adresse (le téléphone n'étant pas demandé à l'inscription, aucune donnée unique ne l'en empêche). Le compte erroné reste non vérifié ; sa suppression relève de la dette niveau 2 du § 12.
 
 ## 7. Connexion Google
 
@@ -175,8 +175,8 @@ Adresse mal saisie à l'inscription : la personne ne reçoit aucun code et ne pe
 | `service_fastapi` | 600/h | `jeton/verification/` (route interne, § 3 bis). Seule limite de cette route | compte |
 | `user` | 300/h | autres routes authentifiées | compte |
 
-- Un scope = un compteur partagé par ses endpoints. Envoi et vérification des codes sont désormais comptés à part : demander plusieurs codes ne bloque plus la vérification. Chaque code reste limité à 5 essais.
-- `rafraichissement` : avec un access token de 15 minutes, une session active rafraîchit ~4 fois par heure ; derrière le CGNAT des opérateurs mobiles, de nombreux utilisateurs partagent une IP (l'ancien partage du taux `anon` de 50/h était épuisé par une dizaine de sessions). Aucun risque de force brute (refresh signé).
+- Un scope = un compteur partagé par ses endpoints. Envoi et vérification des codes sont comptés à part : demander plusieurs codes ne bloque pas la vérification. Chaque code reste limité à 5 essais.
+- `rafraichissement` : avec un access token de 15 minutes, une session active rafraîchit ~4 fois par heure ; derrière le CGNAT des opérateurs mobiles, de nombreux utilisateurs partagent une IP (le taux `anon` partagé de 50/h serait épuisé par une dizaine de sessions). Aucun risque de force brute (refresh signé).
 - IP selon `REST_FRAMEWORK['NUM_PROXIES']` : changer `X-Forwarded-For` ne contourne aucune limite.
 
 ## 10. Décisions d'équipe
@@ -199,15 +199,15 @@ Changements de contrat à intégrer (tous testés côté backend) :
 3. **Nouvel endpoint de renvoi du code.** `POST /api/utilisateurs/renvoyer-code-inscription/` (connecté, sans corps) : **200** `{"message": "Code envoyé."}` ; **400** si l'email est déjà vérifié ; **429** au-delà de 5 envois de code par heure (compteur partagé avec les autres envois). Le code se saisit dans `POST /api/utilisateurs/verification-otp/` avec `{"code": "…", "type_usage": "inscription"}`.
 4. **`telephone_verifie` reste `false`** après un changement de téléphone (le code part par email) : ne pas afficher de badge « téléphone vérifié » sur la base de ce champ pour l'instant.
 5. **Limites de débit** (réponses **429**) : inscription 10/h par IP ; rafraîchissement du jeton 300/h par IP ; envois de code 5/h ; vérifications de code 10/h.
-6. **Téléchargement d'une pièce KYC perdue** : **404** « Ce document n'est plus disponible. » au lieu d'une erreur 500.
+6. **Téléchargement d'une pièce KYC perdue** : **404** « Ce document n'est plus disponible. » (jamais une erreur 500).
 
 7. **`compte_bancaire` retiré du dépôt KYC** (`POST /api/utilisateurs/upload-kyc/`) et de la fiche KYC vue par l'administration (`/api/vendeurs/…`). Retirer le champ du formulaire ; s'il est encore envoyé, il est ignoré (pas d'erreur).
 
 8. **Format d'erreur unifié** (toutes les erreurs de l'API) : `{"success": false, "status_code": 400, "detail": "Message principal", "errors": {"champ": ["message"]}}`. `errors` est toujours un objet dont chaque valeur est une **liste** de messages ; vide (`{}`) quand l'erreur ne porte sur aucun champ. Changements dans ce module :
-   - `verification-otp/` : code faux ou expiré → **400** `errors.code = ["…essais restants…"]` ; aucun code en attente → **400**, message dans `detail` (avant : `{"message": …}`) ;
-   - `renvoyer-code-inscription/` (email déjà vérifié), `mot-de-passe-oublie/confirmer/` (code invalide ou expiré, message générique inchangé) → **400**, message dans `detail` (avant : `{"message": …}`) ;
-   - `connexion-google/` : jeton invalide → **400** `errors.id_token` ; informations Google incomplètes → **400** ; compte désactivé → **403** ; compte existant non vérifié → **409**, message dans `detail` (avant : `{"message": …}`) ;
-   - `deconnexion/` : refresh absent ou invalide → **400** `errors.refresh` (avant : `{"message": …}`) ;
+   - `verification-otp/` : code faux ou expiré → **400** `errors.code = ["…essais restants…"]` ; aucun code en attente → **400**, message dans `detail` ;
+   - `renvoyer-code-inscription/` (email déjà vérifié), `mot-de-passe-oublie/confirmer/` (code invalide ou expiré, message générique) → **400**, message dans `detail` ;
+   - `connexion-google/` : jeton invalide → **400** `errors.id_token` ; informations Google incomplètes → **400** ; compte désactivé → **403** ; compte existant non vérifié → **409**, message dans `detail` ;
+   - `deconnexion/` : refresh absent ou invalide → **400** `errors.refresh` ;
    - `errors.code` de l'email non vérifié devient une liste : `["email_non_verifie"]`.
 
 Aucun autre champ de réponse ne change (le profil, les jetons et le dépôt KYC gardent leur format ; `numero_mobile_money` est renvoyé en clair au titulaire comme avant).

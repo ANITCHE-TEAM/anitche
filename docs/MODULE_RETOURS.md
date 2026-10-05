@@ -1,7 +1,7 @@
 # Module retours — contrat et règles
 
 > Périmètre : backend Django, `backend-django/apps/retours/` (et ses points de contact dans `paiements`, `livraison`, `fidelite`, `notifications`).
-> État : refonte de septembre 2026. **Un retour remboursé rend de l'argent au client et en retire au vendeur** : toute la conception part de là.
+> Principe : **un retour remboursé rend de l'argent au client et en retire au vendeur** : toute la conception part de là.
 
 ## 1. Ce sur quoi le module s'appuie, et qui s'appuie sur lui
 
@@ -83,31 +83,31 @@ Avec le délai de 7 jours (égal à la rétractation), le cas « retour après v
 1. **Bouton « Retourner un article »** : seulement sur une commande `livree`, jusqu'à 7 jours après la livraison (`date_livraison` du suivi de livraison + 7 jours). Au-delà : **400** avec le motif.
 2. **`type_resolution`** : ne proposer que « Remboursement » (échange et avoir renvoient **400**).
 3. **Montant affiché** : `montant_remboursement` de la réponse (remise déduite), pas le prix catalogue.
-4. **Photos** : `photos[].image` est désormais une **URL d'API authentifiée** (avant : chemin `/media/…`). La charger avec le jeton (`Authorization: Bearer`), par exemple en `fetch` puis `URL.createObjectURL`, et non dans un `<img src>` nu. 5 photos au plus, uniquement avant la réception.
+4. **Photos** : `photos[].image` est une **URL d'API authentifiée** (pas un chemin `/media/…`). La charger avec le jeton (`Authorization: Bearer`), par exemple en `fetch` puis `URL.createObjectURL`, et non dans un `<img src>` nu. 5 photos au plus, uniquement avant la réception.
 5. **Client** : nouveaux boutons « J'ai expédié le colis » (`action: en_transit`, statut `approuve`) et « Annuler ma demande » (`action: annuler`, statuts `demande` ou `approuve`). Nouveau statut **`annule`** (libellé « Annulée par le client »).
 6. **Vendeur** : le rejet exige un motif (`reponse`) ; plus de bouton « Rejeter » après réception ; la réception est possible directement depuis `approuve`. **403** pour une action du client, **400** pour une transition invalide.
-7. **`cloturer`** n'existe plus après un rejet (le rejet est définitif).
+7. **`cloturer`** n'est pas possible après un rejet (le rejet est définitif).
 8. **Erreurs à prévoir** : **429** au-delà de 10 demandes ou 30 photos par heure.
-9. **Format d'erreur unifié (septembre 2026).** Les refus portaient avant un simple `{"detail": …}` (et `{"image": "…"}` pour une photo manquante) : ils suivent désormais le format commun `{success: false, status_code, detail, errors}`, `errors` toujours un objet clé → liste de messages (`{}` si aucun champ n'est en cause) ; photo manquante → **400** `errors.image` (liste).
+9. **Format d'erreur unifié (septembre 2026).** Les refus suivent le format commun `{success: false, status_code, detail, errors}`, `errors` toujours un objet clé → liste de messages (`{}` si aucun champ n'est en cause) ; photo manquante → **400** `errors.image` (liste).
 
-## 9. Sécurité — failles corrigées (diagnostic de septembre 2026)
+## 9. Sécurité — risques couverts
 
-Chaque constat a été confirmé par un test jetable sur PostgreSQL avant correction ; chacun a son test permanent dans `apps/retours/tests.py`.
+Chaque risque a son test permanent dans `apps/retours/tests.py`.
 
-| # | Faille | Correction | Test |
-|---|---|---|---|
-| R-a | Retour accepté sur une commande confirmée ou expédiée | Commande livrée exigée | `EligibiliteTests` |
-| R-b | Aucun délai (retour un an après) | 7 jours après la livraison (`RETOUR_DELAI_JOURS`) | `EligibiliteTests` |
-| R-c | Deux « rembourser » simultanés : deux 200, part du vendeur déduite deux fois | Transitions sous verrou ; déduction liée à la création du `Remboursement` | `RemboursementUniqueTests`, `RemboursementConcurrentTests` |
-| R-d | Rejet après réception : stock réintégré, client sans rien | Transition supprimée | `TransitionsTests` |
-| R-e | Remboursement au prix catalogue, remise ignorée (40 000 rendus pour 30 000 payés) | Prorata du montant payé, franc inférieur | `MontantRembourseTests` |
-| R-h | Photo sur un retour clos, nom d'origine du fichier conservé, aucune limite, `/media/` public en dev et absent en production | Statuts ouverts, 5 photos, UUID, téléchargement authentifié | `PhotosTests` |
-| R-i | Vendeur jamais prévenu d'une demande | Notification après commit | `NotificationEtVisibiliteTests` |
-| R-j | Un vendeur ne voyait pas ses propres retours d'acheteur | Visibilité client **ou** boutique | `NotificationEtVisibiliteTests` |
-| R-m | Pas de limite dédiée | `retour_creation` 10/h, `retour_photo` 30/h | `LimitesDeDebitTests` |
-| — | Une même ligne citée deux fois dans une demande dépassait la quantité achetée (trouvé pendant la refonte) | Quantités cumulées dans la demande | `EligibiliteTests` |
+| Risque | Protection | Test |
+|---|---|---|
+| Retour accepté sur une commande confirmée ou expédiée | Commande livrée exigée | `EligibiliteTests` |
+| Aucun délai (retour un an après) | 7 jours après la livraison (`RETOUR_DELAI_JOURS`) | `EligibiliteTests` |
+| Deux « rembourser » simultanés : deux 200, part du vendeur déduite deux fois | Transitions sous verrou ; déduction liée à la création du `Remboursement` | `RemboursementUniqueTests`, `RemboursementConcurrentTests` |
+| Rejet après réception : stock réintégré, client sans rien | Pas de transition de rejet après réception | `TransitionsTests` |
+| Remboursement au prix catalogue, remise ignorée (40 000 rendus pour 30 000 payés) | Prorata du montant payé, franc inférieur | `MontantRembourseTests` |
+| Photo sur un retour clos, nom d'origine du fichier conservé, aucune limite, `/media/` public en dev et absent en production | Statuts ouverts, 5 photos, UUID, téléchargement authentifié | `PhotosTests` |
+| Vendeur jamais prévenu d'une demande | Notification après commit | `NotificationEtVisibiliteTests` |
+| Un vendeur ne voit pas ses propres retours d'acheteur | Visibilité client **ou** boutique | `NotificationEtVisibiliteTests` |
+| Pas de limite dédiée | `retour_creation` 10/h, `retour_photo` 30/h | `LimitesDeDebitTests` |
+| Une même ligne citée deux fois dans une demande dépasse la quantité achetée | Quantités cumulées dans la demande | `EligibiliteTests` |
 
-Vérifié et correct dès le diagnostic : IDOR sur la liste et le détail, validation du contenu réel des images, quantités déjà couvertes et concurrence à la création (verrou sur la commande).
+Également vérifié : IDOR sur la liste et le détail, validation du contenu réel des images, quantités déjà couvertes et concurrence à la création (verrou sur la commande).
 
 ## 10. Limites de débit et performance
 
