@@ -24,7 +24,7 @@ VIEWS = {"catalogue_produit_public", "catalogue_categorie_publique", "catalogue_
 PRODUCT_VIEW_COLUMNS = {
     "id", "nom", "slug", "prix_base", "date_creation", "categorie_id", "categorie_nom", "categorie_slug",
     "categorie_parent_id", "categorie_parent_slug", "boutique_id", "boutique_nom", "boutique_slug",
-    "prix_min", "en_stock", "image_principale", "nom_normalise", "texte_normalise",
+    "prix_min", "en_stock", "image_principale", "nom_normalise", "texte_normalise", "miniature_principale",
 }
 
 

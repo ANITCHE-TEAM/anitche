@@ -258,6 +258,14 @@ class ImageProduit(models.Model):
         upload_to='catalogue/produits/%Y/%m/',
         validators=[validateur_image_standard],
     )
+    miniature = models.ImageField(
+        upload_to='catalogue/miniatures/%Y/%m/',
+        null=True,
+        blank=True,
+        editable=False,
+        help_text="WebP de 480 px de large au plus, généré depuis `image` (apps/catalogue/images.py). "
+                  "Vide si la génération a échoué : afficher l'original.",
+    )
     est_principale = models.BooleanField(
         default=False,
         help_text="Image principale affichée sur les vignettes de recherche.",

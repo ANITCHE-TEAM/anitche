@@ -13,6 +13,7 @@ from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema
 
 from apps.core.authentification import JWTAuthentificationOptionnelle
 from apps.vendeurs.permissions import BoutiqueDuVendeurNonSuspendue, EstAdministrateur, EstVendeurValide
+from .images import generer_miniature
 from .models import MAX_IMAGES_PAR_PRODUIT, Categorie, Produit, VarianteProduit, ImageProduit, Stock
 from .permissions import (
     EstProprietaireDuProduit,
@@ -307,7 +308,10 @@ class ImageProduitListCreateView(generics.ListCreateAPIView):
                     'image': f"Un produit ne peut pas avoir plus de {MAX_IMAGES_PAR_PRODUIT} images. "
                              "Supprimez-en une avant d'en ajouter une autre."
                 })
-            serializer.save(produit=produit)
+            image = serializer.save(produit=produit)
+        # Après le verrou : la génération (quelques centaines de ms pour 5 Mo)
+        # ne bloque pas les autres envois. Un échec laisse `miniature` vide.
+        generer_miniature(image)
 
 
 class ImageProduitDeleteView(generics.DestroyAPIView):

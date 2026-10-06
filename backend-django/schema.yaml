@@ -9796,6 +9796,14 @@ components:
         image:
           type: string
           format: uri
+        miniature:
+          type:
+          - string
+          - 'null'
+          format: uri
+          readOnly: true
+          description: 'WebP de 480 px de large au plus, généré depuis `image` (apps/catalogue/images.py).
+            Vide si la génération a échoué : afficher l''original.'
         est_principale:
           type: boolean
           description: Image principale affichée sur les vignettes de recherche.
@@ -9811,6 +9819,7 @@ components:
       - date_creation
       - id
       - image
+      - miniature
       - produit
     ImageProduitRequest:
       type: object
@@ -12632,6 +12641,14 @@ components:
           - string
           - 'null'
           readOnly: true
+        miniature_principale:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Miniature WebP (480 px) de l'image principale ; null si elle n'a pas
+            pu être générée : afficher alors `image_principale`.
+          readOnly: true
         categorie:
           type:
           - integer
@@ -12664,6 +12681,7 @@ components:
       - en_stock
       - id
       - image_principale
+      - miniature_principale
       - nom
       - prix_min
     ProduitVendeur:

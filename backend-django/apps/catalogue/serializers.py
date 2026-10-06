@@ -72,8 +72,8 @@ class ImageProduitSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ImageProduit
-        fields = ['id', 'produit', 'image', 'est_principale', 'ordre', 'date_creation']
-        read_only_fields = ['id', 'produit', 'date_creation']
+        fields = ['id', 'produit', 'image', 'miniature', 'est_principale', 'ordre', 'date_creation']
+        read_only_fields = ['id', 'produit', 'miniature', 'date_creation']
 
 
 class StockSerializer(serializers.ModelSerializer):
@@ -267,6 +267,7 @@ class ProduitPublicListSerializer(serializers.ModelSerializer):
     boutique_nom = serializers.CharField(source='boutique.nom', read_only=True)
     boutique_slug = serializers.CharField(source='boutique.slug', read_only=True)
     image_principale = serializers.SerializerMethodField()
+    miniature_principale = serializers.SerializerMethodField()
     prix_min = serializers.SerializerMethodField()
     en_stock = serializers.SerializerMethodField()
 
@@ -279,6 +280,7 @@ class ProduitPublicListSerializer(serializers.ModelSerializer):
             'prix_base',
             'prix_min',
             'image_principale',
+            'miniature_principale',
             'categorie',
             'categorie_nom',
             'boutique',
@@ -288,15 +290,28 @@ class ProduitPublicListSerializer(serializers.ModelSerializer):
             'date_creation',
         ]
 
-    def get_image_principale(self, obj) -> Optional[str]:
+    @staticmethod
+    def _principale(obj):
+        """L'image marquée principale, sinon la première (même règle que la
+        vue SQL catalogue_produit_public)."""
         images = list(obj.images.all())
-        image = next((i for i in images if i.est_principale), images[0] if images else None)
-        if image and image.image:
-            request = self.context.get('request')
-            if request:
-                return request.build_absolute_uri(image.image.url)
-            return image.image.url
-        return None
+        return next((i for i in images if i.est_principale), images[0] if images else None)
+
+    def _url(self, fichier):
+        if not fichier:
+            return None
+        request = self.context.get('request')
+        return request.build_absolute_uri(fichier.url) if request else fichier.url
+
+    def get_image_principale(self, obj) -> Optional[str]:
+        image = self._principale(obj)
+        return self._url(image.image) if image else None
+
+    def get_miniature_principale(self, obj) -> Optional[str]:
+        """Miniature WebP (480 px) de l'image principale ; null si elle n'a pas
+        pu être générée : afficher alors `image_principale`."""
+        image = self._principale(obj)
+        return self._url(image.miniature) if image else None
 
     def get_prix_min(self, obj) -> float:
         """Plus petit prix effectif (promo comprise) des variantes actives."""
