@@ -1,13 +1,13 @@
 # Module suivi GPS — contrat et règles
 
 > Périmètre : backend FastAPI, `backend-fastapi/app/` (routeur `routeurs/suivi_temps_reel.py`, services `delivery_access.py`, `tracking.py`, `eta.py`).
-> État : refonte de septembre 2026 (module 1 de la refonte FastAPI). Le statut de la livraison et les droits restent ceux de Django ([`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md)) : FastAPI les **lit**, ne les modifie jamais.
+> Le statut de la livraison et les droits restent ceux de Django ([`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md)) : FastAPI les **lit**, ne les modifie jamais.
 
 ## 1. Ce sur quoi le module s'appuie
 
 | Dépendance | Usage |
 |---|---|
-| Django (`/api/utilisateurs/jeton/verification/`) | Jeton → `{id, role}` (socle du module 0, cache Redis de 30 s) |
+| Django (`/api/utilisateurs/jeton/verification/`) | Jeton → `{id, role}` (socle commun `app/core/auth.py`, cache Redis de 30 s) |
 | PostgreSQL (rôle `anitche_fastapi_ro`) | Une requête par action : statut, livreur assigné, client de la commande, rôle et compte actif **en base**, point GPS du client. Droits **par colonne** (§ 6) |
 | Redis (base 2) | Dernière position (TTL 120 s), diffusion pub/sub entre workers et instances, limites de débit |
 
@@ -166,31 +166,31 @@ Côté serveur : aucun écho, messages construits par Pydantic (JSON strict, san
 | `ETA_AVERAGE_SPEED_KMH` | 20 | Vitesse moyenne urbaine (§ 5) |
 | `RATE_LIMITS` | `gps_publish` 1500/hour, `gps_read` 720/hour, `ws_connect` 60/hour | Limites par compte |
 
-## 10. Sécurité — failles corrigées (diagnostic de septembre 2026)
+## 10. Sécurité — risques couverts
 
-| # | Faille | Correction |
-|---|---|---|
-| 1 | Position de n'importe quelle livraison lisible par tout compte | Périmètre de `livraisons_visibles` (§ 3), 404 / 4403 hors périmètre |
-| 2 | `livraison_id` en texte libre (`../admin`…) | UUID validé (400, 1008) avant toute requête ou clé Redis |
-| 3 | `livreur_id` pris dans le corps | Livreur = utilisateur du jeton, livreur assigné lu en base |
-| 4 | Statut jamais vérifié | `en_cours` exigé (409 / `aucune_position` / 4403) |
-| 5 | Administration publiant au nom de n'importe quel livreur | L'administration ne publie plus (403) |
-| 6 | Fausse position et fausse ETA par défaut | 404 `aucune_position` ; ETA seulement avec le point du client |
-| 7 | État en mémoire, jamais vidé, faux avec plusieurs workers | Redis (TTL, pub/sub), aucun singleton de module |
-| 8 | Jeton WebSocket dans l'URL (journaux) | Authentification par premier message ; chaîne de requête retirée du journal d'uvicorn |
-| 9 | Connexion jamais revalidée | Revalidation toutes les 60 s, renouvellement du jeton par message |
-| 10 | Écho non échappé, sans limite de taille | Aucun écho, 1008 / 1009, 4 096 octets, `--ws-max-size 8192` |
-| 10 bis | `NaN` / `Infinity` diffusés | Refusés (400), valeurs bornées |
-| 11 | Aucune limite sur la lecture | `gps_read` 720/h, 6 messages client par minute |
-| A | Identifiant du livreur envoyé au client | Jamais envoyé (stocké seulement pour détecter une réassignation) |
-| B | Vendeur lisant toute livraison | Même règle que Django : ses achats seulement |
-| C | Horodatage du client, heure locale sans fuseau | Horodatage serveur, UTC, ISO 8601 |
-| D | Diffusion dans la requête du livreur | `PUBLISH` Redis ; un abonné lent ne ralentit ni le livreur ni les autres |
-| E | Erreurs WebSocket silencieuses | Journalisées (sans jeton), fermeture 1011, désabonnement garanti |
+| Risque | Protection |
+|---|---|
+| Position d'une livraison lue par un compte sans lien avec elle | Périmètre de `livraisons_visibles` (§ 3), 404 / 4403 hors périmètre |
+| `livraison_id` en texte libre (`../admin`…) | UUID validé (400, 1008) avant toute requête ou clé Redis |
+| `livreur_id` pris dans le corps | Livreur = utilisateur du jeton, livreur assigné lu en base |
+| Publication hors livraison en cours | `en_cours` exigé (409 / `aucune_position` / 4403) |
+| Administration publiant au nom d'un livreur | Seuls les livreurs publient (403 pour l'administration) |
+| Fausse position ou fausse ETA par défaut | 404 `aucune_position` ; ETA seulement avec le point du client |
+| État en mémoire, faux avec plusieurs workers | Redis (TTL, pub/sub), aucun singleton de module |
+| Jeton WebSocket dans l'URL (journaux) | Authentification par premier message ; chaîne de requête retirée du journal d'uvicorn |
+| Connexion restée ouverte après révocation ou réassignation | Revalidation toutes les 60 s, renouvellement du jeton par message |
+| Écho de messages, messages sans limite de taille | Aucun écho, 1008 / 1009, 4 096 octets, `--ws-max-size 8192` |
+| `NaN` / `Infinity` diffusés | Refusés (400), valeurs bornées |
+| Lecture sans limite | `gps_read` 720/h, 6 messages client par minute |
+| Identifiant du livreur envoyé au client | Jamais envoyé (stocké seulement pour détecter une réassignation) |
+| Vendeur lisant toute livraison | Même règle que Django : ses achats seulement |
+| Horodatage fourni par le client | Horodatage serveur, UTC, ISO 8601 |
+| Diffusion bloquée par un abonné lent | `PUBLISH` Redis ; un abonné lent ne ralentit ni le livreur ni les autres |
+| Erreurs WebSocket silencieuses | Journalisées (sans jeton), fermeture 1011, désabonnement garanti |
 
 ## 11. Tests
 
-- `tests/test_suivi_gps.py` : un test (au moins) par faille (1 à 11, A, B, C), ETA dans les trois sorties, pannes (Redis, PostgreSQL, pub/sub perdu), abonnement unique par processus et nettoyage.
+- `tests/test_suivi_gps.py` : un test (au moins) par risque du § 10, ETA dans les trois sorties, pannes (Redis, PostgreSQL, pub/sub perdu), abonnement unique par processus et nettoyage.
 - `tests/test_suivi_gps_regles.py` : table rôle × lien × statut de `can_listen` / `can_publish`, ETA (références, `null` sans point, jamais `NaN`).
 - `tests/integration/` (marqueur `integration`) : **vrais** PostgreSQL et Redis. Droits par colonne exacts (`information_schema.column_privileges`), colonnes refusées, écriture refusée, requête d'accès sur le schéma des migrations Django, pub/sub entre deux applications, parcours complet jusqu'à `fin_suivi`.
 - CI (`.github/workflows/ci-fastapi.yml`) : job `test` sans service (`-m "not integration"`), job `integration` (Postgres 16, Redis 7, `migrate`, vrai script du rôle, `REQUIRE_INTEGRATION=1` : un test sauté fait échouer le job).
@@ -221,4 +221,4 @@ nginx n'est pas modifié par ce module : `map $http_upgrade $connection_upgrade`
 - **Un abonnement pub/sub par processus** plutôt qu'un par WebSocket : une connexion Redis par worker ; un client lent ne ralentit personne (file bornée, la plus ancienne position est jetée : seule la dernière compte).
 - **Pas d'historique** : demande explicite ; la position est une donnée personnelle éphémère.
 - **Pas de récepteur de signal Django** qui supprimerait la position dès la fin de la livraison : Django écrirait dans la base Redis de FastAPI (couplage). La fermeture intervient en 60 s au plus.
-- **ETA sans centre de commune** : une commune d'Abidjan s'étend sur plusieurs kilomètres ; une durée fausse est le même défaut que la fausse position supprimée (faille 6).
+- **ETA sans centre de commune** : une commune d'Abidjan s'étend sur plusieurs kilomètres ; une durée fausse serait le même défaut qu'une fausse position par défaut (§ 10).

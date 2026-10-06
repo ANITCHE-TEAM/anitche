@@ -1,7 +1,7 @@
 # Module recherche — contrat et règles
 
 > Périmètre : backend FastAPI, `backend-fastapi/app/` (routeur `routeurs/recherche.py`, service `services/search.py`, cache `core/cache.py`, modèles `modeles/recherche.py`).
-> État : refonte de septembre 2026 (module 2 de la refonte FastAPI). Les règles de visibilité du catalogue restent celles de Django ([`MODULE_CATALOGUE.md`](./MODULE_CATALOGUE.md) § 2) : FastAPI **lit** des vues SQL publiques créées par une migration Django, ne touche à aucune table du catalogue et n'écrit rien.
+> Les règles de visibilité du catalogue restent celles de Django ([`MODULE_CATALOGUE.md`](./MODULE_CATALOGUE.md) § 2) : FastAPI **lit** des vues SQL publiques créées par une migration Django, ne touche à aucune table du catalogue et n'écrit rien.
 
 ## 1. Ce sur quoi le module s'appuie
 
@@ -23,7 +23,7 @@ core/cache.py           cache JSON Redis avec durée de vie, facultatif (panne :
 modeles/recherche.py    schémas de réponse (OpenAPI)
 ```
 
-Plus aucune donnée en dur ni état global : l'ancienne maquette `CATALOGUE_INDEX` (6 produits inventés, modifiée à chaque recherche) est supprimée. Le conseiller IA (module 4, [`MODULE_IA.md`](./MODULE_IA.md)) n'a plus de maquette non plus : il choisit ses produits parmi ceux que renvoie `fetch_page` (mêmes vues, mêmes règles), sans modifier ce service.
+Aucune donnée en dur ni état global : tout vient des vues PostgreSQL. Le conseiller IA ([`MODULE_IA.md`](./MODULE_IA.md)) n'a pas de catalogue propre : il choisit ses produits parmi ceux que renvoie `fetch_page` (mêmes vues, mêmes règles), sans modifier ce service.
 
 ## 3. Contrat HTTP
 
@@ -31,7 +31,7 @@ Base : `http://localhost:8001` en dev, `https://anitche.com/fast` en prod ([`GUI
 
 ### `GET /recherche/produits`
 
-Paramètres : mêmes noms et même sens que la liste Django. Une valeur invalide reçoit un **400** (Django l'ignore en silence). Paramètre inconnu (dont les anciens `q`, `boutique_id`, `par_page`) : ignoré.
+Paramètres : mêmes noms et même sens que la liste Django. Une valeur invalide reçoit un **400** (Django l'ignore en silence). Paramètre inconnu (dont `q`, `boutique_id`, `par_page`, absents du contrat) : ignoré.
 
 | Paramètre | Valeurs | Règle |
 |---|---|---|
@@ -39,7 +39,7 @@ Paramètres : mêmes noms et même sens que la liste Django. Une valeur invalide
 | `categorie` | slug ou id, 120 caractères au plus | Catégorie **et ses sous-catégories** (un niveau). Slug numérique (`2024`) : lu comme slug **et** comme id. Lettres, chiffres, `_`, `-` |
 | `boutique` | id (chiffres) ou slug, 140 caractères au plus | Comme Django |
 | `prix_min`, `prix_max` | entiers FCFA, 0 à 9 999 999 999 | Sur le **prix affiché** ; `prix_min > prix_max` → 400 sur `prix_max` |
-| `tri` | `pertinence`, `date_desc`, `date_asc`, `prix_asc`, `prix_desc` | Défaut : `pertinence` avec `recherche`, `date_desc` sans. `note` supprimé (aucun module d'avis) |
+| `tri` | `pertinence`, `date_desc`, `date_asc`, `prix_asc`, `prix_desc` | Défaut : `pertinence` avec `recherche`, `date_desc` sans. Pas de tri `note` (aucun module d'avis) |
 | `page` | 1 à 50 | 20 résultats par page (comme Django), 1 000 au plus |
 
 Réponse : **même enveloppe et mêmes champs que la liste Django**, plus `facettes` :
@@ -196,25 +196,25 @@ Données de démo (18 produits visibles), dans le conteneur de dev (`--reload`, 
 | `recherche=zzzz` (aucun résultat) | 8,8 / 12,3 ms | 5,2 / 7,9 ms |
 | Suggestions `chem` | 4,8 / 5,4 ms | 1,4 / 1,8 ms |
 
-Sur des catalogues synthétiques de 10 000 et 100 000 produits (rapport de diagnostic du module 2, SQL équivalent) : recherches de 1 à 231 ms avec les index ; **tri par prix et facettes du catalogue entier ≈ 0,9 s à 100 000** (prix minimum calculé pour chaque produit). Réponse de niveau 2, **seulement sur mesure** (test de charge ou catalogue au-delà d'environ 20 000 produits) : `prix_min` et `en_stock` dénormalisés, tenus à jour par Django.
+Sur des catalogues synthétiques de 10 000 et 100 000 produits (mesures ponctuelles, SQL équivalent) : recherches de 1 à 231 ms avec les index ; **tri par prix et facettes du catalogue entier ≈ 0,9 s à 100 000** (prix minimum calculé pour chaque produit). Réponse de niveau 2, **seulement sur mesure** (test de charge ou catalogue au-delà d'environ 20 000 produits) : `prix_min` et `en_stock` dénormalisés, tenus à jour par Django.
 
-## 12. Sécurité — failles corrigées (diagnostic de septembre 2026)
+## 12. Sécurité — risques couverts
 
-| # | Avant | Après |
-|---|---|---|
-| 1-2 | Maquette de 6 produits en dur ; dictionnaires globaux modifiés à chaque recherche, partagés avec le conseiller IA | Vues PostgreSQL ; aucun état global ; maquette IA séparée et immuable |
-| 3 | `q` sans taille maximale (60 000 caractères acceptés) | 100 caractères (50 pour les suggestions), 8 mots |
-| 4, 10 | Paramètres différents de Django, `inf` accepté, page trop grande ramenée à la page 1 | Paramètres de Django, entiers bornés, 400 explicites, 404 au-delà de la dernière page |
-| 5 | Facettes calculées sur la maquette entière, sans id | Facettes de l'ensemble filtré, avec id et slug |
-| 6 | Tri par note sur des notes inventées | Supprimé |
-| 7-9 | Sensible aux accents, aucune faute tolérée, un seul mot suffisait | Sans accents, fautes tolérées, tous les mots exigés (critères 1 et 3) |
-| 11-12 | Champs inventés (`image_url` nulle, `disponible` toujours vrai, suggestions « artisanat ») | Champs réels de Django, `en_stock` réel, suggestions réelles |
-| — | Jokers `LIKE` | Échappés après normalisation (pleine chasse comprise) |
-| — | Lecture possible de tables sensibles | Rôle limité aux 3 vues publiques |
+| Risque | Protection |
+|---|---|
+| Données en dur, état global modifié à chaque recherche | Vues PostgreSQL ; aucun état global ; le conseiller IA lit les mêmes vues |
+| Texte de recherche sans taille maximale | 100 caractères (50 pour les suggestions), 8 mots |
+| Paramètres différents de Django, `inf` accepté, page trop grande ramenée en silence | Paramètres de Django, entiers bornés, 400 explicites, 404 au-delà de la dernière page |
+| Facettes hors de l'ensemble filtré, sans id | Facettes de l'ensemble filtré, avec id et slug |
+| Tri sur des notes inexistantes | Aucun tri par note |
+| Recherche sensible aux accents, sans tolérance aux fautes, satisfaite par un seul mot | Sans accents, fautes tolérées, tous les mots exigés (critères 1 et 3) |
+| Champs inventés (image nulle, disponibilité toujours vraie, suggestions fictives) | Champs réels de Django, `en_stock` réel, suggestions réelles |
+| Jokers `LIKE` | Échappés après normalisation (pleine chasse comprise) |
+| Lecture de tables sensibles | Rôle limité aux 3 vues publiques |
 
 ## 13. Tests
 
-- `tests/test_recherche.py` : paramètres (chaque 400), SQL (valeurs toujours en paramètres, 3 vues seulement, échappement après normalisation, filtres, tris), réponse (champs exacts de Django, URL, liens), cache (facettes et suggestions en cache, résultats jamais, désactivable, panne de Redis), pannes PostgreSQL (503), aucune maquette ni état global.
+- `tests/test_recherche.py` : paramètres (chaque 400), SQL (valeurs toujours en paramètres, 3 vues seulement, échappement après normalisation, filtres, tris), réponse (champs exacts de Django, URL, liens), cache (facettes et suggestions en cache, résultats jamais, désactivable, panne de Redis), pannes PostgreSQL (503), aucune donnée en dur ni état global.
 - `tests/integration/test_recherche_vues.py` (vraies vues des migrations Django, rôle en lecture seule, Redis base 15) : produit masqué dans Django (produit désactivé, sans variante, variantes inactives, boutique suspendue ou fermée, vendeur KYC en attente ou refusé, vendeur inactif, propriétaire client) invisible partout ; masquage effectif à la requête suivante ; prix, stock et image comme Django ; sous-catégories ; accents et fautes (`baoule` → « Robe Baoulé ») ; paliers ; facettes cohérentes avec les résultats filtrés ; `%`, `_`, `\` et leurs formes pleine chasse ; tri et pages ; 2e appel sans SQL pour les facettes ; aucune table du catalogue lisible ; index utilisables (plans générique et personnalisé) ; `plan_cache_mode` du pool.
 - `tests/integration/test_postgres_readonly.py` : droits de table du rôle = exactement les 3 vues.
 

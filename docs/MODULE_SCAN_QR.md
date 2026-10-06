@@ -1,7 +1,7 @@
 # Module scan QR — contrat et règles
 
 > Périmètre : backend FastAPI, `backend-fastapi/app/` (routeur `routeurs/scan_qr.py`, décodeur `services/qr_decode.py`, modèles `modeles/scan_qr.py`).
-> État : refonte de septembre 2026 (module 3 de la refonte FastAPI). **FastAPI décode, Django certifie.** Les passeports, la certification, le comptage et le journal des scans sont ceux de Django ([`MODULE_PASSEPORT_QR.md`](./MODULE_PASSEPORT_QR.md)) : FastAPI ne lit aucune base, n'appelle pas Django et ne garde aucun état.
+> **FastAPI décode, Django certifie.** Les passeports, la certification, le comptage et le journal des scans sont ceux de Django ([`MODULE_PASSEPORT_QR.md`](./MODULE_PASSEPORT_QR.md)) : FastAPI ne lit aucune base, n'appelle pas Django et ne garde aucun état.
 
 ## 1. Rôle
 
@@ -13,7 +13,7 @@ Le frontend envoie le **contenu brut** lu par la caméra (l'URL imprimée dans l
 
 Un 200 **n'atteste pas** que le passeport existe. C'est la page de vérification qui appelle Django (`GET /api/passeports/verifier/<code>/`), et Django qui certifie, compte le scan et le journalise.
 
-Pourquoi côté serveur plutôt que dans le frontend : un décodage sûr n'est pas une ligne. Le diagnostic a trouvé 27 contournements à refuser (hôte piégé, identifiants, antislash lu différemment par Python et par les navigateurs, homographes, `ſ` et `ı`, séparateurs). Une seule implémentation testée sert le site et une future application mobile, avec l'origine lue dans la même variable que Django.
+Pourquoi côté serveur plutôt que dans le frontend : un décodage sûr n'est pas une ligne. Il doit refuser au moins 27 contournements connus (hôte piégé, identifiants, antislash lu différemment par Python et par les navigateurs, homographes, `ſ` et `ı`, séparateurs). Une seule implémentation testée sert le site et une future application mobile, avec l'origine lue dans la même variable que Django.
 
 ## 2. Ce sur quoi le module s'appuie
 
@@ -34,7 +34,7 @@ services/qr_decode.py   fonctions pures : decode(), normalize_typed_code(), veri
 modeles/scan_qr.py      DemandeScanQR (qr_data, 1 à 512 caractères), ReponseScanQR (2 champs)
 ```
 
-L'ancienne maquette (`services/qr_service.py` : 3 passeports écrits en dur, compteur de scans en mémoire, domaine `anitche.ci` en dur) est **supprimée**, ainsi que la route `GET /qr/passeport/{code}`.
+Aucun passeport écrit en dur, aucun compteur de scans en mémoire, aucun domaine en dur ; FastAPI n'a pas de route `GET /qr/passeport/{code}`.
 
 ## 4. Contrat HTTP
 
@@ -89,7 +89,7 @@ Dans cet ordre, après retrait des espaces de début et de fin :
    - l'**origine** (schéma, hôte en minuscules, port effectif) diffère de celle de `FRONTEND_BASE_URL`. Comparaison champ par champ après analyse, **jamais par préfixe**. Le port par défaut explicite (`https://anitche.com:443/…`) est la même origine.
 4. Bonne origine : le chemin doit être le chemin de base de `FRONTEND_BASE_URL` + `/qr/verifier/` (casse ignorée, ASCII), puis le code (casse ignorée), avec ou sans « / » final. Paramètres (`?utm_source=…`) et fragment ignorés. Sinon → `lien_non_passeport`.
 
-Pourquoi ces précautions (mesuré au diagnostic) :
+Pourquoi ces précautions (comportements vérifiés) :
 
 - un contrôle par préfixe (`startswith("https://anitche.com")`) laisse passer `https://anitche.com.evil.example/…` et `https://anitche.com@evil.example/…` (hôte réel : `evil.example`) ;
 - `urlsplit("https://evil.example\@anitche.com/…")` lit l'hôte `anitche.com`, alors qu'un navigateur lit `\` comme `/` et ouvre `evil.example` ; les navigateurs retirent aussi tabulations et sauts de ligne des URL : ces caractères sont refusés **avant** l'analyse ;
@@ -125,7 +125,7 @@ B. Scanner intégré ou saisie manuelle (application)
 
 - Un seul écran de certification, un seul comptage par scan, dans les deux parcours.
 - Le parcours A ne dépend pas de FastAPI : si FastAPI répond 503, proposer de scanner avec l'appareil photo du téléphone.
-- Consulter un passeport à partir de son code (ancienne route FastAPI `GET /qr/passeport/{code}`) : c'est `GET /api/passeports/verifier/{code}/` de Django.
+- Consulter un passeport à partir de son code : c'est `GET /api/passeports/verifier/{code}/` de Django (`GET /qr/passeport/{code}` n'existe pas côté FastAPI : 404).
 
 ## 7. Sécurité
 
@@ -135,7 +135,7 @@ B. Scanner intégré ou saisie manuelle (application)
 | Énumération des codes | Aucun oracle ajouté : un code bien formé se décode de la même façon qu'il existe ou non ; seule la vérification Django (limitée à 600/h par IP) répond sur l'existence |
 | Données | Aucune : ni droit PostgreSQL, ni appel à Django, ni cache |
 | Recopie de la saisie | Jamais (réponse, journaux) ; messages d'erreur fixes |
-| Taille | 512 caractères au plus (1 Mo renvoyait 3 Mo avec l'ancienne maquette) |
+| Taille | 512 caractères au plus ; corps au-delà de `MAX_REQUEST_BODY_BYTES` (128 Kio) refusé en 413 avant lecture |
 | État | Aucun (fonctions pures, constantes immuables) : plusieurs workers et redémarrages sans effet |
 | Débit | `qr_scan` 600/h par IP ; un refus compte aussi |
 
@@ -148,50 +148,48 @@ B. Scanner intégré ou saisie manuelle (application)
 
 `FRONTEND_BASE_URL` : ni paramètres, ni fragment, ni identifiants, port numérique (refus au démarrage), comme `PUBLIC_BASE_URL` et `MEDIA_BASE_URL`.
 
-## 9. Changements de contrat (module 3)
+## 9. Points du contrat à connaître côté frontend
 
-Aucun consommateur dans le dépôt (frontend vide) : changements assumés.
-
-| Avant | Après |
+| Point | Comportement |
 |---|---|
-| `POST /qr/scan` renvoyait un « certificat » (12 champs : `valide`, `produit_nom`, `nb_scans`…) tiré de 3 passeports écrits en dur | 2 champs : `code_passeport`, `url_verification_publique` ; le certificat est celui de Django |
-| `GET /qr/passeport/{code}` | **Supprimée** (404) : utiliser Django `GET /api/passeports/verifier/{code}/` |
-| Contenu non reconnu : 200 `valide: false` | 400 avec code machine |
-| Code cherché n'importe où, tout domaine accepté | Règles du § 5 |
-| URL de vérification `https://anitche.ci/qr/verifier/…` en dur | Construite depuis `FRONTEND_BASE_URL`, comme Django |
-| `qr_data` sans taille, recopié dans la réponse | 512 caractères au plus, jamais recopié |
+| Réponse de `POST /qr/scan` | 2 champs : `code_passeport`, `url_verification_publique` ; aucun certificat (celui de Django fait foi) |
+| `GET /qr/passeport/{code}` | N'existe pas (404) : utiliser Django `GET /api/passeports/verifier/{code}/` |
+| Contenu non reconnu | 400 avec code machine, jamais 200 `valide: false` |
+| Domaine accepté | Règles du § 5 : origine de `FRONTEND_BASE_URL` seule |
+| URL de vérification | Construite depuis `FRONTEND_BASE_URL`, comme Django |
+| `qr_data` | 512 caractères au plus, jamais recopié |
 
-## 10. Failles corrigées (diagnostic de septembre 2026)
+## 10. Sécurité — risques couverts
 
-| # | Avant | Après |
-|---|---|---|
-| 1 | 3 passeports inventés, format différent de Django ; aucun vrai code reconnu | Aucune donnée ; format de Django (test de parité) |
-| 2 | Compteur de scans en mémoire, par processus, jamais écrit, incrémenté aussi par une simple consultation | Supprimé : Django compte et journalise |
-| 3 | Tout contenu contenant un code « certifié », quel que soit le domaine (7 URL piégées certifiées) | Origine de `FRONTEND_BASE_URL` seule, comparée champ par champ |
-| 4 | 200 `valide: false` | 400 avec code machine |
-| 5 | Aucune taille maximale, saisie recopiée jusqu'à 3 fois | 512 caractères, aucune recopie |
-| 6 | Extraction par `re.search` + `IGNORECASE` (`ſ`, `ı`, chiffres Unicode, texte autour, premier code gagnant) | Règles strictes, ASCII |
-| 6 bis | Saisies légitimes refusées (espaces, sans tirets, tirets typographiques) | Acceptées |
-| 7 | Champs différents de la réponse publique de Django | Plus de certificat côté FastAPI |
-| A | Routes synchrones (pool de threads) | `async` |
+| Risque | Protection |
+|---|---|
+| Passeport inventé ou code au mauvais format reconnu | Aucune donnée côté FastAPI ; format de Django (test de parité) |
+| Compteur de scans par processus, faux avec plusieurs workers | Aucun compteur : Django compte et journalise |
+| Contenu « certifié » quel que soit le domaine (URL piégées) | Origine de `FRONTEND_BASE_URL` seule, comparée champ par champ |
+| Refus confondu avec un succès | 400 avec code machine, jamais 200 |
+| Saisie énorme ou recopiée dans la réponse | 512 caractères, aucune recopie |
+| Extraction trop permissive (`ſ`, `ı`, chiffres Unicode, texte autour, premier code trouvé) | Règles strictes, ASCII, pas de recherche par regex |
+| Saisies légitimes refusées (espaces, sans tirets, tirets typographiques) | Acceptées et ramenées à la forme canonique |
+| Réponse prise pour un certificat | Aucun champ de certificat côté FastAPI |
+| Pool de threads occupé sans raison | Route `async` (aucune E/S) |
 
 ## 11. Tests
 
 `tests/test_scan_qr.py` (157 tests, sans base ni Django) :
 
-- les **38 cas du prototype** du rapport de diagnostic (10 saisies acceptées, 27 contournements refusés avec le bon code, origine de dev) ;
+- les **38 cas de référence** (`PROTOTYPE_ACCEPTED`, `PROTOTYPE_REFUSED` : 10 saisies acceptées, 27 contournements refusés avec le bon code, origine de dev) ;
 - autres cas du décodeur : chaque tiret et espace typographique, port par défaut explicite, 16 codes invalides, 26 URL étrangères ou piégées (espaces, contrôles, caractères invisibles, identifiants, ports invalides, pleine chasse, punycode, `%2E`, schéma sans `//`, crochets, NFKC), 15 liens ANITCHE qui ne sont pas des passeports ; origine seule (schéma, hôte, port) ; chemin de base de `FRONTEND_BASE_URL` ;
 - validation (absent, `null`, nombre, liste, vide, espaces seuls, 512 acceptés, 513 refusés, corps de 1 Mo) ;
 - **aucune recopie** de la saisie dans la réponse ni dans les journaux (tous niveaux) ;
 - réponse : 2 champs, URL construite comme Django pour 4 valeurs de `FRONTEND_BASE_URL` ; aucun oracle d'existence ;
-- isolation : 0 requête SQL, 0 appel à Django, seules les clés de limite dans Redis ; réponses identiques d'un appel à l'autre ; aucun objet modifiable au niveau des modules ; ancien service supprimé ; route `async` ;
+- isolation : 0 requête SQL, 0 appel à Django, seules les clés de limite dans Redis ; réponses identiques d'un appel à l'autre ; aucun objet modifiable au niveau des modules ; aucun module `app.services.qr_service` ; route `async` ;
 - routes : `GET /qr/passeport/…` → 404, `GET /qr/scan` → 405, OpenAPI (400 documenté avec les 3 codes, 2 champs, `maxLength` 512) ;
 - limite `qr_scan` : 429 au format commun avec `Retry-After`, par IP, un refus compte ;
 - parité avec Django : chemin `CHEMIN_VERIFICATION_PUBLIQUE`, format de `generer_code_passeport`, même `FRONTEND_BASE_URL` dans les composes.
 
 Test des tests (mutations temporaires du décodeur, toutes détectées) : contrôle par préfixe au lieu de l'origine, antislash accepté, `re.IGNORECASE` sur le code, `@` accepté, chemin comparé en majuscules sans contrôle ASCII, espaces et contrôles acceptés ; recopie de la saisie dans la réponse ou le journal, taille maximale retirée.
 
-Adaptés (même intention, nouveau contrat) : 4 tests de `tests/test_api.py` ; la liste des routes de `tests/test_core_rate_limit.py` (une seule route QR) ; `tests/test_core_settings.py` (`FRONTEND_BASE_URL` malformée refusée). Aucun test d'intégration : ni base ni vue.
+Ailleurs : 4 tests de `tests/test_api.py` ; la liste des routes de `tests/test_core_rate_limit.py` (une seule route QR) ; `tests/test_core_settings.py` (`FRONTEND_BASE_URL` malformée refusée). Aucun test d'intégration : ni base ni vue.
 
 ## 12. Collection Postman
 
@@ -202,4 +200,4 @@ Adaptés (même intention, nouveau contrat) : 4 tests de `tests/test_api.py` ; l
 - **À fixer AVANT toute impression de QR** : le domaine (`anitche.com` ou `anitche.ci` : le dépôt mentionne les deux, [`MODULE_PASSEPORT_QR.md`](./MODULE_PASSEPORT_QR.md) § 9) et la page frontend `/qr/verifier/:code` (elle n'existe pas encore). L'URL est figée dès l'impression, et le décodeur n'accepte que l'origine de `FRONTEND_BASE_URL`.
 - **Si le domaine change après impression** : ajouter un réglage `QR_ACCEPTED_ORIGINS` (origines `https://` en prod, validées au démarrage) pour que les QR déjà imprimés restent lisibles. Pas avant : aucun besoin aujourd'hui.
 - Côté Django (hors périmètre de ce module) : le 404 de la vérification publique recopie la saisie en majuscules et sans limite de longueur dans `detail` et dans le journal ; `.strip().upper()` y transforme aussi `ſ` et `ı` (sans effet sur les vrais codes, hexadécimaux) ; `FRONTEND_BASE_URL` n'y est pas validée en prod. À traiter à la reprise du module Django.
-- nginx accepte des corps de 20 Mo sur `/fast/` ; FastAPI lit le JSON entier avant la validation (20 Mo refusés en 0,04 s, mesuré). Un `client_max_body_size` plus bas pour `/fast/` relève de l'étape hébergement.
+- nginx accepte des corps de 20 Mo sur `/fast/` ; FastAPI les refuse en 413 au-delà de `MAX_REQUEST_BODY_BYTES` (128 Kio), sans lire le corps quand `Content-Length` le signale. Un `client_max_body_size` plus bas pour `/fast/` relève de l'étape hébergement.

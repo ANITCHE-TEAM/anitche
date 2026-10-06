@@ -1,7 +1,7 @@
 # Module conseiller IA — contrat et règles
 
 > Périmètre : backend FastAPI, `backend-fastapi/app/` (routeur `routeurs/conseiller_ia.py`, service `services/conseiller/`, modèles `modeles/conseiller_ia.py`, limite de taille des corps `core/body_limit.py`).
-> État : refonte de septembre 2026 (module 4 de la refonte FastAPI). **Aucune vraie IA n'est intégrée** (décision d'équipe) : le fournisseur actif est un fournisseur **simulé**, par règles, sans appel réseau ni clé. L'architecture accueille plus tard n'importe quel fournisseur (Gemini, OpenAI, Anthropic, Mistral, modèle local…) avec **un fichier adaptateur, une ligne de registre et une configuration**, sans toucher aux routes, aux schémas de réponse, au frontend ni aux tests existants (§ 10).
+> **Aucune vraie IA n'est intégrée** (décision d'équipe) : le fournisseur actif est un fournisseur **simulé**, par règles, sans appel réseau ni clé. L'architecture accueille plus tard n'importe quel fournisseur (Gemini, OpenAI, Anthropic, Mistral, modèle local…) avec **un fichier adaptateur, une ligne de registre et une configuration**, sans toucher aux routes, aux schémas de réponse, au frontend ni aux tests existants (§ 10).
 
 ## 1. Rôle
 
@@ -10,13 +10,13 @@
 | `POST /ia/conseil` | Conversation de shopping : le client décrit un besoin (occasion, style, budget, catégories) ; le conseiller répond par un message, au plus **4 produits** du catalogue avec une justification chacun, et des conseils généraux |
 | `POST /ia/recommandations` | Sélection de **8 produits** au plus selon des catégories et un budget |
 
-Les produits viennent **toujours du vrai catalogue** (vues publiques de Django, par la recherche du module 2), visibles et **en stock**, au plus au prix du budget. Un fournisseur, quel qu'il soit, ne peut ni inventer un produit ni changer un prix : il choisit parmi une liste, et sa réponse est revalidée (§ 6).
+Les produits viennent **toujours du vrai catalogue** (vues publiques de Django, par la recherche publique), visibles et **en stock**, au plus au prix du budget. Un fournisseur, quel qu'il soit, ne peut ni inventer un produit ni changer un prix : il choisit parmi une liste, et sa réponse est revalidée (§ 6).
 
 ## 2. Ce sur quoi le module s'appuie
 
 | Dépendance | Usage |
 |---|---|
-| Recherche du module 2 (`services/search.py` : `SearchFilters`, `fetch_page`, `product_result`) | Candidats : mêmes vues, même tolérance aux accents et aux fautes, même forme de produit. **Non modifiée** ([`MODULE_RECHERCHE.md`](./MODULE_RECHERCHE.md)) |
+| Recherche publique (`services/search.py` : `SearchFilters`, `fetch_page`, `product_result`) | Candidats : mêmes vues, même tolérance aux accents et aux fautes, même forme de produit. **Non modifiée** ([`MODULE_RECHERCHE.md`](./MODULE_RECHERCHE.md)) |
 | Authentification du socle (`core/auth.py`) | Jeton `access` de Django, vérifié par Django (tout rôle) |
 | Redis (base 2) | Limites de débit par utilisateur ; compteur du garde-fou de budget (§ 7) |
 | Aucune autre base, aucun appel réseau | Le fournisseur simulé ne sort pas du processus ; FastAPI ne garde aucune conversation |
@@ -104,7 +104,7 @@ Réponse 200 (données de démonstration ; un seul des 3 produits montré) :
 {"categories": ["mode", "beaute"], "budget_max": 20000}
 ```
 
-Les deux champs sont facultatifs (`{}` : tout le catalogue) ; mêmes règles que ci-dessus ; tout autre champ, dont les anciens `utilisateur_id` et `categories_preferees`, est refusé (400). Réponse : `{"recommandations": [ …8 produits au plus, même forme… ], "source": "regles"}`.
+Les deux champs sont facultatifs (`{}` : tout le catalogue) ; mêmes règles que ci-dessus ; tout autre champ, dont `utilisateur_id` et `categories_preferees`, est refusé (400). Réponse : `{"recommandations": [ …8 produits au plus, même forme… ], "source": "regles"}`.
 
 ### Erreurs
 
@@ -201,21 +201,19 @@ Aucun SDK : `httpx` suffit (déjà une dépendance). Étapes :
 
 Règles communes (docstring de `base.py`) : consignes **fixes** dans l'adaptateur ; historique du client (y compris `assistant`) placé comme **donnée**, jamais dans les consignes ; ne choisir que parmi `demande.candidats` ; lever `ErreurFournisseurIA` en cas d'échec ; ne jamais journaliser l'historique, la réponse ni la clé. Le service fait le reste : délai, garde-fou, validation, repli. Routes, schémas, frontend et tests existants **ne changent pas**. Un squelette commenté figure dans le rapport d'étape (`_archives/rapport_fastapi_module4.md`, § 2 b).
 
-## 11. Changements de contrat (module 4)
+## 11. Points du contrat à connaître côté frontend
 
-Aucun consommateur n'existait (vérifié : aucun appel dans le frontend).
-
-| Avant | Après |
+| Point | Comportement |
 |---|---|
-| Routes publiques, limite par IP (20/h partagés) | Authentifiées, limites par utilisateur (20/h et 120/h) |
-| 6 produits inventés (ids 1 à 6, absents du catalogue) | Produits visibles et en stock du vrai catalogue |
-| Produit : `id`, `nom`, `boutique` (**nom**), `prix`, `image_url` (toujours `null`), `justification` | Champs d'un résultat de recherche (`slug`, `prix_min`, `image_principale`, `boutique` = **id**…) + `justification` |
-| `budget_max` décimal (0 = sans budget, `NaN` accepté) | Entier de 1 à 9 999 999 999 |
-| Rôles `user`, `assistant`, `system` ; aucune taille | `user` et `assistant`, dernier `user` ; tailles bornées |
-| `utilisateur_id` accepté puis ignoré ; champs inconnus ignorés | Refusés (400) |
-| `categories_preferees` (noms, sous-chaîne) | `categories` (slugs ou ids, comme la recherche) |
-| — | `source` dans les deux réponses |
-| Corps de toute taille (20 Mo par nginx) | 413 au-delà de 128 Kio, toutes routes FastAPI |
+| Accès | Routes authentifiées, limites par utilisateur (20/h et 120/h) |
+| Produits proposés | Produits visibles et en stock du vrai catalogue |
+| Forme d'un produit | Champs d'un résultat de recherche (`slug`, `prix_min`, `image_principale`, `boutique` = **id**…) + `justification` |
+| `budget_max` | Entier de 1 à 9 999 999 999 |
+| `messages` | Rôles `user` et `assistant`, dernier message `user` ; tailles bornées (`system` refusé) |
+| Champs inconnus (dont `utilisateur_id`) | Refusés (400) |
+| Catégories | `categories` (slugs ou ids, comme la recherche) ; `categories_preferees` refusé |
+| `source` | Présent dans les deux réponses |
+| Taille du corps | 413 au-delà de 128 Kio, toutes routes FastAPI |
 
 ## 12. Tests
 
