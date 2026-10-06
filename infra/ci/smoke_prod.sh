@@ -69,6 +69,7 @@ ko() {
 statut_attendu() { [ "$STATUT" = "$1" ] || ko "statut $STATUT, $1 attendu"; }
 entete_attendu() { grep -qi -E "^$1:.*$2" "$TMP/entetes" || ko "en-tête $1 absent ou différent de /$2/"; }
 corps_attendu() { grep -q -E "$1" "$TMP/corps" || ko "corps sans /$1/"; }
+corps_json_valide() { python3 -c 'import json, sys; json.load(sys.stdin)' < "$TMP/corps" 2>/dev/null || ko "corps qui n'est pas du JSON valide"; }
 conclure() { if [ "$COURANT_OK" = 1 ]; then echo "✅ $DESCRIPTION"; fi; return 0; }
 
 # Une vérification qui ne passe pas par curl (conteneurs, commandes).
@@ -161,7 +162,7 @@ verifier_routage() {
     statut_attendu 301; entete_attendu location "https://$HOTE/api/catalogue/categories/"; conclure
 
     appel "/api/ garde son préfixe (Django répond en JSON)" GET "$URL/api/catalogue/categories/"
-    statut_attendu 200; entete_attendu content-type "application/json"; corps_attendu '"results"'
+    statut_attendu 200; entete_attendu content-type "application/json"; corps_json_valide
     entete_attendu strict-transport-security "max-age="; conclure
 
     appel "Route publique, jeton expiré ignoré" GET "$URL/api/catalogue/categories/" \
