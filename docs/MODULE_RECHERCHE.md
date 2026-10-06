@@ -54,6 +54,7 @@ Réponse : **même enveloppe et mêmes champs que la liste Django**, plus `facet
       "id": 41, "nom": "Beurre de karité pur", "slug": "beurre-de-karite-pur-3d85cf",
       "prix_base": "3500.00", "prix_min": 3500.0,
       "image_principale": "http://localhost:8000/media/catalogue/produits/2026/09/produit_GJzjrY5.png",
+      "miniature_principale": "http://localhost:8000/media/catalogue/miniatures/2026/09/produit_GJzjrY5.webp",
       "categorie": 8, "categorie_nom": "Beauté",
       "boutique": 14, "boutique_nom": "Karité Doré", "boutique_slug": "karite-dore",
       "en_stock": true, "date_creation": "2026-09-27T20:27:03.031043Z"
@@ -70,6 +71,8 @@ Réponse : **même enveloppe et mêmes champs que la liste Django**, plus `facet
 - Champs d'un produit identiques à `ProduitPublicListSerializer` (vérifié sur la démo : 18 produits, 0 écart de valeur). Seule différence : produit **sans catégorie** → `categorie_nom: null` (Django **omet** la clé).
 - **Jamais de stock exact** : seulement `en_stock` (au moins une variante active en stock). Ni description, ni SKU, ni seuil d'alerte.
 - `image_principale` : `MEDIA_BASE_URL` + chemin de l'image, encodé comme Django ; `null` sans image.
+- `miniature_principale` : URL absolue (même construction que `image_principale`) de la miniature WebP, 480 px de large au plus, **de la même image que `image_principale`** (jamais celle d'une autre image du produit). Clé toujours présente ; `null` tant que la miniature n'est pas générée (`python manage.py generer_miniatures`, [`MODULE_CATALOGUE.md`](./MODULE_CATALOGUE.md) § 3 ter) ou sans image : afficher alors `image_principale`. Colonne de la vue `catalogue_produit_public` (migration Django `catalogue/0005`, qui doit être appliquée **avant** le déploiement de FastAPI : sans elle, la requête de la recherche échoue). Le conseiller IA renvoie le même champ ([`MODULE_IA.md`](./MODULE_IA.md) § 4).
+- **Jeton ignoré** : `/recherche/produits` et `/recherche/suggestions` sont publiques et n'examinent jamais l'en-tête `Authorization`. Un jeton expiré, révoqué ou malformé donne la même réponse qu'une requête sans en-tête, sans appel à Django : ne jamais rafraîchir ni rejouer le jeton sur ces routes. La limite de débit est **par IP**, connecté ou non.
 - `next` / `previous` : URL absolues construites avec `PUBLIC_BASE_URL` (jamais l'en-tête `Host`), filtres validés conservés, triés ; `previous` de la page 2 sans `page` (comme DRF).
 - `count` et `facettes` peuvent avoir **60 s de retard** (cache, § 7) ; `results` jamais.
 - `facettes` : en **page 1 seulement** (`null` ensuite).
@@ -215,7 +218,8 @@ Sur des catalogues synthétiques de 10 000 et 100 000 produits (mesures ponctuel
 ## 13. Tests
 
 - `tests/test_recherche.py` : paramètres (chaque 400), SQL (valeurs toujours en paramètres, 3 vues seulement, échappement après normalisation, filtres, tris), réponse (champs exacts de Django, URL, liens), cache (facettes et suggestions en cache, résultats jamais, désactivable, panne de Redis), pannes PostgreSQL (503), aucune donnée en dur ni état global.
-- `tests/integration/test_recherche_vues.py` (vraies vues des migrations Django, rôle en lecture seule, Redis base 15) : produit masqué dans Django (produit désactivé, sans variante, variantes inactives, boutique suspendue ou fermée, vendeur KYC en attente ou refusé, vendeur inactif, propriétaire client) invisible partout ; masquage effectif à la requête suivante ; prix, stock et image comme Django ; sous-catégories ; accents et fautes (`baoule` → « Robe Baoulé ») ; paliers ; facettes cohérentes avec les résultats filtrés ; `%`, `_`, `\` et leurs formes pleine chasse ; tri et pages ; 2e appel sans SQL pour les facettes ; aucune table du catalogue lisible ; index utilisables (plans générique et personnalisé) ; `plan_cache_mode` du pool.
+- `tests/test_routes_publiques_jeton.py` : jeton expiré, révoqué, malformé (espaces, caractères, trop long, `Bearer` vide, autre schéma) sur `/recherche/produits`, `/recherche/suggestions` et `/qr/scan` : réponse identique à celle sans en-tête, aucun `WWW-Authenticate`, **0 appel à Django** (même Django en panne).
+- `tests/integration/test_recherche_vues.py` (vraies vues des migrations Django, rôle en lecture seule, Redis base 15) : produit masqué dans Django (produit désactivé, sans variante, variantes inactives, boutique suspendue ou fermée, vendeur KYC en attente ou refusé, vendeur inactif, propriétaire client) invisible partout ; masquage effectif à la requête suivante ; prix, stock, image et miniature (de la même image) comme Django ; sous-catégories ; accents et fautes (`baoule` → « Robe Baoulé ») ; paliers ; facettes cohérentes avec les résultats filtrés ; `%`, `_`, `\` et leurs formes pleine chasse ; tri et pages ; 2e appel sans SQL pour les facettes ; aucune table du catalogue lisible ; index utilisables (plans générique et personnalisé) ; `plan_cache_mode` du pool.
 - `tests/integration/test_postgres_readonly.py` : droits de table du rôle = exactement les 3 vues.
 
 Commandes locales : [`MODULE_SUIVI_GPS.md`](./MODULE_SUIVI_GPS.md) § 11 (même base de test `anitche_fastapi_test`, à migrer à nouveau après une nouvelle migration Django, puis relancer le script de droits).

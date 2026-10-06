@@ -82,6 +82,7 @@ Réponse 200 (données de démonstration ; un seul des 3 produits montré) :
       "id": 34, "nom": "Sac en pagne tissé", "slug": "sac-en-pagne-tisse-4d5e6f",
       "prix_base": "9500.00", "prix_min": 9500.0,
       "image_principale": "http://localhost:8000/media/catalogue/produits/2026/09/produit.png",
+      "miniature_principale": "http://localhost:8000/media/catalogue/miniatures/2026/09/produit.webp",
       "categorie": 5, "categorie_nom": "Mode", "boutique": 11, "boutique_nom": "Pagnes & Style",
       "boutique_slug": "pagnes-style", "en_stock": true, "date_creation": "2026-09-27T20:27:03.031043Z",
       "justification": "Pagne : une valeur sûre pour une cérémonie. 9 500 FCFA, dans votre budget."
@@ -207,7 +208,7 @@ Règles communes (docstring de `base.py`) : consignes **fixes** dans l'adaptateu
 |---|---|
 | Accès | Routes authentifiées, limites par utilisateur (20/h et 120/h) |
 | Produits proposés | Produits visibles et en stock du vrai catalogue |
-| Forme d'un produit | Champs d'un résultat de recherche (`slug`, `prix_min`, `image_principale`, `boutique` = **id**…) + `justification` |
+| Forme d'un produit | Champs d'un résultat de recherche (`slug`, `prix_min`, `image_principale`, `miniature_principale`, `boutique` = **id**…) + `justification`. `/ia/conseil` (`produits_suggeres`) et `/ia/recommandations` (`recommandations`) renvoient donc aussi `miniature_principale` (miniature WebP de la même image que `image_principale`, `null` si absente : se replier sur `image_principale`) ; champ ajouté, rien d'existant ne change |
 | `budget_max` | Entier de 1 à 9 999 999 999 |
 | `messages` | Rôles `user` et `assistant`, dernier message `user` ; tailles bornées (`system` refusé) |
 | Champs inconnus (dont `utilisateur_id`) | Refusés (400) |

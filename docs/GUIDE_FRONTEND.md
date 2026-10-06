@@ -247,9 +247,12 @@ Second backend, pour le temps réel et les services rapides : **suivi GPS du liv
 | HTTP | `http://localhost:8001` (`VITE_FASTAPI_URL`) | `https://anitche.com/fast` |
 | WebSocket | `ws://localhost:8001` | `wss://anitche.com/fast` |
 
+- **Contrat** : le fichier versionné [`backend-fastapi/openapi.json`](../backend-fastapi/openapi.json) (OpenAPI 3.1) décrit toutes les routes HTTP de `/fast`. `/openapi.json` est fermé en production : ne jamais en dépendre à l'exécution. Les chemins y sont **sans** le préfixe `/fast` (c'est la base de l'URL, tableau ci-dessus) ; le WebSocket n'y figure pas (voir `MODULE_SUIVI_GPS.md` § 7). Types : `npx openapi-typescript ../backend-fastapi/openapi.json -o …`, à relancer à chaque modification du fichier.
+- **Régénérer** (côté backend, après un changement de route ou de modèle) : `cd backend-fastapi && python scripts/exporter_openapi.py` ; la CI (`--check`) échoue si le fichier n'est pas à jour. Détails : `MODULE_SUIVI_GPS.md` § 11.
 - **HTTP** : le **même jeton `access` que Django** (§ 4), en-tête `Authorization: Bearer <access>`. Sur **401**, rafraîchir le jeton auprès de Django (§ 4) puis rejouer : l'intercepteur axios de Django convient.
 - **Format d'erreur** : identique à Django (§ 5). Les refus du suivi portent un **code machine** : se fier à `errors.code[0]`, **jamais au texte** de `detail`.
 - **429** : en-tête `Retry-After`, exposé par CORS (§ 7).
+- **Routes publiques** (`/recherche/produits`, `/recherche/suggestions`, `/qr/scan`) : l'en-tête `Authorization` est **ignoré**. Un jeton expiré, révoqué ou malformé ne produit jamais de 401 : ne pas rafraîchir ni rejouer le jeton sur ces routes. Les routes `/ia/*` et le suivi GPS restent authentifiées (401 comme ci-dessus).
 - **413** `errors.code[0] = "corps_trop_volumineux"` : corps de requête au-delà de 128 Kio, sur toutes les routes FastAPI (aucune requête légitime n'en approche).
 
 ### Suivi GPS : qui fait quoi
@@ -550,7 +553,7 @@ await api.post(`/api/paiements/simulation/${reference}/`, { statut: 'succes' });
 
 - **Liste** (`GET /api/catalogue/produits/`) : afficher `miniature_principale` (WebP, 480 px de large au plus, quelques dizaines de Ko), avec **repli sur `image_principale`** quand elle est `null`. **Fiche et galerie** : chaque image a `miniature` (`null` si absente) à côté de `image` ; l'original sert au zoom.
 - Dimensionner la vignette d'après sa largeur d'affichage (jamais plus de 480 px utiles) ; réserver sa hauteur (rapport 4/3 ou carré) pour éviter les sauts de mise en page.
-- La liste **FastAPI** `/recherche/produits` ne renvoie pas encore `miniature_principale` : tant que la branche FastAPI ne l'a pas ajoutée, repli sur `image_principale` pour ces écrans.
+- La liste **FastAPI** `/recherche/produits` renvoie aussi `miniature_principale` (même forme, même repli sur `image_principale` si `null`), ainsi que `/ia/conseil` (`produits_suggeres`) et `/ia/recommandations` (`recommandations`) : un seul composant « carte produit » sert les trois listes.
 - Espace vendeur : `POST …/images/` renvoie `miniature` dans la réponse (générée pendant l'envoi). Une miniature `null` n'est pas une erreur : l'image est bien enregistrée.
 
 ### 15.3 Périmètres « mes achats » et « mes tickets »

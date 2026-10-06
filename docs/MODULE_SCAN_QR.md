@@ -38,7 +38,7 @@ Aucun passeport écrit en dur, aucun compteur de scans en mémoire, aucun domain
 
 ## 4. Contrat HTTP
 
-Base : `http://localhost:8001` en dev, `https://anitche.com/fast` en prod ([`GUIDE_FRONTEND.md`](./GUIDE_FRONTEND.md) § 12). Route **publique** (aucun jeton), limitée à **600 appels par heure et par IP** (scope `qr_scan`).
+Base : `http://localhost:8001` en dev, `https://anitche.com/fast` en prod ([`GUIDE_FRONTEND.md`](./GUIDE_FRONTEND.md) § 12). Route **publique** (aucun jeton), limitée à **600 appels par heure et par IP** (scope `qr_scan`). L'en-tête `Authorization` n'est **jamais examiné** : un jeton expiré, révoqué ou malformé donne la même réponse que sans jeton, sans appel à Django (ne jamais rafraîchir ni rejouer le jeton sur cette route ; test : `tests/test_routes_publiques_jeton.py`).
 
 ### `POST /qr/scan`
 
