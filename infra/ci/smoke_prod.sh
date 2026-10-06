@@ -83,7 +83,7 @@ marquer() {
 refuser_prod() {
     local libelle="$1" variable="$2" sortie code
     marquer "prod.py refuse $libelle"
-    sortie="$(timeout 120 compose run --rm --no-deps -T -e "$variable" backend-django \
+    sortie="$(timeout 120 bash infra/ci/compose.sh run --rm --no-deps -T -e "$variable" backend-django \
         python -c "import config.settings.prod" 2>&1)"
     code=$?
     printf '%s\n' "$sortie" | tail -n 5 > "$TMP/corps"
@@ -98,7 +98,7 @@ refuser_prod() {
 refus_demarrage() {
     local sortie code
     marquer "prod.py accepte l'environnement de CI (témoin)"
-    sortie="$(timeout 120 compose run --rm --no-deps -T backend-django python -c "import config.settings.prod" 2>&1)"
+    sortie="$(timeout 120 bash infra/ci/compose.sh run --rm --no-deps -T backend-django python -c "import config.settings.prod" 2>&1)"
     code=$?
     if [ "$code" -ne 0 ]; then
         printf '%s\n' "$sortie" | tail -n 5 > "$TMP/corps"
@@ -127,7 +127,7 @@ attendre() {
 
 preparer_donnees() {
     # Jeton d'accès expiré, fabriqué dans le conteneur avec sa SECRET_KEY.
-    JETON_EXPIRE="$(timeout 90 compose exec -T backend-django python manage.py shell -c "
+    JETON_EXPIRE="$(timeout 90 bash infra/ci/compose.sh exec -T backend-django python manage.py shell -c "
 from datetime import timedelta
 from rest_framework_simplejwt.tokens import AccessToken
 jeton = AccessToken()
@@ -145,7 +145,7 @@ print(jeton)
 
     # Un fichier par dossier média : un public (catalogue/produits), trois privés.
     marquer "Écriture des fichiers de test dans le volume média"
-    if ! timeout 60 compose exec -T backend-django sh -c '
+    if ! timeout 60 bash infra/ci/compose.sh exec -T backend-django sh -c '
         mkdir -p /app/media/catalogue/produits /app/media/kyc /app/media/support/pieces_jointes /app/media/retours/preuves &&
         echo public > /app/media/catalogue/produits/ci.txt &&
         echo prive > /app/media/kyc/ci.txt &&
@@ -224,7 +224,7 @@ verifier_route_interne() {
     done
 
     marquer "Témoin : FastAPI joint la route interne de Django sur le réseau Docker"
-    code="$(timeout 60 compose exec -T backend-fastapi python -c "
+    code="$(timeout 60 bash infra/ci/compose.sh exec -T backend-fastapi python -c "
 import urllib.request, urllib.error
 try:
     print(urllib.request.urlopen('http://backend-django:8000/api/utilisateurs/jeton/verification/', timeout=5).status)
@@ -281,7 +281,7 @@ verifier_conteneurs() {
     done
 
     marquer "Worker Celery joint le broker (ping)"
-    if ! timeout 90 compose exec -T celery-worker celery -A config inspect ping --timeout 10 > "$TMP/corps" 2>&1 \
+    if ! timeout 90 bash infra/ci/compose.sh exec -T celery-worker celery -A config inspect ping --timeout 10 > "$TMP/corps" 2>&1 \
             || ! grep -q pong "$TMP/corps"; then
         ko "pas de pong"
     fi
