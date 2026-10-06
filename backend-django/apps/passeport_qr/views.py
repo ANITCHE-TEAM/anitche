@@ -18,6 +18,7 @@ from .serializers import (
     origine_desactivation,
 )
 from apps.catalogue.models import Produit
+from apps.core.authentification import JWTAuthentificationOptionnelle
 from apps.core.reseau import adresse_ip_client
 from drf_spectacular.utils import PolymorphicProxySerializer, extend_schema, extend_schema_view
 
@@ -47,6 +48,8 @@ def passeports_accessibles(utilisateur):
 class PasseportPublicVerificationView(APIView):
     """Consultation publique et vérification d'authenticité d'un produit via son code passeport."""
 
+    # Un jeton refusé (expiré, révoqué) est ignoré : le scan reste public.
+    authentication_classes = [JWTAuthentificationOptionnelle]
     permission_classes = [AllowAny]
     # Limite dédiée, par IP : les clients d'un même opérateur mobile
     # partagent souvent une IP publique (CGNAT), le taux 'anon' global

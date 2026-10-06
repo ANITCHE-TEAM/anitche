@@ -2,6 +2,7 @@ import io
 import os
 import shutil
 import tempfile
+from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest import mock, skipUnless
@@ -19,6 +20,7 @@ from PIL import Image
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework.throttling import SimpleRateThrottle
+from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.commandes.models import Commande, CommandeItem
 from apps.panier.models import Panier, PanierItem
@@ -929,6 +931,38 @@ class CatalogueDebitTests(CatalogueEspacesBase):
             ).status_code)
             codes.append(self.client.get(URL_P + 'produits/', REMOTE_ADDR='8.8.8.8').status_code)
         self.assertEqual(codes, [200, 200, 200, 429, 429, 200])
+
+    def test_limite_par_compte_avec_un_jeton_valide(self):
+        """Un jeton valide identifie le compte : deux clients connectés derrière
+        la même IP (CGNAT) ont chacun leur seau ; un jeton expiré compte par IP."""
+        def get(utilisateur=None, expire=False):
+            entetes = {}
+            if utilisateur:
+                jeton = AccessToken.for_user(utilisateur)
+                if expire:
+                    jeton.set_exp(lifetime=timedelta(seconds=-1))
+                entetes['HTTP_AUTHORIZATION'] = f'Bearer {jeton}'
+            return self.client.get(URL_P + 'produits/', REMOTE_ADDR='9.9.9.9', **entetes).status_code
+
+        with mock.patch.object(SimpleRateThrottle, 'THROTTLE_RATES', {'catalogue_public': '2/hour'}):
+            codes_client = [get(self.client_user) for _ in range(3)]
+            codes_vendeur = [get(self.vendeur1) for _ in range(2)]
+            codes_ip = [get(self.vendeur2, expire=True) for _ in range(3)]
+        self.assertEqual(codes_client, [200, 200, 429])
+        self.assertEqual(codes_vendeur, [200, 200])
+        self.assertEqual(codes_ip, [200, 200, 429])
+
+    def test_jeton_expire_ignore_sur_les_routes_publiques(self):
+        """Un vieux jeton gardé par le client ne casse pas le catalogue (pas de 401)."""
+        jeton = AccessToken.for_user(self.client_user)
+        jeton.set_exp(lifetime=timedelta(seconds=-1))
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {jeton}')
+        for url in (
+            URL_P + 'categories/', f'{URL_P}categories/{self.cat_mode.slug}/',
+            URL_P + 'produits/', f'{URL_P}produits/{self.produit1.slug}/',
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(self.client.get(url).status_code, status.HTTP_200_OK)
 
 
 # =====================================================================

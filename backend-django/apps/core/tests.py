@@ -1,7 +1,15 @@
-from django.conf import settings
-from django.test import RequestFactory, SimpleTestCase, override_settings
-from rest_framework.throttling import AnonRateThrottle
+from datetime import timedelta
 
+from django.conf import settings
+from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
+from rest_framework import status
+from rest_framework.test import APIClient
+from rest_framework.throttling import AnonRateThrottle
+from rest_framework_simplejwt.tokens import AccessToken
+
+from apps.utilisateurs.models import Utilisateur
+
+from .authentification import JWTAuthentificationOptionnelle
 from .reseau import adresse_ip_client
 
 
@@ -94,3 +102,74 @@ class TauxDeLimiteParEnvironnementTests(SimpleTestCase):
         for nom in ('prod.py', 'ci.py'):
             with self.subTest(fichier=nom):
                 self.assertNotIn('THROTTLE_RATES', (dossier / nom).read_text(encoding='utf-8'))
+
+
+def jeton_expire(utilisateur):
+    jeton = AccessToken.for_user(utilisateur)
+    jeton.set_exp(lifetime=timedelta(seconds=-1))
+    return str(jeton)
+
+
+class JWTAuthentificationOptionnelleTests(TestCase):
+    """Un jeton valide authentifie ; tout jeton refusé laisse la requête
+    anonyme, sans exception (donc sans 401)."""
+
+    def setUp(self):
+        self.utilisateur = Utilisateur.objects.create_user(
+            email='optionnel@anitche.ci', password='MotDePasseSolide123!', nom='O', prenom='P',
+        )
+        self.factory = RequestFactory()
+
+    def authentifier(self, en_tete=None):
+        extra = {'HTTP_AUTHORIZATION': en_tete} if en_tete is not None else {}
+        return JWTAuthentificationOptionnelle().authenticate(self.factory.get('/', **extra))
+
+    def test_jeton_valide_authentifie_l_utilisateur(self):
+        utilisateur, jeton = self.authentifier(f'Bearer {AccessToken.for_user(self.utilisateur)}')
+        self.assertEqual(utilisateur, self.utilisateur)
+        self.assertEqual(jeton['user_id'], str(self.utilisateur.pk))
+
+    def test_sans_en_tete_anonyme(self):
+        self.assertIsNone(self.authentifier())
+
+    def test_jetons_refuses_anonymes(self):
+        entete_et_charge = str(AccessToken.for_user(self.utilisateur)).rsplit('.', 1)[0]
+        cas = {
+            'expire': f'Bearer {jeton_expire(self.utilisateur)}',
+            'malforme': 'Bearer jeton-invalide',
+            'signature_forgee': f'Bearer {entete_et_charge}.{"A" * 43}',
+            'en_tete_a_trois_parties': 'Bearer a b',
+        }
+        for nom, en_tete in cas.items():
+            with self.subTest(cas=nom):
+                self.assertIsNone(self.authentifier(en_tete))
+
+    def test_jeton_revoque_par_changement_de_mot_de_passe_anonyme(self):
+        en_tete = f'Bearer {AccessToken.for_user(self.utilisateur)}'
+        self.utilisateur.set_password('NouveauMotDePasse456!')
+        self.utilisateur.save(update_fields=['password'])
+        self.assertIsNone(self.authentifier(en_tete))
+
+    def test_compte_desactive_anonyme(self):
+        en_tete = f'Bearer {AccessToken.for_user(self.utilisateur)}'
+        self.utilisateur.is_active = False
+        self.utilisateur.save(update_fields=['is_active'])
+        self.assertIsNone(self.authentifier(en_tete))
+
+
+class RoutesStrictesJetonExpireTests(TestCase):
+    """Le panier (contenu propre au compte) et les routes protégées gardent
+    JWTAuthentication : un jeton expiré y donne 401, ce qui déclenche le
+    rafraîchissement côté client."""
+
+    def test_panier_et_profil_restent_en_401(self):
+        utilisateur = Utilisateur.objects.create_user(
+            email='strict@anitche.ci', password='MotDePasseSolide123!', nom='S', prenom='T',
+        )
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {jeton_expire(utilisateur)}')
+        for url in ('/api/panier/panier/', '/api/utilisateurs/profil/'):
+            with self.subTest(url=url):
+                response = client.get(url)
+                self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+                self.assertEqual(response.data['errors'].get('code'), ['token_not_valid'])

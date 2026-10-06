@@ -11,6 +11,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.throttling import ScopedRateThrottle
 from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 
+from apps.core.authentification import JWTAuthentificationOptionnelle
 from apps.vendeurs.permissions import BoutiqueDuVendeurNonSuspendue, EstAdministrateur, EstVendeurValide
 from .models import MAX_IMAGES_PAR_PRODUIT, Categorie, Produit, VarianteProduit, ImageProduit, Stock
 from .permissions import (
@@ -49,8 +50,11 @@ class VuePubliqueCatalogueMixin:
     """Limite dédiée, par IP pour un visiteur : parcourir le catalogue
     enchaîne beaucoup de requêtes, et derrière le CGNAT des opérateurs
     mobiles de nombreux clients partagent une IP publique. Le taux 'anon'
-    global (partagé avec toute l'API) serait épuisé en quelques minutes."""
+    global (partagé avec toute l'API) serait épuisé en quelques minutes.
 
+    Un jeton refusé (expiré, révoqué) est ignoré : la page reste publique."""
+
+    authentication_classes = [JWTAuthentificationOptionnelle]
     permission_classes = [AllowAny]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'catalogue_public'

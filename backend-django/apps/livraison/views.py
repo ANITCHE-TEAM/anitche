@@ -9,6 +9,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.commandes.services import TransitionImpossible
+from apps.core.authentification import JWTAuthentificationOptionnelle
 from apps.core.exceptions import ErreurMetier
 from drf_spectacular.utils import OpenApiParameter, PolymorphicProxySerializer, extend_schema
 
@@ -383,6 +384,8 @@ class TarifLivraisonPublicListView(APIView):
     """Menu déroulant du checkout : communes (celles du district d'Abidjan et
     les villes qui ont un tarif propre) avec le tarif appliqué à chacune, et
     le tarif des autres villes."""
+    # Un jeton refusé (expiré, révoqué) est ignoré : la grille reste publique.
+    authentication_classes = [JWTAuthentificationOptionnelle]
     permission_classes = [AllowAny]
     throttle_scope = "catalogue_public"
 

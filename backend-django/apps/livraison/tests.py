@@ -14,6 +14,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 from rest_framework.throttling import ScopedRateThrottle
+from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.commandes.models import Commande, GroupeCommande
 from apps.commandes.services import annuler_commande
@@ -1050,6 +1051,16 @@ class TarifsDeLivraisonTests(APITestCase):
         self.assertEqual(communes["Abobo"]["montant"], 1500)  # désactivée : tarif par défaut d'Abidjan
         self.assertEqual(communes["Bouaké"], {"commune": "Bouaké", "zone": "hors_abidjan", "montant": 2500})
         self.assertNotIn("Korhogo", communes)  # inactive : couverte par « autres villes »
+        self.assertEqual(r.data["autres_villes"], {"zone": "hors_abidjan", "montant": 3000})
+
+    def test_grille_publique_jeton_expire_ignore(self):
+        """Un vieux jeton gardé par le client ne casse pas le checkout (pas de 401)."""
+        jeton = AccessToken.for_user(self.client_user)
+        jeton.set_exp(lifetime=timedelta(seconds=-1))
+        api = self.api()
+        api.credentials(HTTP_AUTHORIZATION=f"Bearer {jeton}")
+        r = api.get(self.URL_PUBLIQUE)
+        self.assertEqual(r.status_code, 200)
         self.assertEqual(r.data["autres_villes"], {"zone": "hors_abidjan", "montant": 3000})
 
     def test_administration_reservee_aux_administrateurs(self):
