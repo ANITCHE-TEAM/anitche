@@ -1,7 +1,7 @@
-"""Module 4 : taille maximale du corps des requêtes (app/core/body_limit.py).
+"""Taille maximale du corps des requêtes (app/core/body_limit.py).
 
-Rapport module 3 § 5 et module 4 § 5 : FastAPI lisait et analysait tout
-le JSON reçu avant l'authentification (20 Mo acceptés par nginx).
+Sans cette limite, FastAPI lirait et analyserait tout le JSON reçu avant
+l'authentification (nginx accepte jusqu'à 20 Mo).
 """
 import asyncio
 import json

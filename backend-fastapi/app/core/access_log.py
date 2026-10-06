@@ -1,7 +1,8 @@
 """Journal d'accès : méthode, chemin, statut, durée.
 
-Remplace le journal d'accès d'uvicorn (lancé avec --no-access-log) et
-l'ancien en-tête X-Process-Time-Ms. Le chemin est journalisé SANS la chaîne
+Tient lieu du journal d'accès d'uvicorn (lancé avec --no-access-log) ; la
+durée reste côté serveur (aucun en-tête X-Process-Time-Ms n'est renvoyé au
+client). Le chemin est journalisé SANS la chaîne
 de requête, qui peut porter un jeton (WebSocket ?token=...).
 
 Middleware ASGI pur : BaseHTTPMiddleware est évité (il copie la réponse
@@ -41,9 +42,9 @@ class AccessLogMiddleware:
 class RedactWebSocketQueryString(logging.Filter):
     """Retire la chaîne de requête de la ligne de poignée de main WebSocket
     d'uvicorn (« WebSocket /chemin?... [accepted] », journal uvicorn.error),
-    écrite même avec --no-access-log. Le suivi GPS n'accepte plus de jeton
-    dans l'URL, mais un ancien client qui en enverrait un ne doit pas le
-    voir écrit dans les journaux."""
+    écrite même avec --no-access-log. Le suivi GPS n'accepte pas de jeton
+    dans l'URL, mais un client qui en enverrait un ne doit pas le voir écrit
+    dans les journaux."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         if isinstance(record.msg, str) and '"WebSocket %s"' in record.msg and isinstance(record.args, tuple):

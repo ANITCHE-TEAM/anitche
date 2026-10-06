@@ -1,4 +1,4 @@
-"""Module 0 : adresse IP du client (app/core/network.py) et /health."""
+"""Adresse IP du client (app/core/network.py) et /health."""
 import asyncio
 from types import SimpleNamespace
 

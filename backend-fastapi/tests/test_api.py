@@ -3,16 +3,16 @@ from decimal import Decimal
 from app.core.auth import CurrentUser, get_current_user
 from tests.fakes import AUTH_HEADERS, product_row
 
-# Module 0 (socle) : plus d'application globale. Chaque test reçoit la
-# fixture `client` (tests/conftest.py) : application neuve créée par
-# create_app, avec Redis, Django et PostgreSQL simulés.
+# Aucune application globale : chaque test reçoit la fixture `client`
+# (tests/conftest.py), application neuve créée par create_app, avec
+# Redis, Django et PostgreSQL simulés.
 
 
 def test_health_check(client):
-    # Module 0 : contrat de /health changé volontairement. Il vérifie
-    # PostgreSQL et Redis, sans exposer de version. Les en-têtes de sécurité
-    # (nosniff, X-Frame-Options) sont posés par nginx, et X-Process-Time-Ms
-    # est remplacé par le journal d'accès (tests/test_core_*.py).
+    # /health vérifie PostgreSQL et Redis, sans exposer de version. Les
+    # en-têtes de sécurité (nosniff, X-Frame-Options) sont posés par nginx,
+    # et la durée des requêtes va dans le journal d'accès, pas dans un
+    # en-tête (tests/test_core_*.py).
     response = client.get("/health")
     assert response.status_code == 200
     data = response.json()
@@ -21,8 +21,8 @@ def test_health_check(client):
 
 
 def test_root(client):
-    # Module 0 : l'en-tête nosniff n'est plus posé par FastAPI (nginx s'en
-    # charge), l'assertion correspondante est retirée.
+    # L'en-tête nosniff n'est pas posé par FastAPI (nginx s'en charge) :
+    # il n'est pas vérifié ici.
     response = client.get("/")
     assert response.status_code == 200
     data = response.json()
@@ -35,10 +35,9 @@ def test_root(client):
 # 1. Tests Moteur de Recherche
 # ==========================================
 
-# Module 2 : la maquette CATALOGUE_INDEX est supprimée. La recherche lit
-# les vues publiques du catalogue (PostgreSQL) ; ici, le pool simulé renvoie
-# les lignes de la vue (tests/fakes.py). Nouveau contrat : paramètres et
-# réponse de la liste Django (count/next/previous/results) plus les
+# La recherche lit les vues publiques du catalogue (PostgreSQL) ; ici, le
+# pool simulé renvoie les lignes de la vue (tests/fakes.py). Contrat :
+# paramètres et réponse de la liste Django (count/next/previous/results) plus les
 # facettes. Comportement réel (accents, fautes, visibilité) :
 # tests/integration/test_recherche_vues.py ; détail : tests/test_recherche.py.
 
@@ -86,9 +85,8 @@ def test_recherche_suggestions_autocompletion(client, db):
 # 2. Tests Conseiller Shopping IA
 # ==========================================
 
-# Module 4 : routes authentifiées, produits du vrai catalogue (lus par la
-# recherche ; ici le pool simulé), maquette de 6 produits supprimée.
-# Contrat complet : tests/test_conseiller_ia.py.
+# Routes authentifiées, produits du vrai catalogue (lus par la recherche ;
+# ici le pool simulé). Contrat complet : tests/test_conseiller_ia.py.
 
 def test_ia_conseil_mariage_ceremonie(client, db):
     db.search_rows = [
@@ -126,12 +124,11 @@ def test_ia_recommandations_personnalisees(client, db):
 # 3. Tests Scan QR (décodage)
 # ==========================================
 
-# Module 3 : changement de contrat assumé (rapport module 3, option A).
-# Les 3 passeports inventés et le compteur en mémoire sont supprimés.
 # FastAPI décode seulement : code normalisé et URL de la page de
 # vérification (FRONTEND_BASE_URL, http://localhost:5173 en test), sans
-# certificat ; Django certifie, compte et journalise. Contenu refusé : 400
-# avec code machine, plus de 200 `valide: false`. Détail :
+# certificat ni base de passeports ; Django certifie, compte et journalise.
+# Contenu refusé : 400 avec code machine (jamais 200 `valide: false`).
+# Détail :
 # tests/test_scan_qr.py.
 
 def test_scan_qr_code_direct_valide(client):
@@ -145,8 +142,8 @@ def test_scan_qr_code_direct_valide(client):
 
 
 def test_scan_qr_url_complete(client):
-    # L'ancien domaine anitche.ci n'est plus accepté : seule l'origine de
-    # FRONTEND_BASE_URL l'est (ici celle de dev).
+    # Seule l'origine de FRONTEND_BASE_URL est acceptée (ici celle de dev) :
+    # un autre domaine, même anitche.ci, est refusé.
     payload = {"qr_data": "http://localhost:5173/qr/verifier/PAS-2026-0A1B2C3D"}
     response = client.post("/qr/scan", json=payload)
     assert response.status_code == 200
@@ -167,7 +164,7 @@ def test_scan_qr_code_invalide(client):
 
 
 def test_consulter_passeport_get(client):
-    # Route supprimée (décision 5) : la consultation d'un passeport par son
+    # Route absente de FastAPI : la consultation d'un passeport par son
     # code est celle de Django, GET /api/passeports/verifier/{code}/.
     response = client.get("/qr/passeport/PAS-2026-1A2B3C4D")
     assert response.status_code == 404
@@ -178,12 +175,11 @@ def test_consulter_passeport_get(client):
 # ==========================================
 
 def test_mise_a_jour_position_gps_et_consultation(client, db):
-    # Module 1 : changement de contrat assumé (rapport module 1 §g). Le
-    # livreur est celui du jeton (livreur_id du corps ignoré), l'accès est
-    # lu dans PostgreSQL (livraison en cours, livreur assigné). Plus de
-    # statut fictif ni de livreur_id dans la réponse ; distance et temps
+    # Le livreur est celui du jeton (livreur_id du corps ignoré), l'accès
+    # est lu dans PostgreSQL (livraison en cours, livreur assigné). Ni
+    # statut ni livreur_id dans la réponse ; distance et temps
     # restants seulement si le client a donné son point GPS (ici, non).
-    # Cas refusés : test_f11_auth_gps.py et test_suivi_gps.py.
+    # Cas refusés : test_suivi_gps_acces_refuse.py et test_suivi_gps.py.
     livraison_id = "550e8400-e29b-41d4-a716-446655440000"
     db.add_delivery(livraison_id, status="en_cours", courier_id=42, client_id=7)
     db.add_user(42, "livreur")

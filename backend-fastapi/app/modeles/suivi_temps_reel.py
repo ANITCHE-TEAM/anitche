@@ -14,7 +14,7 @@ class PositionPublication(BaseModel):
     """Corps de POST /livraison/position.
 
     Le livreur est l'utilisateur du jeton et l'horodatage est celui du
-    serveur : `livreur_id` et `horodatage` envoyés par d'anciens clients sont
+    serveur : `livreur_id` et `horodatage` envoyés par un client sont
     ignorés, comme tout champ inconnu.
     """
 

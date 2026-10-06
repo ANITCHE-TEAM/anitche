@@ -1,5 +1,5 @@
-# F-19 (audit sécurité) : sans ce fichier, `COPY . .` dans le Dockerfile
-# embarque .env (secrets réels, dont DB_PASSWORD) dans l'image Docker.
+# Sans ce fichier, `COPY . .` dans le Dockerfile embarquerait .env (secrets
+# réels, dont DB_PASSWORD) dans l'image Docker.
 
 .env
 .env.*

@@ -1,6 +1,8 @@
-"""Module 1 : suivi GPS (routeur, Redis, WebSocket).
+"""Suivi GPS : routeur, Redis, WebSocket.
 
-Un test (au moins) par faille du rapport module 1 §1 : 1 à 11, A, B, C.
+Couvert : accès en lecture, identifiants, publication, dernière position,
+partage entre processus, authentification et revalidation du WebSocket,
+messages, limites de débit, contenu des réponses, distance et ETA, pannes.
 Django simulé (un utilisateur par jeton), PostgreSQL simulé (FakePool émule
 la requête d'accès), Redis : fakeredis. Les règles seules sont testées dans
 test_suivi_gps_regles.py, les vrais services dans tests/integration/.
@@ -108,11 +110,11 @@ def strict_json(text: str):
     return json.loads(text, parse_constant=refuse)
 
 
-# ------------------------------------------------------------ faille 1 et B
+# ------------------------------------------------------------ lecture : comptes liés à la livraison
 
 
 @pytest.mark.parametrize("name", ["client", "livreur", "admin", "super_admin"])
-def test_1_allowed_readers_get_the_position(client, name):
+def test_allowed_readers_get_the_position(client, name):
     assert publish(client).status_code == 200
     response = client.get(f"/livraison/position/{DELIVERY}", headers=headers(name))
     assert response.status_code == 200
@@ -120,9 +122,9 @@ def test_1_allowed_readers_get_the_position(client, name):
 
 
 @pytest.mark.parametrize("name", ["tiers", "autre_livreur", "vendeur"])
-def test_1_B_other_accounts_get_404_livraison_introuvable(client, name):
-    """Faille 1 et B : client tiers, livreur non assigné, vendeur de la
-    boutique : 404 comme Django, sans révéler l'existence."""
+def test_other_accounts_get_404_livraison_introuvable(client, name):
+    """Client tiers, livreur non assigné, vendeur de la boutique : 404
+    comme Django, sans révéler l'existence."""
     publish(client)
     response = client.get(f"/livraison/position/{DELIVERY}", headers=headers(name))
     assert response.status_code == 404
@@ -135,29 +137,29 @@ def test_1_B_other_accounts_get_404_livraison_introuvable(client, name):
 
 
 @pytest.mark.parametrize("name", ["tiers", "autre_livreur", "vendeur"])
-def test_1_B_other_accounts_cannot_listen(client, name):
+def test_other_accounts_cannot_listen(client, name):
     publish(client)
     assert ws_close_code(client, name) == 4403
 
 
-def test_1_missing_delivery_is_404_livraison_introuvable(client):
+def test_reading_a_missing_delivery_is_404_livraison_introuvable(client):
     response = client.get(f"/livraison/position/{MISSING_DELIVERY}", headers=headers("admin"))
     assert response.status_code == 404
     assert error_code(response) == "livraison_introuvable"
 
 
-def test_B_vendor_reads_the_delivery_of_its_own_purchase(client, db):
+def test_vendor_reads_the_delivery_of_its_own_purchase(client, db):
     db.add_delivery(OTHER_DELIVERY, client_id=5)
     assert publish(client, livraison_id=OTHER_DELIVERY).status_code == 200
     response = client.get(f"/livraison/position/{OTHER_DELIVERY}", headers=headers("vendeur"))
     assert response.status_code == 200
 
 
-# ------------------------------------------------------------ faille 2
+# ------------------------------------------------------------ identifiant de livraison (UUID)
 
 
 @pytest.mark.parametrize("bad_id", ["../utilisateurs/profil", "../../admin/", "abc", "x" * 5000, "", 123])
-def test_2_post_refuses_non_uuid_livraison_id(client, redis_server, bad_id):
+def test_post_refuses_non_uuid_livraison_id(client, redis_server, bad_id):
     response = publish(client, livraison_id=bad_id)
     assert response.status_code == 400
     assert response.json()["errors"] == {"livraison_id": ["Doit être un UUID valide."]}
@@ -165,22 +167,22 @@ def test_2_post_refuses_non_uuid_livraison_id(client, redis_server, bad_id):
 
 
 @pytest.mark.parametrize("bad_id", ["pas-un-uuid", "%2e%2e", "abc"])
-def test_2_get_refuses_non_uuid(client, bad_id):
+def test_get_refuses_non_uuid(client, bad_id):
     response = client.get(f"/livraison/position/{bad_id}", headers=headers("admin"))
     assert response.status_code == 400
     assert "livraison_id" in response.json()["errors"]
 
 
-def test_2_websocket_refuses_non_uuid_with_1008(client, django):
+def test_websocket_refuses_non_uuid_with_1008(client, django):
     with client.websocket_connect("/livraison/ws/pas-un-uuid") as ws:
         assert close_code(ws) == 1008
     assert django.requests == []  # refus avant toute authentification
 
 
-# ------------------------------------------------------------ faille 3 et 5
+# ------------------------------------------------------------ publication : livreur et rôle
 
 
-def test_3_body_livreur_id_is_ignored(client, redis_server):
+def test_body_livreur_id_is_ignored(client, redis_server):
     """Le livreur est celui du jeton : livreur_id du corps ignoré."""
     response = publish(client, livreur_id=99)
     assert response.status_code == 200
@@ -188,7 +190,7 @@ def test_3_body_livreur_id_is_ignored(client, redis_server):
     assert stored["livreur_id"] == 42
 
 
-def test_3_unassigned_courier_cannot_publish(client, redis_server):
+def test_unassigned_courier_cannot_publish(client, redis_server):
     response = client.post("/livraison/position", json=POSITION, headers=headers("autre_livreur"))
     assert response.status_code == 403
     assert response.json()["detail"] == "Vous n'êtes pas autorisé à modifier cette livraison."
@@ -197,8 +199,9 @@ def test_3_unassigned_courier_cannot_publish(client, redis_server):
 
 
 @pytest.mark.parametrize("name", ["admin", "super_admin", "client", "vendeur"])
-def test_5_only_couriers_publish(client, db, name):
-    """Faille 5 : l'administration ne publie pas (403), sans requête SQL."""
+def test_only_couriers_publish(client, db, name):
+    """Seuls les livreurs publient : l'administration aussi reçoit 403,
+    sans requête SQL."""
     response = client.post("/livraison/position", json=POSITION, headers=headers(name))
     assert response.status_code == 403
     assert response.json()["detail"] == "Accès réservé aux livreurs."
@@ -206,7 +209,7 @@ def test_5_only_couriers_publish(client, db, name):
     assert db.queries == []
 
 
-def test_5_removed_courier_is_refused_immediately(client, db):
+def test_removed_courier_is_refused_immediately(client, db):
     """Rôle lu en base : un livreur retiré (rôle client) est refusé même
     si son jeton en cache dit encore « livreur »."""
     db.add_user(42, "client")
@@ -215,16 +218,16 @@ def test_5_removed_courier_is_refused_immediately(client, db):
     assert error_code(response) == "acces_reserve_livreurs"
 
 
-def test_5_deactivated_courier_is_refused(client, db):
+def test_deactivated_courier_is_refused(client, db):
     db.add_user(42, "livreur", is_active=False)
     assert error_code(publish(client)) == "acces_reserve_livreurs"
 
 
-# ------------------------------------------------------------ faille 4
+# ------------------------------------------------------------ publication : état de la livraison
 
 
 @pytest.mark.parametrize("status", STATUSES_NOT_IN_PROGRESS)
-def test_4_publication_refused_outside_en_cours(client, db, redis_server, status):
+def test_publication_refused_outside_en_cours(client, db, redis_server, status):
     db.add_delivery(DELIVERY, status=status)
     response = publish(client)
     assert response.status_code == 409
@@ -233,21 +236,21 @@ def test_4_publication_refused_outside_en_cours(client, db, redis_server, status
     assert raw_redis(redis_server).keys("fastapi:gps:*") == []
 
 
-def test_4_missing_delivery_is_404(client):
+def test_publishing_to_a_missing_delivery_is_404(client):
     response = publish(client, livraison_id=MISSING_DELIVERY)
     assert response.status_code == 404
     assert error_code(response) == "livraison_introuvable"
 
 
-def test_4_access_is_read_in_postgres(client, db):
+def test_access_is_read_in_postgres(client, db):
     publish(client)
     assert any("FROM livraison_livraison" in query for query in db.queries)
 
 
-# ------------------------------------------------------------ faille 6
+# ------------------------------------------------------------ dernière position
 
 
-def test_6_no_position_is_404_never_a_fake_one(client):
+def test_no_position_is_404_never_a_fake_one(client):
     response = client.get(f"/livraison/position/{DELIVERY}", headers=headers("client"))
     assert response.status_code == 404
     assert response.json() == {
@@ -259,7 +262,7 @@ def test_6_no_position_is_404_never_a_fake_one(client):
 
 
 @pytest.mark.parametrize("status", STATUSES_NOT_IN_PROGRESS)
-def test_6_no_position_outside_en_cours_and_key_deleted(client, db, redis_server, status):
+def test_no_position_outside_en_cours_and_key_deleted(client, db, redis_server, status):
     publish(client)
     db.add_delivery(DELIVERY, status=status)
     response = client.get(f"/livraison/position/{DELIVERY}", headers=headers("client"))
@@ -268,7 +271,7 @@ def test_6_no_position_outside_en_cours_and_key_deleted(client, db, redis_server
     assert raw_redis(redis_server).exists(f"fastapi:gps:v1:pos:{DELIVERY}") == 0
 
 
-def test_6_position_of_a_previous_courier_is_never_shown(client, db, redis_server):
+def test_position_of_a_previous_courier_is_never_shown(client, db, redis_server):
     publish(client)
     db.add_delivery(DELIVERY, courier_id=99, destination=DESTINATION)  # réassignation
     response = client.get(f"/livraison/position/{DELIVERY}", headers=headers("client"))
@@ -276,22 +279,22 @@ def test_6_position_of_a_previous_courier_is_never_shown(client, db, redis_serve
     assert raw_redis(redis_server).exists(f"fastapi:gps:v1:pos:{DELIVERY}") == 0
 
 
-def test_6_expired_position_is_not_shown(client, redis_server):
+def test_expired_position_is_not_shown(client, redis_server):
     publish(client)
     raw_redis(redis_server).delete(f"fastapi:gps:v1:pos:{DELIVERY}")  # expiration
     assert error_code(client.get(f"/livraison/position/{DELIVERY}", headers=headers("client"))) == "aucune_position"
 
 
-# ------------------------------------------------------------ faille 7
+# ------------------------------------------------------------ partage entre processus (Redis)
 
 
-def test_7_position_key_has_a_ttl(client, redis_server):
+def test_position_key_has_a_ttl(client, redis_server):
     publish(client)
     ttl = raw_redis(redis_server).ttl(f"fastapi:gps:v1:pos:{DELIVERY}")
     assert 110 < ttl <= 120
 
 
-def test_7_no_module_singleton():
+def test_no_module_singleton():
     import app.services.tracking as tracking_module
 
     with pytest.raises(ImportError):
@@ -308,7 +311,7 @@ def second_app(settings, django, redis_server, db):
     return create_app(settings, resources=Resources(http=http, db=db, redis=redis))
 
 
-def test_7_position_is_shared_between_applications(client, second_app):
+def test_position_is_shared_between_applications(client, second_app):
     publish(client)
     with TestClient(second_app) as other:
         response = other.get(f"/livraison/position/{DELIVERY}", headers=headers("client"))
@@ -316,7 +319,7 @@ def test_7_position_is_shared_between_applications(client, second_app):
     assert response.json()["latitude"] == POSITION["latitude"]
 
 
-def test_7_websocket_on_another_application_receives_the_publication(client, second_app):
+def test_websocket_on_another_application_receives_the_publication(client, second_app):
     with TestClient(second_app) as other:
         with other.websocket_connect(ws_url()) as ws:
             authenticate(ws, "client")
@@ -327,17 +330,17 @@ def test_7_websocket_on_another_application_receives_the_publication(client, sec
     assert message["latitude"] == 5.33
 
 
-# ------------------------------------------------------------ faille 8
+# ------------------------------------------------------------ authentification du WebSocket
 
 
 @pytest.mark.parametrize("settings", [{"ws_auth_timeout": 0.2}], indirect=True)
-def test_8_token_in_url_is_ignored_and_closes_4401(client, django):
+def test_token_in_url_is_ignored_and_closes_4401(client, django):
     with client.websocket_connect(f"{ws_url()}?token={token('client')}") as ws:
         assert close_code(ws) == 4401
     assert django.requests == []
 
 
-def test_8_first_message_authentication_opens_the_stream(client):
+def test_first_message_authentication_opens_the_stream(client):
     with client.websocket_connect(ws_url()) as ws:
         authenticate(ws, "client")
         assert ws.receive_json() == {"type": "authentifie", "livraison_id": DELIVERY}
@@ -353,20 +356,20 @@ def test_8_first_message_authentication_opens_the_stream(client):
         json.dumps(["auth"]),
     ],
 )
-def test_8_invalid_first_message_closes_4401(client, first_message):
+def test_invalid_first_message_closes_4401(client, first_message):
     with client.websocket_connect(ws_url()) as ws:
         ws.send_text(first_message)
         assert close_code(ws) == 4401
 
 
-def test_8_binary_first_message_closes_4401(client):
+def test_binary_first_message_closes_4401(client):
     """Pendant l'authentification, tout autre message : 4401."""
     with client.websocket_connect(ws_url()) as ws:
         ws.send_bytes(b"\x00\x01")
         assert close_code(ws) == 4401
 
 
-def test_10_binary_message_after_authentication_closes_1008(client):
+def test_binary_message_after_authentication_closes_1008(client):
     with client.websocket_connect(ws_url()) as ws:
         authenticate(ws, "client")
         ws.receive_json()
@@ -375,7 +378,7 @@ def test_10_binary_message_after_authentication_closes_1008(client):
 
 
 @pytest.mark.parametrize("status_code, expected", [(401, 4401), (429, 4429), (503, 1011)])
-def test_8_django_answer_sets_the_close_code(client, django, status_code, expected):
+def test_django_answer_sets_the_close_code(client, django, status_code, expected):
     django.status_code = status_code
     with client.websocket_connect(ws_url()) as ws:
         ws.send_json({"type": "auth", "token": "jeton.inconnu.test"})
@@ -383,19 +386,19 @@ def test_8_django_answer_sets_the_close_code(client, django, status_code, expect
 
 
 @pytest.mark.parametrize("settings", [{"rate_limits": {"ws_connect": "1/minute"}}], indirect=True)
-def test_8_connections_are_rate_limited_4429(client):
+def test_connections_are_rate_limited_4429(client):
     with client.websocket_connect(ws_url()) as ws:
         authenticate(ws, "client")
         ws.receive_json()
     assert ws_close_code(client, "client") == 4429
 
 
-def test_8_listener_outside_en_cours_closes_4403(client, db):
+def test_listener_outside_en_cours_closes_4403(client, db):
     db.add_delivery(DELIVERY, status="expediee")
     assert ws_close_code(client, "client") == 4403
 
 
-def test_8_last_position_is_sent_after_authentication(client):
+def test_last_position_is_sent_after_authentication(client):
     publish(client)
     with client.websocket_connect(ws_url()) as ws:
         authenticate(ws, "admin")
@@ -404,14 +407,14 @@ def test_8_last_position_is_sent_after_authentication(client):
     assert message["type"] == "position" and message["latitude"] == POSITION["latitude"]
 
 
-# ------------------------------------------------------------ faille 9
+# ------------------------------------------------------------ revalidation pendant l'écoute
 
 
 REVALIDATE_FAST = [{"ws_revalidate_interval": 0.1, "auth_cache_ttl": 0}]
 
 
 @pytest.mark.parametrize("settings", REVALIDATE_FAST, indirect=True)
-def test_9_revoked_token_closes_4401(client, django):
+def test_revoked_token_closes_4401(client, django):
     with client.websocket_connect(ws_url()) as ws:
         authenticate(ws, "client")
         ws.receive_json()
@@ -420,7 +423,7 @@ def test_9_revoked_token_closes_4401(client, django):
 
 
 @pytest.mark.parametrize("settings", REVALIDATE_FAST, indirect=True)
-def test_9_delivered_sends_fin_suivi_then_1000(client, db, redis_server):
+def test_delivered_sends_fin_suivi_then_1000(client, db, redis_server):
     publish(client)
     with client.websocket_connect(ws_url()) as ws:
         authenticate(ws, "client")
@@ -433,7 +436,7 @@ def test_9_delivered_sends_fin_suivi_then_1000(client, db, redis_server):
 
 
 @pytest.mark.parametrize("settings", REVALIDATE_FAST, indirect=True)
-def test_9_reassigned_courier_listening_closes_4403(client, db):
+def test_reassigned_courier_listening_closes_4403(client, db):
     with client.websocket_connect(ws_url()) as ws:
         authenticate(ws, "livreur")
         ws.receive_json()
@@ -442,7 +445,7 @@ def test_9_reassigned_courier_listening_closes_4403(client, db):
 
 
 @pytest.mark.parametrize("settings", REVALIDATE_FAST, indirect=True)
-def test_9_deactivated_account_closes_4403(client, db):
+def test_deactivated_account_closes_4403(client, db):
     with client.websocket_connect(ws_url()) as ws:
         authenticate(ws, "client")
         ws.receive_json()
@@ -451,7 +454,7 @@ def test_9_deactivated_account_closes_4403(client, db):
 
 
 @pytest.mark.parametrize("settings", REVALIDATE_FAST, indirect=True)
-def test_9_database_down_during_revalidation_closes_1011(client, db):
+def test_database_down_during_revalidation_closes_1011(client, db):
     with client.websocket_connect(ws_url()) as ws:
         authenticate(ws, "client")
         ws.receive_json()
@@ -459,7 +462,7 @@ def test_9_database_down_during_revalidation_closes_1011(client, db):
         assert close_code(ws) == 1011
 
 
-def test_9_token_renewal_keeps_the_connection(client, django):
+def test_token_renewal_keeps_the_connection(client, django):
     django.users_by_token["jeton.client.renouvele"] = {"id": 7, "role": "client"}
     with client.websocket_connect(ws_url()) as ws:
         authenticate(ws, "client")
@@ -470,7 +473,7 @@ def test_9_token_renewal_keeps_the_connection(client, django):
     assert message["type"] == "position" and message["latitude"] == 5.34
 
 
-def test_9_renewal_with_another_account_closes_4401(client):
+def test_renewal_with_another_account_closes_4401(client):
     with client.websocket_connect(ws_url()) as ws:
         authenticate(ws, "client")
         ws.receive_json()
@@ -478,7 +481,7 @@ def test_9_renewal_with_another_account_closes_4401(client):
         assert close_code(ws) == 4401
 
 
-def test_9_revoked_renewal_token_closes_4401(client, django):
+def test_revoked_renewal_token_closes_4401(client, django):
     django.users_by_token["jeton.revoque.test"] = None
     with client.websocket_connect(ws_url()) as ws:
         authenticate(ws, "client")
@@ -487,11 +490,11 @@ def test_9_revoked_renewal_token_closes_4401(client, django):
         assert close_code(ws) == 4401
 
 
-# ------------------------------------------------------------ faille 10 et 10 bis
+# ------------------------------------------------------------ messages et valeurs reçus
 
 
 @pytest.mark.parametrize("message", ['x", "type": "mise_a_jour_position", "latitude": 48.85, "z": "', '{"type": "ping"}', '"'])
-def test_10_unexpected_message_closes_1008_without_echo(client, message):
+def test_unexpected_message_closes_1008_without_echo(client, message):
     with client.websocket_connect(ws_url()) as ws:
         authenticate(ws, "client")
         ws.receive_json()
@@ -500,7 +503,7 @@ def test_10_unexpected_message_closes_1008_without_echo(client, message):
 
 
 @pytest.mark.parametrize("authenticated", [False, True])
-def test_10_message_over_4096_bytes_closes_1009(client, authenticated):
+def test_message_over_4096_bytes_closes_1009(client, authenticated):
     with client.websocket_connect(ws_url()) as ws:
         if authenticated:
             authenticate(ws, "client")
@@ -518,7 +521,7 @@ def test_10_message_over_4096_bytes_closes_1009(client, authenticated):
         '{"livraison_id": "%s", "latitude": "NaN", "longitude": -4.0}',
     ],
 )
-def test_10bis_nan_and_infinity_are_refused(client, redis_server, raw_body):
+def test_nan_and_infinity_are_refused(client, redis_server, raw_body):
     response = client.post(
         "/livraison/position",
         content=raw_body % DELIVERY,
@@ -532,13 +535,13 @@ def test_10bis_nan_and_infinity_are_refused(client, redis_server, raw_body):
     "field, value",
     [("latitude", 90.1), ("latitude", -91), ("longitude", 180.5), ("vitesse_kmh", 250), ("vitesse_kmh", -1), ("cap_degres", 360), ("cap_degres", -5000)],
 )
-def test_10bis_values_are_bounded(client, field, value):
+def test_values_are_bounded(client, field, value):
     response = publish(client, **{field: value})
     assert response.status_code == 400
     assert field in response.json()["errors"]
 
 
-def test_10_every_message_sent_is_strict_json(client):
+def test_every_message_sent_is_strict_json(client):
     publish(client)
     with client.websocket_connect(ws_url()) as ws:
         authenticate(ws, "client")
@@ -549,11 +552,11 @@ def test_10_every_message_sent_is_strict_json(client):
         strict_json(text)
 
 
-# ------------------------------------------------------------ faille 11
+# ------------------------------------------------------------ limites de débit
 
 
 @pytest.mark.parametrize("settings", [{"rate_limits": {"gps_read": "2/minute"}}], indirect=True)
-def test_11_reading_is_rate_limited(client, redis_server):
+def test_reading_is_rate_limited(client, redis_server):
     publish(client)
     statuses = [client.get(f"/livraison/position/{DELIVERY}", headers=headers("client")).status_code for _ in range(3)]
     assert statuses == [200, 200, 429]
@@ -563,7 +566,7 @@ def test_11_reading_is_rate_limited(client, redis_server):
 
 
 @pytest.mark.parametrize("settings", [{"ws_client_messages_per_minute": 2}], indirect=True)
-def test_11_too_many_client_messages_close_4429(client):
+def test_too_many_client_messages_close_4429(client):
     with client.websocket_connect(ws_url()) as ws:
         authenticate(ws, "client")
         ws.receive_json()
@@ -572,10 +575,10 @@ def test_11_too_many_client_messages_close_4429(client):
         assert close_code(ws) == 4429
 
 
-# ------------------------------------------------------------ constats A et C
+# ------------------------------------------------------------ contenu des réponses
 
 
-def test_A_courier_id_is_never_sent(client):
+def test_courier_id_is_never_sent(client):
     posted = publish(client)
     with client.websocket_connect(ws_url()) as ws:
         authenticate(ws, "client")
@@ -589,7 +592,7 @@ def test_A_courier_id_is_never_sent(client):
         assert 42 not in body.values() and "42" not in body.values()
 
 
-def test_C_timestamp_is_the_server_time_in_utc(client):
+def test_timestamp_is_the_server_time_in_utc(client):
     response = publish(client, horodatage="2000-01-01 00:00:00")
     horodatage = response.json()["horodatage"]
     assert horodatage.endswith("Z") and not horodatage.startswith("2000")
@@ -703,8 +706,8 @@ def test_one_channel_subscription_per_process_and_cleanup(client, redis_server, 
     assert raw_redis(redis_server).pubsub_numsub(f"fastapi:gps:v1:chan:{DELIVERY}")[0][1] == 0
 
 
-def test_8_uvicorn_handshake_log_has_no_query_string(app):
-    """Faille 8 (constat de bout en bout) : uvicorn écrit la poignée de main
+def test_uvicorn_handshake_log_has_no_query_string(app):
+    """Aucun jeton dans les journaux : uvicorn écrit la poignée de main
     WebSocket avec la chaîne de requête, même avec --no-access-log. Le
     filtre installé par create_app la retire."""
     record = logging.LogRecord(
@@ -721,7 +724,7 @@ def test_external_cancellation_keeps_the_caller_cancelled_error():
     """Arrêt du serveur ou TestClient : la tâche du handler est annulée de
     l'extérieur, parfois plusieurs fois (anyio répète l'annulation). La
     CancelledError qui remonte doit rester celle de l'appelant, sinon sa
-    portée d'annulation ne la reconnaît pas et la laisse fuir (constaté :
+    portée d'annulation ne la reconnaît pas et la laisse fuir (symptôme :
     tests WebSocket intermittents avec asyncio.gather)."""
     class SilentWebSocket:
         async def receive(self):

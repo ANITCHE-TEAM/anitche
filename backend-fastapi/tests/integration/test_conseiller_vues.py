@@ -1,7 +1,7 @@
-"""Module 4 : conseiller IA sur les VRAIES vues du catalogue (migration
-Django catalogue 0004), avec le rôle en lecture seule et un vrai Redis.
+"""Conseiller IA sur les VRAIES vues du catalogue (migration Django
+catalogue 0004), avec le rôle en lecture seule et un vrai Redis.
 
-Les candidats du conseiller passent par la recherche du module 2 : un
+Les candidats du conseiller passent par la recherche publique : un
 produit masqué dans Django, en rupture ou hors budget n'est jamais
 proposé, quel que soit le fournisseur. Chaque test isole ses produits dans
 une catégorie créée pour lui (les termes du lexique, « bazin », « pagne »…,

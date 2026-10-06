@@ -1,12 +1,11 @@
-"""Module 0 : image Docker, dépendances, compose et CI du service FastAPI.
+"""Image Docker, dépendances, compose et CI du service FastAPI.
 
-Module 1 : options WebSocket d'uvicorn, droits par colonne du rôle en
-lecture seule, job CI « integration ». Module 2 : droits sur les trois vues
-publiques de la recherche, PUBLIC_BASE_URL et MEDIA_BASE_URL.
-
-Failles du rapport module 0 §1 couvertes : 24-25 (compose sans URL Django
-ni DATABASE_URL, mot de passe superutilisateur transmis sans être lu), 27
-(Dockerfile), 28 (dépendances de test dans l'image), 29 (CI).
+Couvert : réglages transmis par le compose (URL Django, DATABASE_URL du
+rôle en lecture seule, aucun mot de passe superutilisateur), Dockerfile,
+dépendances de test hors de l'image, CI, options WebSocket d'uvicorn,
+droits par colonne du rôle en lecture seule et droits sur les trois vues
+publiques de la recherche, PUBLIC_BASE_URL et MEDIA_BASE_URL, job CI
+« integration ».
 Lecture des fichiers du dépôt (PyYAML est fourni par uvicorn[standard]).
 """
 import re
@@ -26,8 +25,8 @@ def fastapi_service(compose_file: str) -> dict:
 
 @pytest.mark.parametrize("compose_file", ["docker-compose.yml", "docker-compose.prod.yml"])
 def test_compose_passes_the_right_settings(compose_file):
-    """Faille 24-25 : URL Django, base en lecture seule et Redis base 2 ;
-    plus aucun DB_* ni mot de passe superutilisateur."""
+    """URL Django, base en lecture seule et Redis base 2 ; aucun DB_* ni
+    mot de passe superutilisateur."""
     service = fastapi_service(compose_file)
     environment = service["environment"]
 
@@ -62,7 +61,7 @@ def test_prod_compose():
 
 
 def test_dockerfile_without_build_tools_root_or_reload():
-    """Faille 27."""
+    """Ni outils de compilation, ni root, ni --reload dans l'image."""
     dockerfile = (BACKEND / "Dockerfile").read_text(encoding="utf-8")
     assert "apt-get" not in dockerfile
     assert "\nUSER app\n" in dockerfile
@@ -77,7 +76,7 @@ def _requirements(name: str) -> list[str]:
 
 
 def test_app_requirements_have_no_test_tools_and_are_pinned():
-    """Faille 28."""
+    """Dépendances de l'image épinglées, sans outil de test."""
     requirements = _requirements("requirements.txt")
     names = {line.split("==")[0].split("[")[0].lower() for line in requirements}
     assert all("==" in line for line in requirements)
@@ -92,7 +91,7 @@ def test_dev_requirements_extend_app_requirements():
 
 
 def test_ci_installs_dev_requirements_once():
-    """Faille 29 : plus de double installation."""
+    """Une seule installation : requirements-dev.txt, sans pip install pytest à part."""
     workflow = yaml.safe_load((REPO / ".github" / "workflows" / "ci-fastapi.yml").read_text(encoding="utf-8"))
     commands = "\n".join(step.get("run", "") for step in workflow["jobs"]["test"]["steps"])
     assert "pip install -r requirements-dev.txt" in commands
@@ -101,14 +100,14 @@ def test_ci_installs_dev_requirements_once():
     assert workflow["env"]["ENVIRONMENT"] == "test"
 
 
-# ------------------------------------------------------------ module 1
+# ------------------------------------------------------------ suivi GPS et recherche
 
 WS_FLAGS = "--ws-max-size 8192 --ws-ping-interval 20 --ws-ping-timeout 20"
 
 
 @pytest.mark.parametrize("compose_file", ["docker-compose.yml", "docker-compose.prod.yml"])
 def test_compose_bounds_websocket_messages_and_pings(compose_file):
-    """Module 1, faille 10 : barrière extérieure d'uvicorn (8 Kio), ping de 20 s."""
+    """Barrière extérieure d'uvicorn (8 Kio par message WebSocket), ping de 20 s."""
     assert WS_FLAGS in fastapi_service(compose_file)["command"]
 
 
@@ -127,9 +126,9 @@ def _readonly_sql_code() -> str:
 
 
 def test_readonly_role_gets_exactly_the_tracking_columns():
-    """Module 1 §b : SELECT par colonne, rien d'autre ; REVOKE ALL sur chaque
-    table accordée (script idempotent). Module 2 : plus les trois vues
-    publiques de la recherche (test suivant), aucune autre table."""
+    """SELECT par colonne, rien d'autre ; REVOKE ALL sur chaque table
+    accordée (script idempotent). En plus : les trois vues publiques de la
+    recherche (test suivant), aucune autre table."""
     code = _readonly_sql_code()
     grants = {
         table: {column.strip() for column in columns.split(",")}
@@ -151,7 +150,7 @@ def test_readonly_role_gets_exactly_the_tracking_columns():
 
 
 def test_readonly_role_reads_only_the_public_catalogue_views():
-    """Module 2 §g : SELECT sur les trois vues créées par la migration Django
+    """SELECT sur les trois vues créées par la migration Django
     catalogue 0004, REVOKE ALL avant (idempotent) ; aucune table du
     catalogue ni des boutiques."""
     code = _readonly_sql_code()
@@ -165,7 +164,7 @@ def test_readonly_role_reads_only_the_public_catalogue_views():
 
 @pytest.mark.parametrize("compose_file", ["docker-compose.yml", "docker-compose.prod.yml"])
 def test_compose_passes_search_urls(compose_file):
-    """Module 2 (décision 10) : adresses publiques de FastAPI et des médias."""
+    """Adresses publiques de FastAPI et des médias."""
     environment = fastapi_service(compose_file)["environment"]
     assert {"PUBLIC_BASE_URL", "MEDIA_BASE_URL"} <= set(environment)
 
@@ -199,7 +198,7 @@ def test_ci_runs_unit_tests_without_services():
 
 
 def test_ci_integration_job_uses_real_services_and_cannot_skip():
-    """Module 1 §g : vrais PostgreSQL et Redis, schéma des migrations Django,
+    """Vrais PostgreSQL et Redis, schéma des migrations Django,
     vrai script du rôle, un test sauté fait échouer le job."""
     workflow = _workflow()
     job = workflow["jobs"]["integration"]

@@ -1,4 +1,4 @@
-"""Module 4 : fournisseurs du conseiller IA (docs/MODULE_IA.md).
+"""Fournisseurs du conseiller IA (docs/MODULE_IA.md).
 
 Registre, réglages, validation de la sortie HORS du fournisseur (avec de
 faux fournisseurs qui inventent des identifiants, renvoient un JSON

@@ -1,4 +1,4 @@
-"""Module 1 : règles d'accès (fonctions pures) et estimation distance/ETA.
+"""Suivi GPS : règles d'accès (fonctions pures) et estimation distance/ETA.
 
 Table rôle × lien avec la livraison × statut, sans application ni base.
 Référence : `livraisons_visibles` et TRANSITIONS de Django

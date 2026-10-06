@@ -1,8 +1,8 @@
-"""Module 0 : format d'erreur commun (identique à Django), CORS, en-têtes
-et journal d'accès.
+"""Format d'erreur commun (identique à Django), CORS, en-têtes et journal
+d'accès.
 
-Failles du rapport module 0 §1 couvertes : 1, 3 (CORS), 4 (404), 5-6
-(validation), 7 (500), 17 (503 au format commun, voir aussi test_core_auth).
+Couvert : CORS, 404, validation (400), 500, 503 au format commun (voir
+aussi test_core_auth).
 """
 import logging
 
@@ -25,7 +25,7 @@ def assert_common_format(response, status_code: int) -> dict:
 
 
 def test_unknown_route_404_common_format_in_french(client):
-    """Faille 4 : même texte que Django (MESSAGE_RESSOURCE_INTROUVABLE)."""
+    """Même texte que Django (MESSAGE_RESSOURCE_INTROUVABLE)."""
     body = assert_common_format(client.get("/nexiste-pas"), 404)
     assert body["detail"] == "Ressource introuvable."
     assert body["errors"] == {}
@@ -39,9 +39,9 @@ def test_405_same_text_as_django(client):
 
 
 def test_query_validation_is_400_with_field_key_and_french_message(client):
-    """Faille 5 : 400 (et non 422), clé du paramètre (sans « query »),
-    message DRF en français, detail « champ: message ». Module 2 : `q`
-    devient `recherche`, 3 caractères au moins pour les suggestions."""
+    """400 (et non 422), clé du paramètre (sans « query »), message DRF en
+    français, detail « champ: message ». Paramètre `recherche`, 3
+    caractères au moins pour les suggestions."""
     body = assert_common_format(client.get("/recherche/suggestions?recherche=ab"), 400)
     message = "Assurez-vous que ce champ comporte au moins 3\xa0caractères."
     assert body["errors"] == {"recherche": [message]}
@@ -54,16 +54,15 @@ def test_missing_query_parameter_message(client):
 
 
 def test_numeric_bounds_and_parsing_messages(client):
-    # Module 2 : `par_page` n'existe plus (20 par page, comme Django) ; la
-    # borne est portée par `page` (50 au plus).
+    # Taille de page fixe (20, comme Django, sans paramètre `par_page`) ;
+    # la borne est portée par `page` (50 au plus).
     body = assert_common_format(client.get("/recherche/produits?page=500&prix_min=abc"), 400)
     assert body["errors"]["page"] == ["Assurez-vous que cette valeur est inférieure ou égale à 50."]
     assert body["errors"]["prix_min"] == ["Un nombre entier valide est requis."]
 
 
 def test_nested_body_validation_uses_dotted_keys(client):
-    """Faille 6 : clé à points « messages.0.role », comme Django. Module 4 :
-    route authentifiée (sans jeton, 401 avant la validation)."""
+    """Clé à points « messages.0.role », comme Django. Route authentifiée (sans jeton, 401 avant la validation)."""
     payload = {"messages": [{"role": "pirate", "contenu": "Bonjour"}]}
     body = assert_common_format(client.post("/ia/conseil", json=payload, headers=AUTH_HEADERS), 400)
     assert body["errors"] == {"messages.0.role": ["«\xa0pirate\xa0» n'est pas un choix valide."]}
@@ -83,7 +82,7 @@ def test_missing_body_goes_to_non_field_errors(client):
 
 
 def test_unhandled_exception_500_common_format_without_leak(app, caplog):
-    """Faille 7 : errors toujours présent, message identique à Django, rien
+    """errors toujours présent, message identique à Django, rien
     de l'exception interne dans la réponse, trace dans les journaux."""
 
     @app.get("/boom")
@@ -127,7 +126,8 @@ def preflight(client, origin="http://localhost:5173", method="GET", headers="aut
 
 
 def test_cors_preflight_allowed_origin_without_credentials(client):
-    """Faille 1 : plus d'Access-Control-Allow-Credentials."""
+    """Aucun Access-Control-Allow-Credentials : l'API s'authentifie par
+    en-tête Authorization, pas par cookie."""
     response = preflight(client)
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
@@ -145,7 +145,7 @@ def test_cors_preflight_allowed_origin_without_credentials(client):
     ],
 )
 def test_cors_preflight_refuses_other_methods_headers_and_origins(client, kwargs):
-    """Faille 1 et 3 : méthodes GET/POST/OPTIONS, en-têtes Authorization et
+    """Méthodes GET/POST/OPTIONS, en-têtes Authorization et
     Content-Type, origines de CORS_ALLOWED_ORIGINS uniquement."""
     assert preflight(client, **kwargs).status_code == 400
 
@@ -159,9 +159,9 @@ def test_cors_exposes_retry_after(client):
 # ------------------------------------------- en-têtes et journal d'accès
 
 
-def test_security_and_timing_headers_are_no_longer_set_by_fastapi(client):
+def test_security_and_timing_headers_are_not_set_by_fastapi(client):
     """Les en-têtes de sécurité sont posés par nginx (en double, X-Frame-Options
-    devient « DENY, DENY ») ; X-Process-Time-Ms exposait des durées."""
+    deviendrait « DENY, DENY ») ; X-Process-Time-Ms exposerait des durées."""
     response = client.get("/")
     for header in ("X-Frame-Options", "X-XSS-Protection", "X-Content-Type-Options", "X-Process-Time-Ms"):
         assert header not in response.headers

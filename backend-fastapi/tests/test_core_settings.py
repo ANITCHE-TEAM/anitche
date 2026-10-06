@@ -1,7 +1,7 @@
-"""Module 0 : réglages par environnement et validation de la prod.
+"""Réglages par environnement et validation de la prod.
 
-Failles du rapport module 0 §1 couvertes : 1-3 (CORS), 20-23 (doc, debug,
-URL Django), 26 (base Redis partagée avec le cache Django).
+Couvert : CORS, documentation, debug, URL Django, base Redis distincte de
+celle du cache Django, adresses publiques, réglages du suivi GPS.
 """
 import fakeredis
 import httpx
@@ -65,7 +65,7 @@ def test_valid_production_settings_are_accepted():
         {"redis_url": "redis://localhost:6379/2"},
         {"trusted_proxy_count": 0},
         {"trusted_proxy_count": 2},
-        # Module 2 : liens next/previous et URL des images.
+        # Liens next/previous et URL des images.
         {"public_base_url": "http://anitche.com/fast"},
         {"public_base_url": "https://localhost:8001"},
         {"public_base_url": "http://localhost:8001"},
@@ -75,15 +75,15 @@ def test_valid_production_settings_are_accepted():
     ],
 )
 def test_production_refuses_dangerous_settings(overrides):
-    """Faille 1-2, 22-23 : la prod refuse de démarrer avec un réglage de dev
+    """La prod refuse de démarrer avec un réglage de dev
     ou dangereux (debug, CORS localhost / * / http, URL Django locale...)."""
     with pytest.raises(ValidationError, match="Configuration de production refusée"):
         prod_settings(**overrides)
 
 
 def test_defaults_are_safe_for_dev():
-    """Faille 22 et 26 : debug faux par défaut ; Redis sur la base 2, jamais
-    la base 1 du cache Django ; CORS sans l'ancien domaine anitche.ci."""
+    """Debug faux par défaut ; Redis sur la base 2, jamais la base 1 du
+    cache Django ; CORS limité à l'origine du frontend de dev."""
     settings = Settings(_env_file=None)
     assert settings.environment == "dev"
     assert settings.debug is False
@@ -126,7 +126,7 @@ def test_invalid_rate_limits_are_refused(rates):
         {"database_url": "mysql://u:p@db/anitche"},
         {"redis_url": "http://redis:6379"},
         {"root_path": "fast/"},
-        # Module 2 : recopiées dans les réponses, donc strictes.
+        # Recopiées dans les réponses, donc strictes.
         {"public_base_url": ""},
         {"public_base_url": "ftp://anitche.com"},
         {"public_base_url": "https://anitche.com/fast?x=1"},
@@ -134,7 +134,7 @@ def test_invalid_rate_limits_are_refused(rates):
         {"media_base_url": "javascript:alert(1)"},
         {"media_base_url": "https://user:secret@anitche.com/media/"},
         {"media_base_url": "https://@anitche.com/media/"},
-        # Module 3 : origine acceptée au décodage QR et base des liens de
+        # Origine acceptée au décodage QR et base des liens de
         # vérification.
         {"frontend_base_url": "anitche.com"},
         {"frontend_base_url": "javascript:alert(1)"},
@@ -151,7 +151,7 @@ def test_malformed_urls_are_refused_in_every_environment(overrides):
 
 
 def test_search_defaults_and_url_forms():
-    """Module 2 (décision 10) : adresses de dev par défaut ; PUBLIC_BASE_URL
+    """Adresses de dev par défaut ; PUBLIC_BASE_URL
     sans « / » final, MEDIA_BASE_URL avec, quelle que soit la saisie ;
     cache de 60 s."""
     settings = Settings(_env_file=None)
@@ -185,7 +185,7 @@ def _client_for(settings: Settings) -> TestClient:
 
 @pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
 def test_documentation_is_disabled_in_production(path):
-    """Faille 20-21 : doc coupée en prod par le code, aucune variable ne la
+    """Doc coupée en prod par le code, aucune variable ne la
     rouvre. Réponse 404 au format commun."""
     with _client_for(prod_settings()) as client:
         response = client.get(path)
@@ -200,13 +200,13 @@ def test_documentation_is_enabled_in_dev_and_test(path):
 
 
 def test_debug_setting_is_passed_to_fastapi():
-    """Faille 22 : un réglage qui existe doit produire un effet."""
+    """Un réglage qui existe doit produire un effet."""
     assert create_app(make_settings(debug=True), resources=None).debug is True
     assert create_app(make_settings(), resources=None).debug is False
 
 
 def test_create_app_builds_independent_applications():
-    """Plus d'application globale créée à l'import : chaque appel à
+    """Aucune application globale créée à l'import : chaque appel à
     create_app renvoie une application neuve, avec ses propres réglages."""
     import app.main as main_module
 
@@ -229,7 +229,7 @@ def test_startup_error_does_not_leak_secret_values():
 
 
 def test_tracking_defaults_are_the_validated_values():
-    """Module 1 (décision 6) : TTL 120 s, revalidation 60 s, authentification
+    """TTL 120 s, revalidation 60 s, authentification
     en 5 s, gps_read 720/h, 4 096 octets, 6 messages par minute ; ETA :
     facteur 1,4 et 20 km/h."""
     settings = Settings(_env_file=None)

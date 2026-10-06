@@ -1,5 +1,5 @@
 """Candidats du conseiller : produits du VRAI catalogue, lus par la recherche
-du module 2 (app/services/search.py, vues publiques uniquement, rôle en
+publique (app/services/search.py, vues publiques uniquement, rôle en
 lecture seule, jamais en cache), sans la modifier.
 
 Requêtes séquentielles (le pool a 10 connexions), 5 au plus, 20 lignes

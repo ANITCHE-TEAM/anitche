@@ -3,7 +3,7 @@ fournisseurs.
 
 1. Préparation : textes du client masqués (e-mails, numéros), aucun
    identifiant d'utilisateur transmis.
-2. Candidats : vrai catalogue, par la recherche du module 2 (candidats.py).
+2. Candidats : vrai catalogue, par la recherche publique (candidats.py).
 3. Fournisseur actif (app.state.conseiller_ia) : garde-fou de budget s'il
    est payant, délai AI_TIMEOUT_SECONDS. Panne, délai dépassé, sortie
    invalide ou budget épuisé : repli sur le fournisseur simulé

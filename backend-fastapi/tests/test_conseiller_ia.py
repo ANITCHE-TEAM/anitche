@@ -1,11 +1,10 @@
-"""Module 4 : conseiller IA, routes et service (docs/MODULE_IA.md).
+"""Conseiller IA : routes et service (docs/MODULE_IA.md).
 
-Constats du rapport module 4 (§ 1) couverts : D1 (routes publiques), D2
-(limite par IP), D3 (utilisateur_id ignoré), D4 (aucune taille), D5
-(budget), D6 (rôles), D8 (produits inventés), D8b (contrat produit), D9
-(budget trop bas), D12 (format d'erreur), D12c (champs inconnus), D13
-(catégories). Fournisseurs, lexique et validation de sortie :
-tests/test_conseiller_fournisseurs.py.
+Couvert : routes authentifiées et limitées par utilisateur, identifiant
+d'utilisateur du corps ignoré, tailles bornées, budget, rôles, produits
+du seul catalogue réel et contrat produit, budget trop bas, format
+d'erreur, champs inconnus, catégories. Fournisseurs, lexique et
+validation de sortie : tests/test_conseiller_fournisseurs.py.
 """
 from decimal import Decimal
 
@@ -106,7 +105,7 @@ def post(client, path, payload, **kwargs):
     return client.post(path, json=payload, headers=AUTH_HEADERS, **kwargs)
 
 
-# ------------------------------------------------------------ authentification, limites (D1, D2)
+# ------------------------------------------------------------ authentification, limites
 
 
 @pytest.mark.parametrize("path, payload", [(CONSEIL, conseil()), (RECOMMANDATIONS, {})])
@@ -172,7 +171,7 @@ def test_disabled_advisor_answers_503_before_anything(make_client, django, db, r
     assert django.requests == [] and db.queries == [] and rl_keys(redis_server) == []
 
 
-# ------------------------------------------------------------ validation (D3 à D6, D12, D13)
+# ------------------------------------------------------------ validation
 
 
 TOO_MANY = [{"role": "user", "contenu": "Bonjour"}] * (MAX_MESSAGES + 1)
@@ -334,7 +333,7 @@ def test_recommendations_request_to_provider(make_client, catalogue):
     assert demande.max_produits == 8 and demande.budget_max == 20000 and demande.categories == ("mode",)
 
 
-# ------------------------------------------------------------ ancrage sur le catalogue (D8)
+# ------------------------------------------------------------ ancrage sur le catalogue
 
 
 def _page_texts(db) -> list:
@@ -403,7 +402,7 @@ def test_catalogue_unavailable_gives_coded_503(client, db):
     assert response.json()["detail"] == "Le conseiller est momentanément indisponible. Réessayez plus tard."
 
 
-# ------------------------------------------------------------ réponses (D8b, D9)
+# ------------------------------------------------------------ réponses
 
 
 def test_wedding_advice_on_demo_catalogue(client, catalogue):

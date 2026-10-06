@@ -14,8 +14,8 @@
 --
 -- Moindre privilège : CONNECT sur la base, USAGE sur le schéma public et
 -- SELECT sur les seules colonnes ou vues lues (en fin de fichier). Chaque
--- module ajoute ses GRANT SELECT par colonne, ou sur une vue publique créée
--- pour lui par une migration Django (jamais de GRANT sur tout le schéma ni
+-- fonctionnalité a ses GRANT SELECT par colonne, ou sur une vue publique
+-- créée pour elle par une migration Django (jamais de GRANT sur tout le schéma ni
 -- d'ALTER DEFAULT PRIVILEGES) : les tables sensibles (KYC, paiements...)
 -- restent illisibles.
 --
@@ -51,10 +51,10 @@ ALTER ROLE anitche_fastapi_ro SET statement_timeout = '3s';
 SELECT format('GRANT CONNECT ON DATABASE %I TO anitche_fastapi_ro', current_database()) \gexec
 GRANT USAGE ON SCHEMA public TO anitche_fastapi_ro;
 
--- Tables lues par FastAPI, ajoutées module par module. Les tables doivent
+-- Tables lues par FastAPI, par fonctionnalité. Les tables doivent
 -- exister : lancer ce script APRÈS `python manage.py migrate`.
 
--- Module 1 (suivi GPS, docs/MODULE_SUIVI_GPS.md) : droits PAR COLONNE.
+-- Suivi GPS (docs/MODULE_SUIVI_GPS.md) : droits PAR COLONNE.
 -- REVOKE ALL retire aussi les droits par colonne : relancer le script
 -- redonne exactement cette liste. Jamais accordés : code_hash, code_chiffre,
 -- adresse_livraison, montants, email, telephone, password, nom, prenom,
@@ -71,7 +71,7 @@ GRANT SELECT (id, client_id, groupe_id) ON TABLE commandes_commande TO anitche_f
 GRANT SELECT (id, livraison_latitude, livraison_longitude) ON TABLE commandes_groupecommande TO anitche_fastapi_ro;
 GRANT SELECT (id, role, is_active) ON TABLE utilisateurs_utilisateur TO anitche_fastapi_ro;
 
--- Module 2 (recherche, docs/MODULE_RECHERCHE.md) : les trois VUES publiques
+-- Recherche et conseiller IA (docs/MODULE_RECHERCHE.md) : les trois VUES publiques
 -- créées par la migration Django catalogue 0004, rien d'autre. AUCUNE table
 -- du catalogue n'est lisible : ni stock exact (catalogue_stock), ni seuil
 -- d'alerte, ni SKU, ni produits désactivés, ni données du propriétaire

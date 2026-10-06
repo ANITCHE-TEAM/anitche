@@ -1,4 +1,4 @@
-"""Module 2 : recherche (app/routeurs/recherche.py, app/services/search.py).
+"""Recherche (app/routeurs/recherche.py, app/services/search.py).
 
 Pool PostgreSQL simulé (tests/fakes.py) : on vérifie ici les paramètres,
 le SQL construit (jamais de valeur du client dans le texte, vues seules),
@@ -6,9 +6,8 @@ la réponse, le cache et les pannes. Le comportement du SQL sur les vraies
 vues (accents, fautes, visibilité, échappement réel, droits) est testé dans
 tests/integration/test_recherche_vues.py.
 
-Diagnostic du rapport module 2 couvert : 1-2 (maquette et état global),
-3-4 et 10 (paramètres), 5 (facettes), 6 (tri par note), 11-12 (champs et
-suggestions), A-C (description, tri par défaut, profondeur de page).
+Couvert : aucune donnée en dur ni état global, paramètres, facettes, tri,
+champs et suggestions, description, tri par défaut, profondeur de page.
 """
 import logging
 import re
@@ -81,7 +80,7 @@ def relations(sql: str) -> set[str]:
     ],
 )
 def test_invalid_product_parameters_are_400_with_the_field_key(client, db, query, field, message):
-    """Diagnostic 3, 4, 10 : refus explicites (Django ignore en silence),
+    """Refus explicites (Django ignore en silence),
     format commun, clé du paramètre ; aucune requête SQL."""
     errors = errors_of(client.get(f"/recherche/produits?{query}"))
     assert errors == {field: [message]}
@@ -102,14 +101,14 @@ def test_invalid_product_parameters_are_400_with_the_field_key(client, db, query
     ],
 )
 def test_invalid_suggestion_parameters_are_400(client, db, query, field, message):
-    """Décision 5 : 3 caractères au moins (2 : index trigramme sans effet)."""
+    """3 caractères au moins (2 : index trigramme sans effet)."""
     assert errors_of(client.get(f"/recherche/suggestions?{query}")) == {field: [message]}
     assert db.calls == []
 
 
-def test_old_parameters_are_ignored(client, db):
-    """Ancien contrat (q, boutique_id, par_page) : ignoré, comme tout
-    paramètre inconnu. Aucun consommateur à ce jour."""
+def test_q_boutique_id_and_par_page_are_ignored(client, db):
+    """q, boutique_id et par_page ne font pas partie du contrat : ignorés,
+    comme tout paramètre inconnu."""
     response = client.get("/recherche/produits?q=karite&boutique_id=3&par_page=50")
     assert response.status_code == 200
     ((sql, params),) = db.search_calls("page")
@@ -208,7 +207,7 @@ def test_like_wildcards_are_escaped_after_normalisation():
 
 
 def test_text_search_matches_name_description_shop_and_category():
-    """Décision 2 : aussi dans les noms de boutique et de catégorie (et la
+    """Aussi dans les noms de boutique et de catégorie (et la
     catégorie parente) ; pertinence par paliers, puis similarité au nom."""
     sql, _ = search.page_query(SearchFilters(text="karite pur"), "pertinence", 1)
     assert "p.texte_normalise LIKE" in sql
@@ -266,8 +265,8 @@ def test_category_filter_includes_subcategories_and_numeric_slugs():
     ],
 )
 def test_sort_orders_end_with_id_for_stable_pages(client, db, query, order_by):
-    """Diagnostic B et 6 : plus récents par défaut sans recherche, plus de tri
-    par note ; id en dernier (Django s'arrête à la date)."""
+    """Plus récents par défaut sans recherche, aucun tri par note ; id en
+    dernier (Django s'arrête à la date)."""
     assert client.get(f"/recherche/produits?{query}").status_code == 200
     ((sql, _),) = db.search_calls("page")
     assert sql.split("ORDER BY ", 1)[1].startswith(order_by + "\nLIMIT 20 OFFSET $")
@@ -290,7 +289,7 @@ def test_pagination_is_twenty_per_page_with_offset_parameter(client, db):
 
 
 def test_response_has_the_django_envelope_and_fields_only(client, db):
-    """Diagnostic 11 et A : champs de la liste Django, jamais de quantité en
+    """Champs de la liste Django, jamais de quantité en
     stock ni de description ; valeurs au format de Django."""
     db.search_rows = [product_row()]
     body = client.get("/recherche/produits").json()
@@ -333,7 +332,7 @@ def test_image_url_uses_media_base_url_and_django_encoding(client, db):
 
 @pytest.mark.parametrize("settings", [{"public_base_url": "https://anitche.test/fast"}], indirect=True)
 def test_next_and_previous_links_use_public_base_url_not_host(client, db):
-    """Décision 10 : liens absolus construits avec PUBLIC_BASE_URL, filtres
+    """Liens absolus construits avec PUBLIC_BASE_URL, filtres
     validés conservés (triés, comme DRF), jamais l'en-tête Host."""
     db.search_count = 45
     db.search_rows = [product_row()]
@@ -349,7 +348,7 @@ def test_next_and_previous_links_use_public_base_url_not_host(client, db):
 
 
 def test_last_page_has_no_next_and_page_beyond_is_404(client, db):
-    """Diagnostic 4 et C : au-delà de la dernière page, 404 « Page non
+    """Au-delà de la dernière page, 404 « Page non
     valide. » (texte de Django) avec un code machine, sans lire la page."""
     db.search_count = 21
     assert client.get("/recherche/produits?page=2").json()["next"] is None
@@ -370,7 +369,7 @@ def test_empty_catalogue_first_page_is_200(client, db):
 
 
 def test_facets_are_read_from_the_summary_query(client, db):
-    """Diagnostic 5 : facettes calculées par PostgreSQL sur l'ensemble filtré
+    """Facettes calculées par PostgreSQL sur l'ensemble filtré
     (tranches de prix : min inclus, max exclu, la dernière sans maximum)."""
     db.search_summary = {
         "total": 7,
@@ -401,8 +400,8 @@ def test_facets_are_read_from_the_summary_query(client, db):
 
 
 def test_suggestions_response(client, db):
-    """Diagnostic 11-12 : types réels (catégorie, boutique, produit), id et
-    slug pour naviguer ; plus de score ni de type « artisanat »."""
+    """Types réels (catégorie, boutique, produit), id et slug pour
+    naviguer ; ni score ni type « artisanat »."""
     db.suggestion_rows = [
         {"type": "categorie", "texte": "Beauté", "id": 8, "slug": "beaute"},
         {"type": "boutique", "texte": "Karité Doré", "id": 14, "slug": "karite-dore"},
@@ -425,7 +424,7 @@ def cache_keys(redis_server, pattern="fastapi:cache:*") -> list[str]:
 
 
 def test_second_call_reads_facets_and_total_from_cache_but_never_the_results(client, db, redis_server):
-    """Décision 6 : 2e appel identique sans requête SQL pour les facettes ;
+    """2e appel identique sans requête SQL pour les facettes ;
     la page de résultats est relue à chaque appel (un produit masqué dans
     Django disparaît à la requête suivante)."""
     db.search_rows = [product_row(id=1), product_row(id=2)]
@@ -561,8 +560,8 @@ def test_pool_forces_custom_plans_and_stays_read_only():
 
 
 def test_no_hardcoded_catalogue_nor_global_state():
-    """Diagnostic 1-2 : maquette CATALOGUE_INDEX supprimée. Module 4 : la
-    maquette du conseiller IA (ia_service.MOCK_PRODUCTS) l'est aussi ; le
+    """Aucun catalogue en dur : les modules de maquette recherche_service
+    (CATALOGUE_INDEX) et ia_service (MOCK_PRODUCTS) n'existent pas ; le
     conseiller lit le catalogue par cette recherche."""
     for module in ("app.services.recherche_service", "app.services.ia_service"):
         with pytest.raises(ModuleNotFoundError):

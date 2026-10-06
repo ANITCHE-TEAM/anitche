@@ -1,9 +1,9 @@
-"""Module 0 : authentification déléguée à Django (app/core/auth.py).
+"""Authentification déléguée à Django (app/core/auth.py).
 
 Le vrai code est exécuté : Django est simulé par httpx.MockTransport
-(tests/fakes.py), Redis par fakeredis. Failles du rapport module 0 §1
-couvertes : 8-13 (correspondance des réponses de Django), 16 (un client
-httpx et 1 à 2 appels à Django par requête), 17 (délai dépassé).
+(tests/fakes.py), Redis par fakeredis. Couvert : correspondance des
+réponses de Django, un seul client httpx et un appel à Django par jeton
+dans la durée du cache, délai dépassé.
 """
 import hashlib
 import json
@@ -41,13 +41,13 @@ def assert_401(response, detail: str) -> None:
 
 
 def test_missing_authorization_header_is_401_not_403(client, django):
-    """Faille 9 : 401 (et non 403) avec WWW-Authenticate, texte de DRF."""
+    """401 (et non 403) avec WWW-Authenticate, texte de DRF."""
     assert_401(client.get(PROTECTED), "Informations d'authentification non fournies.")
     assert django.requests == []
 
 
 def test_non_bearer_scheme_is_401(client, django):
-    """Faille 10."""
+    """Seul le schéma Bearer est accepté, sans appel à Django."""
     response = client.get(PROTECTED, headers={"Authorization": "Basic dXNlcjpwYXNz"})
     assert_401(response, "Informations d'authentification non fournies.")
     assert django.requests == []
@@ -75,7 +75,7 @@ def test_valid_token_calls_the_internal_verification_route(client, django):
 
 
 def test_django_401_is_relayed_with_www_authenticate(client, django):
-    """Faille 8 : format commun, message de Django relayé, WWW-Authenticate."""
+    """Format commun, message de Django relayé, WWW-Authenticate."""
     django.status_code = 401
     django.json = {"success": False, "status_code": 401, "detail": "Le jeton n'est pas valide.", "errors": {}}
     assert_401(client.get(PROTECTED, headers=AUTH_HEADERS), "Le jeton n'est pas valide.")
@@ -88,7 +88,7 @@ def test_django_401_without_detail_uses_default_message(client, django):
 
 
 def test_django_429_is_relayed_with_retry_after(client, django):
-    """Faille 11 : 429 avec Retry-After, et non 401 (qui ferait rafraîchir
+    """429 avec Retry-After, et non 401 (qui ferait rafraîchir
     le jeton, voire déconnecter l'utilisateur, à tort)."""
     django.status_code = 429
     django.headers = {"Retry-After": "120"}
@@ -102,7 +102,7 @@ def test_django_429_is_relayed_with_retry_after(client, django):
 
 @pytest.mark.parametrize("status_code", [500, 502, 503, 404, 400, 403, 301])
 def test_django_errors_and_unexpected_statuses_are_503(client, django, status_code):
-    """Faille 12-13 : une panne ou une mauvaise configuration de Django
+    """Une panne ou une mauvaise configuration de Django
     n'est pas un jeton invalide."""
     django.status_code = status_code
     response = client.get(PROTECTED, headers=AUTH_HEADERS)
@@ -120,7 +120,7 @@ def test_django_errors_and_unexpected_statuses_are_503(client, django, status_co
     [httpx.ReadTimeout("timeout"), httpx.ConnectTimeout("timeout"), httpx.ConnectError("refused")],
 )
 def test_django_unreachable_is_503_common_format(client, django, error):
-    """Faille 17 : 503 au format commun."""
+    """503 au format commun."""
     django.error = error
     response = client.get(PROTECTED, headers=AUTH_HEADERS)
     assert response.status_code == 503
@@ -151,7 +151,7 @@ def test_unexpected_django_200_body_is_503(client, django, body, caplog):
 
 
 def test_cache_one_django_call_for_many_requests(client, django, app):
-    """Faille 16 : un seul appel à Django pour N requêtes dans la durée du
+    """Un seul appel à Django pour N requêtes dans la durée du
     cache, avec un seul client httpx partagé (app.state.http)."""
     http_client = app.state.http
     for _ in range(5):
@@ -215,7 +215,7 @@ LIVRAISON_ID = "550e8400-e29b-41d4-a716-446655440000"
 
 
 def ws_close_code(client, token: str | None = TOKEN) -> int:
-    # Module 1 : jeton dans le premier message, plus dans l'URL.
+    # Jeton dans le premier message, jamais dans l'URL.
     with client.websocket_connect(f"/livraison/ws/{LIVRAISON_ID}") as websocket:
         if token is not None:
             websocket.send_json({"type": "auth", "token": token})
@@ -236,8 +236,8 @@ def test_websocket_close_codes_follow_django_answer(client, django, status_code,
 
 
 def test_websocket_valid_token_is_accepted(client, django, db):
-    # Jeton accepté : un seul appel à Django, puis contrôle des droits
-    # (module 1). Livraison inconnue ici : 4403, et non 4401.
+    # Jeton accepté : un seul appel à Django, puis contrôle des droits sur
+    # la livraison. Livraison inconnue ici : 4403, et non 4401.
     assert ws_close_code(client) == 4403
     assert len(django.requests) == 1
     assert db.queries

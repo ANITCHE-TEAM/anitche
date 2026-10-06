@@ -1,7 +1,7 @@
 """Intégration PostgreSQL : rôle anitche_fastapi_ro et requête d'accès.
 
 Schéma créé par les migrations Django, rôle créé par
-infra/postgres/fastapi_readonly.sql (rapport module 1 §b et §g).
+infra/postgres/fastapi_readonly.sql.
 """
 import asyncio
 import itertools
@@ -57,7 +57,7 @@ def test_column_privileges_are_exactly_the_granted_list(admin_database_url):
     ))
     assert {row["privilege_type"] for row in rows} == {"SELECT"}
     assert {(row["table_name"], row["column_name"]) for row in rows} == EXPECTED_COLUMN_PRIVILEGES
-    # Module 2 : seuls droits sur une relation entière, les trois vues
+    # Seuls droits sur une relation entière : les trois vues
     # publiques de la recherche, en lecture ; aucune table entière.
     tables = asyncio.run(_fetch(
         admin_database_url,

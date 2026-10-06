@@ -1,20 +1,19 @@
-"""Module 3 : scan QR (app/routeurs/scan_qr.py, app/services/qr_decode.py).
+"""Scan QR (app/routeurs/scan_qr.py, app/services/qr_decode.py).
 
-FastAPI décode seulement (option A du rapport module 3) : il dit si le
-contenu d'un QR, ou un code saisi, désigne un passeport ANITCHE, sans rien
-certifier. Django certifie, compte et journalise le scan
-(GET /api/passeports/verifier/<code>/) : aucune base ni aucun appel à Django
-ici.
+FastAPI décode seulement : il dit si le contenu d'un QR, ou un code saisi,
+désigne un passeport ANITCHE, sans rien certifier. Django certifie, compte
+et journalise le scan (GET /api/passeports/verifier/<code>/) : aucune base
+ni aucun appel à Django ici.
 
-Diagnostic du rapport module 3 couvert : 1 (passeports en dur), 2 (compteur
-en mémoire), 3 (domaine en dur, domaines étrangers certifiés), 4 (200
-`valide: false`), 5 (aucune taille maximale, saisie recopiée), 6 et 6 bis
-(extraction par regex, saisies légitimes refusées), 7 (faux certificat),
-A (routes synchrones), C (résumé OpenAPI trompeur).
+Couvert : aucun passeport en dur ni compteur en mémoire, seule l'origine
+de FRONTEND_BASE_URL acceptée, refus en 400 (jamais 200 `valide: false`),
+taille maximale et saisie jamais recopiée, analyse d'URL (pas d'extraction
+par regex) et saisies légitimes acceptées, aucun champ de certificat,
+fonctions sans E/S, résumé OpenAPI exact.
 
-Les 38 cas du prototype du rapport (§ 2 e : 10 saisies acceptées, 27
-contournements refusés, origine de dev) sont repris ici tels que listés,
-avec FRONTEND_BASE_URL = https://anitche.com (valeur de prod par défaut).
+Jeu de 38 cas de référence (« prototype » : 10 saisies acceptées, 27
+contournements refusés, origine de dev), avec FRONTEND_BASE_URL =
+https://anitche.com (valeur de prod par défaut).
 """
 import importlib
 import inspect
@@ -64,7 +63,7 @@ def refusal_of(response) -> str:
     return code
 
 
-# ------------------------------------------------ 38 cas du prototype (§ 2 e)
+# ------------------------------------------------ 38 cas de référence (prototype)
 
 PROTOTYPE_ACCEPTED = [
     pytest.param(CODE, id="code"),
@@ -80,7 +79,7 @@ PROTOTYPE_ACCEPTED = [
 ]
 
 PROTOTYPE_REFUSED = [
-    # Diagnostic 3 : certifiés par l'ancienne maquette.
+    # Hors de l'origine de FRONTEND_BASE_URL (schéma, hôte, port).
     pytest.param(f"https://evil.example/qr/verifier/{CODE}", FOREIGN, id="autre domaine"),
     pytest.param(f"https://anitche.com.evil.example/qr/verifier/{CODE}", FOREIGN, id="sous-domaine piege"),
     pytest.param(f"https://anitche.com@evil.example/qr/verifier/{CODE}", FOREIGN, id="identifiants userinfo"),
@@ -114,7 +113,7 @@ PROTOTYPE_REFUSED = [
 ]
 
 
-def test_prototype_counts_match_the_report():
+def test_prototype_case_counts():
     assert len(PROTOTYPE_ACCEPTED) == 10
     assert len(PROTOTYPE_REFUSED) == 27
     refusals = [case.values[1] for case in PROTOTYPE_REFUSED]
@@ -123,7 +122,7 @@ def test_prototype_counts_match_the_report():
 
 @pytest.mark.parametrize("qr_data", PROTOTYPE_ACCEPTED)
 def test_prototype_accepted_inputs(client, qr_data):
-    """Diagnostic 6 bis : saisies légitimes, toutes ramenées au même code."""
+    """Saisies légitimes, toutes ramenées au même code."""
     response = scan(client, qr_data)
     assert response.status_code == 200, response.text
     assert response.json() == {"code_passeport": CODE, "url_verification_publique": URL}
@@ -131,7 +130,7 @@ def test_prototype_accepted_inputs(client, qr_data):
 
 @pytest.mark.parametrize("qr_data, refusal", PROTOTYPE_REFUSED)
 def test_prototype_bypasses_are_refused(client, qr_data, refusal):
-    """Diagnostic 3, 4 et 6 : 400 avec le code machine, jamais un 200."""
+    """400 avec le code machine, jamais un 200."""
     assert refusal_of(scan(client, qr_data)) == refusal
 
 
@@ -192,7 +191,7 @@ def test_more_invalid_codes(qr_data):
 @pytest.mark.parametrize(
     "qr_data",
     [
-        f"https://anitche.ci/qr/verifier/{CODE}",  # ancien domaine : aucun QR imprimé avec
+        f"https://anitche.ci/qr/verifier/{CODE}",  # aucun QR n'est imprimé avec ce domaine
         f"https://www.anitche.com/qr/verifier/{CODE}",
         f"ftp://anitche.com/qr/verifier/{CODE}",
         f"https://anitche.com/qr/verifier/{CODE} svp",  # espace
@@ -201,7 +200,7 @@ def test_more_invalid_codes(qr_data):
         f"https://anitche.com\u0000.evil.example/qr/verifier/{CODE}",
         f"https://anitche.com\u200b/qr/verifier/{CODE}",  # espace sans chasse
         f"https://\u202eanitche.com/qr/verifier/{CODE}",  # inversion du sens d'écriture
-        # Antislash sans « @ » (le cas du prototype est aussi refusé par la
+        # Antislash sans « @ » (le cas de référence est aussi refusé par la
         # règle des identifiants) : refusé n'importe où, paramètres compris.
         f"{URL}?retour=\\evil.example",
         f"https://@anitche.com/qr/verifier/{CODE}",
@@ -264,7 +263,7 @@ def test_more_links_that_are_not_passports(qr_data):
     ],
 )
 def test_only_the_origin_of_frontend_base_url_is_accepted(base_url, accepted, refused):
-    """Décision 4 : l'origine de FRONTEND_BASE_URL seule (schéma, hôte, port)."""
+    """L'origine de FRONTEND_BASE_URL seule (schéma, hôte, port)."""
     assert qr_decode.decode(accepted + CODE, base_url) == CODE
     with pytest.raises(QrRefused) as error:
         qr_decode.decode(refused + CODE, base_url)
@@ -313,7 +312,7 @@ def test_invalid_body_is_400_on_qr_data(client, payload, message):
 
 
 def test_maximum_length_is_512_characters_after_stripping(client):
-    """Décision 3 : 512 caractères au plus, espaces de début et de fin
+    """512 caractères au plus, espaces de début et de fin
     retirés d'abord."""
     padding = "a" * (512 - len(f"{URL}?x="))
     longest = f"{URL}?x={padding}"
@@ -325,9 +324,9 @@ def test_maximum_length_is_512_characters_after_stripping(client):
 
 
 def test_huge_body_is_refused_without_being_processed(client):
-    """Diagnostic 5 : 1 Mo donnait une réponse de 3 Mo. Module 4 : refusé
-    dès l'en-tête Content-Length (413, MAX_REQUEST_BODY_BYTES), sans lire
-    le corps ; au-dessous de la limite, 400 (test précédent)."""
+    """Corps de 1 Mo refusé dès l'en-tête Content-Length (413,
+    MAX_REQUEST_BODY_BYTES), sans lire le corps ; au-dessous de la limite,
+    400 (test précédent)."""
     response = scan(client, "PAS-" + "A" * 1_000_000)
     assert response.status_code == 413
     assert response.json()["errors"] == {"code": ["corps_trop_volumineux"]}
@@ -357,7 +356,7 @@ ECHO_CASES = [
 
 @pytest.mark.parametrize("qr_data", ECHO_CASES)
 def test_input_is_never_echoed_in_response_or_logs(client, caplog, qr_data):
-    """Diagnostic 5 : ni dans la réponse (succès comme refus), ni dans les
+    """Ni dans la réponse (succès comme refus), ni dans les
     journaux, à aucun niveau."""
     caplog.set_level(logging.DEBUG)
     response = scan(client, qr_data)
@@ -387,7 +386,7 @@ def test_refusal_messages_never_contain_input():
     indirect=["settings"],
 )
 def test_response_is_the_code_and_the_url_built_from_frontend_base_url(client, expected):
-    """Décision 7 : exactement code_passeport et url_verification_publique,
+    """Exactement code_passeport et url_verification_publique,
     construite comme Django (FRONTEND_BASE_URL sans « / » final +
     /qr/verifier/ + code), jamais depuis la saisie."""
     response = scan(client, "pas 2026 1a2b3c4d")
@@ -401,7 +400,7 @@ def test_verification_url_is_built_like_django():
 
 
 def test_response_is_not_a_certificate(client):
-    """Diagnostic 1, 4 et 7 : aucun champ de certificat, et un code qui
+    """Aucun champ de certificat, et un code qui
     n'existe nulle part se décode comme un autre (aucun oracle
     d'existence) : c'est Django qui certifie."""
     known = scan(client, CODE).json()
@@ -410,9 +409,9 @@ def test_response_is_not_a_certificate(client):
     assert unknown["code_passeport"] == "PAS-1999-FFFFFFFF"
 
 
-def test_old_hard_coded_passports_are_just_invalid_codes(client):
-    """Diagnostic 1 : les 3 passeports inventés n'ont pas le format de
-    Django."""
+def test_demo_passport_codes_are_just_invalid_codes(client):
+    """Ces 3 codes de démonstration n'ont pas le format de Django : ce sont
+    des codes invalides comme les autres."""
     for old in ("PAS-2026-TIASSALE01", "PAS-2026-BASSAM02", "PAS-2026-MASQUE03"):
         assert refusal_of(scan(client, old)) == INVALID
 
@@ -432,17 +431,16 @@ def test_no_database_no_django_no_cache(client, db, django, redis_server):
 
 
 def test_repeated_scans_give_identical_responses(client):
-    """Diagnostic 2 : plus de compteur (l'ancienne maquette ajoutait 1 à
-    chaque appel, par processus)."""
+    """Aucun compteur : la réponse ne dépend pas du nombre de scans (un
+    compteur par processus serait faux avec plusieurs workers)."""
     responses = [scan(client, CODE) for _ in range(3)]
     assert len({response.text for response in responses}) == 1
 
 
 @pytest.mark.parametrize("module", [qr_decode, scan_qr_router], ids=["qr_decode", "scan_qr"])
 def test_modules_hold_no_mutable_state(module):
-    """Diagnostic 2 : aucun dictionnaire, liste ou ensemble modifiable au
-    niveau du module (l'ancien registre était un dict modifié à chaque
-    scan)."""
+    """Aucun dictionnaire, liste ou ensemble modifiable au niveau du module
+    (un registre modifié à chaque scan serait propre à chaque processus)."""
     for name, value in vars(module).items():
         if name.startswith("__") or isinstance(value, (ModuleType, FunctionType, type)):
             continue
@@ -452,22 +450,22 @@ def test_modules_hold_no_mutable_state(module):
                 value["x"] = 1  # type: ignore[index]
 
 
-def test_old_service_is_removed():
-    """Diagnostic 1 et 2 : registre en dur et compteur supprimés."""
+def test_qr_service_module_does_not_exist():
+    """Aucun module app.services.qr_service (registre en dur et compteur)."""
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("app.services.qr_service")
 
 
 def test_route_is_asynchronous():
-    """Constat A : aucune E/S, pas besoin du pool de threads."""
+    """Aucune E/S, pas besoin du pool de threads."""
     assert inspect.iscoroutinefunction(scan_qr_router.scanner_qr)
 
 
 # ------------------------------------------------ routes et OpenAPI
 
 
-def test_get_passport_route_is_removed(client):
-    """Décision 5 : GET /qr/passeport/{code} supprimée (consultation =
+def test_get_passport_route_does_not_exist(client):
+    """Aucune route GET /qr/passeport/{code} (consultation =
     Django, GET /api/passeports/verifier/{code}/)."""
     response = client.get(f"/qr/passeport/{CODE}")
     assert response.status_code == 404
@@ -508,7 +506,7 @@ def test_openapi_documents_the_decoding_contract(client):
     "settings", [{"rate_limits": {"qr_scan": "2/minute"}, "trusted_proxy_count": 1}], indirect=True
 )
 def test_qr_scan_limit_per_ip_with_retry_after(client, redis_server):
-    """Décision 6 : limite `qr_scan` par IP ; un refus compte aussi (sinon
+    """Limite `qr_scan` par IP ; un refus compte aussi (sinon
     on essaierait des contenus sans limite)."""
     first_ip = {"X-Forwarded-For": "203.0.113.10"}
     assert scan(client, CODE, headers=first_ip).status_code == 200
@@ -552,7 +550,7 @@ def test_code_format_is_the_django_one():
 
 
 def test_django_and_fastapi_read_the_same_frontend_base_url():
-    """Décision 4 : l'origine acceptée est celle que Django met dans les QR.
+    """L'origine acceptée est celle que Django met dans les QR.
     Prod : même variable pour les deux services. Dev : même valeur."""
     prod = yaml.safe_load((REPO / "infra" / "docker-compose.prod.yml").read_text(encoding="utf-8"))["services"]
     assert (

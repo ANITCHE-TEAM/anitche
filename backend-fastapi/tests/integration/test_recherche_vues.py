@@ -122,7 +122,7 @@ def test_product_hidden_in_django_is_hidden_in_search(catalogue, make_search_app
 def test_hiding_a_product_takes_effect_at_the_next_request(catalogue, make_search_app):
     """Aucun cache sur les résultats : boutique suspendue (compte admin) →
     produit absent dès la requête suivante. Le total, lui, vient du cache
-    (jusqu'à 60 s de retard, décision 6)."""
+    (jusqu'à 60 s de retard, SEARCH_CACHE_TTL)."""
     shop = catalogue.shop(f"Atelier {catalogue.marker}")
     product = catalogue.product(f"Vase {catalogue.marker}", shop=shop)
 
