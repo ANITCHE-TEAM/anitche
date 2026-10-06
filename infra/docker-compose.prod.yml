@@ -6,7 +6,8 @@ version: "3.9"
 #
 # Différences clés avec le dev :
 #   - le frontend est buildé en statique (Dockerfile.prod) et servi par Nginx
-#   - Nginx fait aussi office de reverse proxy vers Django (/api/) et FastAPI (/fast/)
+#   - Nginx fait aussi office de reverse proxy vers Django (/api/, /admin/) et
+#     FastAPI (/fast/), et sert /static/ et les médias publics (/media/)
 #   - Django tourne avec Gunicorn, pas le serveur de dev
 #   - les secrets viennent d'un fichier .env (jamais commité), pas de valeurs par défaut
 
@@ -29,6 +30,11 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   backend-django:
     build:
@@ -38,8 +44,87 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.prod
       SECRET_KEY: ${SECRET_KEY}
+      # Clés de chiffrement des données KYC (apps.core.fields), clé active en
+      # premier. Sans elles, prod.py refuse de démarrer (Django et Celery).
+      FIELD_ENCRYPTION_KEYS: ${FIELD_ENCRYPTION_KEYS}
+      # Paiements (apps.paiements) : fournisseur et clés CinetPay. Sans
+      # elles, prod.py refuse de démarrer (Django et Celery).
+      PAIEMENT_FOURNISSEUR: ${PAIEMENT_FOURNISSEUR}
+      CINETPAY_API_KEY: ${CINETPAY_API_KEY}
+      CINETPAY_API_PASSWORD: ${CINETPAY_API_PASSWORD}
+      BACKEND_BASE_URL: ${BACKEND_BASE_URL}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      # Emails (codes OTP, notifications) : serveur SMTP du fournisseur et
+      # expéditeur @anitche.com. Sans eux, prod.py refuse de démarrer
+      # (Django et Celery).
+      EMAIL_BACKEND: ${EMAIL_BACKEND}
+      EMAIL_HOST: ${EMAIL_HOST}
+      EMAIL_PORT: ${EMAIL_PORT:-587}
+      EMAIL_USE_TLS: ${EMAIL_USE_TLS:-True}
+      EMAIL_USE_SSL: ${EMAIL_USE_SSL:-False}
+      EMAIL_TIMEOUT: ${EMAIL_TIMEOUT:-10}
+      EMAIL_HOST_USER: ${EMAIL_HOST_USER}
+      EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD}
+      DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL}
+      # URL de vérification des passeports QR (apps.passeport_qr).
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-https://anitche.com}
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: db
+      DB_PORT: 5432
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      # MEDIA_ROOT (config/settings/base.py) = BASE_DIR/media = /app/media
+      # dans ce conteneur (WORKDIR /app, voir Dockerfile). Sans volume
+      # nommé, tout fichier uploadé est perdu au prochain rebuild/redeploy.
+      # Les fichiers privés (KYC, pièces jointes du support, photos des
+      # retours) ne sont servis que par les vues Django protégées ; nginx
+      # monte ce volume en lecture seule et n'en sert que les dossiers
+      # publics (images des produits et catégories, logos et bannières des
+      # boutiques) : voir infra/nginx/nginx.conf.
+      - anitche_media:/app/media
+      # STATIC_ROOT = /app/staticfiles : collectstatic y écrit au démarrage,
+      # nginx le sert sous /static/ (lecture seule).
+      - anitche_static:/app/staticfiles
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  celery-worker:
+    build:
+      context: ../backend-django
+    restart: unless-stopped
+    command: celery -A config worker -l info
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.prod
+      SECRET_KEY: ${SECRET_KEY}
+      # Clés de chiffrement des données KYC (apps.core.fields), clé active en
+      # premier. Sans elles, prod.py refuse de démarrer (Django et Celery).
+      FIELD_ENCRYPTION_KEYS: ${FIELD_ENCRYPTION_KEYS}
+      # Paiements (apps.paiements) : fournisseur et clés CinetPay. Sans
+      # elles, prod.py refuse de démarrer (Django et Celery).
+      PAIEMENT_FOURNISSEUR: ${PAIEMENT_FOURNISSEUR}
+      CINETPAY_API_KEY: ${CINETPAY_API_KEY}
+      CINETPAY_API_PASSWORD: ${CINETPAY_API_PASSWORD}
+      BACKEND_BASE_URL: ${BACKEND_BASE_URL}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS}
+      # Inutile au worker, mais prod.py refuse de démarrer sans elle.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      # Emails (codes OTP, notifications) : envoyés par ce worker. Sans eux,
+      # prod.py refuse de démarrer (Django et Celery).
+      EMAIL_BACKEND: ${EMAIL_BACKEND}
+      EMAIL_HOST: ${EMAIL_HOST}
+      EMAIL_PORT: ${EMAIL_PORT:-587}
+      EMAIL_USE_TLS: ${EMAIL_USE_TLS:-True}
+      EMAIL_USE_SSL: ${EMAIL_USE_SSL:-False}
+      EMAIL_TIMEOUT: ${EMAIL_TIMEOUT:-10}
+      EMAIL_HOST_USER: ${EMAIL_HOST_USER}
+      EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD}
+      DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL}
       DB_NAME: ${DB_NAME}
       DB_USER: ${DB_USER}
       DB_PASSWORD: ${DB_PASSWORD}
@@ -50,17 +135,39 @@ services:
       db:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
 
-  celery-worker:
+  celery-beat:
     build:
       context: ../backend-django
     restart: unless-stopped
-    command: celery -A config worker -l info
+    command: celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.prod
       SECRET_KEY: ${SECRET_KEY}
+      # Clés de chiffrement des données KYC (apps.core.fields), clé active en
+      # premier. Sans elles, prod.py refuse de démarrer (Django et Celery).
+      FIELD_ENCRYPTION_KEYS: ${FIELD_ENCRYPTION_KEYS}
+      # Paiements (apps.paiements) : fournisseur et clés CinetPay. Sans
+      # elles, prod.py refuse de démarrer (Django et Celery).
+      PAIEMENT_FOURNISSEUR: ${PAIEMENT_FOURNISSEUR}
+      CINETPAY_API_KEY: ${CINETPAY_API_KEY}
+      CINETPAY_API_PASSWORD: ${CINETPAY_API_PASSWORD}
+      BACKEND_BASE_URL: ${BACKEND_BASE_URL}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS}
+      # Inutile à beat, mais prod.py refuse de démarrer sans elle.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      # Emails : beat n'en envoie aucun, mais charge prod.py, qui refuse de
+      # démarrer sans eux (Django et Celery).
+      EMAIL_BACKEND: ${EMAIL_BACKEND}
+      EMAIL_HOST: ${EMAIL_HOST}
+      EMAIL_PORT: ${EMAIL_PORT:-587}
+      EMAIL_USE_TLS: ${EMAIL_USE_TLS:-True}
+      EMAIL_USE_SSL: ${EMAIL_USE_SSL:-False}
+      EMAIL_TIMEOUT: ${EMAIL_TIMEOUT:-10}
+      EMAIL_HOST_USER: ${EMAIL_HOST_USER}
+      EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD}
+      DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL}
       DB_NAME: ${DB_NAME}
       DB_USER: ${DB_USER}
       DB_PASSWORD: ${DB_PASSWORD}
@@ -68,7 +175,10 @@ services:
       DB_PORT: 5432
       REDIS_URL: redis://redis:6379/0
     depends_on:
-      - backend-django
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   backend-fastapi:
     build:
@@ -96,12 +206,74 @@ services:
     restart: unless-stopped
     ports:
       - "80:80"
+      - "443:443"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # Certificats émis/renouvelés par le service "certbot"
+      # ci-dessous, partagés en lecture avec Nginx via ce volume commun.
+      - certbot_conf:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot:ro
+      # /static/ et médias publics sous /media/ (infra/nginx/nginx.conf),
+      # en lecture seule : nginx ne peut ni modifier ni ajouter un fichier.
+      - anitche_static:/srv/static:ro
+      - anitche_media:/srv/media:ro
     depends_on:
       - frontend
       - backend-django
       - backend-fastapi
 
+  # Renouvelle automatiquement le certificat Let's Encrypt toutes les
+  # 12h (certbot n'agit que si le certificat approche de son expiration —
+  # à 30 jours de l'échéance par défaut). L'émission INITIALE du certificat
+  # ne passe pas par ce service : voir infra/scripts/init-lets-encrypt.sh,
+  # à lancer une seule fois avant le tout premier démarrage de Nginx en 443.
+  certbot:
+    image: certbot/certbot
+    restart: unless-stopped
+    volumes:
+      - certbot_conf:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    entrypoint: >
+      sh -c "trap exit TERM;
+      while :; do
+        certbot renew --webroot -w /var/www/certbot --quiet;
+        sleep 12h & wait $${!};
+      done"
+
+  # Sauvegarde chiffrée hors serveur de la base et des médias, et
+  # restauration (restic, dépôt S3 ; docs/SAUVEGARDES.md). Profil « backup » :
+  # jamais démarré par « up -d ». Conteneur à usage unique (run --rm) lancé
+  # par infra/scripts/backup.sh (cron, chaque nuit) et
+  # infra/scripts/restore.sh. Reçoit seulement les variables de la base et
+  # de la sauvegarde : ni SECRET_KEY, ni FIELD_ENCRYPTION_KEYS, ni les clés
+  # CinetPay ; aucun autre service ne reçoit les variables BACKUP_*.
+  backup:
+    build:
+      context: ./backup
+    profiles: ["backup"]
+    environment:
+      RESTIC_REPOSITORY: ${BACKUP_REPOSITORY}
+      RESTIC_PASSWORD: ${BACKUP_PASSWORD}
+      AWS_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_ACCESS_KEY}
+      # Vide : aucune région (même effet qu'une variable absente pour restic).
+      AWS_DEFAULT_REGION: ${BACKUP_S3_REGION:-}
+      RESTIC_CACHE_DIR: /cache
+      PGHOST: db
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      PGPASSWORD: ${DB_PASSWORD}
+    volumes:
+      # Lecture seule : la sauvegarde ne modifie jamais les médias.
+      - anitche_media:/sauvegarde/media:ro
+      # Cache de restic (index et métadonnées du dépôt, chiffrés comme
+      # lui) : évite de les retélécharger chaque nuit.
+      - anitche_backup_cache:/cache
+
 volumes:
   anitche_pgdata:
+  anitche_media:
+  anitche_static:
+  certbot_conf:
+  certbot_www:
+  anitche_backup_cache:

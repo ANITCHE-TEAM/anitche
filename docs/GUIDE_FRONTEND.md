@@ -1,0 +1,243 @@
+# Guide frontend — brancher l'API Django d'ANITCHE
+
+> Document vivant. Pour qui développe le frontend (React) contre le backend Django.
+> Les règles métier détaillées de chaque module sont dans les `MODULE_*.md` (index au § 10).
+
+## 1. Démarrer en local
+
+```bash
+# depuis la racine du dépôt
+docker compose -f infra/docker-compose.yml up -d
+
+# une fois la stack démarrée : données de démonstration (§ 2)
+docker exec anitche-backend python manage.py seed_demo
+```
+
+| Service | Adresse |
+|---|---|
+| Frontend (Vite) | http://localhost:5173 |
+| API Django | http://localhost:8000/api/ |
+| Swagger UI | http://localhost:8000/api/docs/ |
+| ReDoc | http://localhost:8000/api/redoc/ |
+| Schéma OpenAPI brut | http://localhost:8000/api/schema/ |
+| Mailpit (emails de dev) | http://localhost:8025 |
+
+Le conteneur `anitche-backend` applique les migrations au démarrage. Sans Docker, voir [`GUIDE_STRUCTURE_ANITCHE.md`](./GUIDE_STRUCTURE_ANITCHE.md) § 4.
+
+## 2. Données et comptes de démonstration
+
+> ⚠️ **DEV UNIQUEMENT.** Le mot de passe ci-dessous est public : ces comptes n'existent que sur les bases de développement. La commande refuse de tourner en production (DEBUG désactivé, settings de production ou fournisseur de paiement réel), et l'app `apps.demo` n'y est même pas installée.
+
+```bash
+python manage.py seed_demo           # crée les données (sans effet si elles existent déjà)
+python manage.py seed_demo --reset   # les supprime puis les recrée
+```
+
+Tous les comptes ont le mot de passe **`Demo-Anitche-2026!`** et un email déjà vérifié.
+
+| Rôle | Email | Ce qu'on y trouve |
+|---|---|---|
+| Administrateur | `admin@demo.anitche.test` | validation des vendeurs, assignation des livreurs, modération |
+| Support | `support@demo.anitche.test` | un ticket ouvert par la cliente, avec une réponse |
+| Client | `client@demo.anitche.test` | 5 commandes, un retour, des points de fidélité, un coupon, un ticket |
+| Livreur | `livreur@demo.anitche.test` | 2 livraisons effectuées (code de livraison saisi) |
+| Vendeur — Pagnes & Style | `vendeur.mode@demo.anitche.test` | commande livrée avec une demande de retour approuvée |
+| Vendeur — Adjamé Tech | `vendeur.tech@demo.anitche.test` | livraison offerte ; un produit sous le seuil de stock |
+| Vendeur — Maison Akwaba | `vendeur.maison@demo.anitche.test` | une commande en préparation, une commande annulée |
+| Vendeur — Karité Doré | `vendeur.beaute@demo.anitche.test` | une commande payée à préparer |
+
+Contenu créé :
+
+- **Catalogue** : 4 catégories (Mode, Électronique, Maison, Beauté), 4 boutiques publiques de vendeurs validés, 12 produits avec variantes, prix promotionnels, stock et une image générée par produit (logo de boutique compris).
+- **Commandes de la cliente** : livrée, livrée avec un retour approuvé, en préparation, payée (`confirmee`), annulée par la cliente. Les paiements sont passés par le fournisseur simulé (notification signée), comme en réel. Seule la commande **en préparation** (Maison Akwaba) a un **point GPS** (environ Angré, Cocody : `5.397340`, `-3.986620`) : c'est la prochaine à livrer, pour tester le suivi du livreur et l'estimation d'arrivée. Les autres n'en ont pas (cas « sans point »).
+- **Fidélité** : 65 points crédités sur la commande livrée (le délai de rétractation est simulé par une horloge décalée), dont 50 convertis en coupon de 5 % ; les points de la commande avec retour restent en attente.
+- **Support** : un ticket sur la commande en préparation.
+
+Tout passe par l'API réelle (mêmes vues, permissions et services que le frontend). `--reset` ne supprime que les comptes `@demo.anitche.test` et ce qui leur est rattaché ; les catégories sont conservées. Si une donnée hors démo en dépend (par exemple une commande passée par un vrai compte dans une boutique de démo), la commande refuse et ne supprime rien.
+
+## 3. Documentation interactive (Swagger)
+
+- **Swagger UI** (http://localhost:8000/api/docs/) : bouton **Authorize**, coller le jeton `access` (sans le préfixe `Bearer`). L'autorisation est conservée au rechargement de la page.
+- Endpoints regroupés par module (tags), réponses d'erreur documentées au format commun (composant `Erreur`).
+- Les notifications des fournisseurs de paiement (webhooks) n'y figurent pas : le frontend ne les appelle jamais.
+- **Absente en production** (décision d'équipe, vérifiée par un test) : ne jamais faire dépendre le frontend de `/api/schema/` à l'exécution. La référence est le fichier versionné `backend-django/schema.yaml`, que la CI vérifie à chaque push (schéma sans avertissement et à jour).
+
+## 4. Authentification (JWT)
+
+1. `POST /api/utilisateurs/connexion/` avec `{"email", "password"}` → `{"access", "refresh"}`.
+2. Chaque requête authentifiée : en-tête `Authorization: Bearer <access>`.
+3. `access` expire au bout de **15 minutes** → réponse **401**. Appeler alors `POST /api/utilisateurs/connexion/rafraichir/` avec `{"refresh"}` : il renvoie un nouveau couple. Le `refresh` (7 jours) est **à usage unique** : toujours remplacer celui qu'on a stocké par le nouveau. Rejouer un ancien `refresh` échoue en 401 : renvoyer vers la connexion.
+4. Déconnexion : `POST /api/utilisateurs/deconnexion/` avec `{"refresh"}` (révoque le jeton).
+5. Un changement de mot de passe invalide tous les jetons existants.
+6. **Email non vérifié** : certaines actions (commander, devenir vendeur, changer de contact) répondent **403** avec `errors.code = ["email_non_verifie"]`. Afficher alors l'écran de saisie du code (voir [`MODULE_UTILISATEURS.md`](./MODULE_UTILISATEURS.md) § 11).
+
+Un intercepteur axios qui rafraîchit sur 401 puis rejoue la requête une seule fois suffit ; sérialiser les rafraîchissements concurrents (un seul appel à la fois), sinon deux onglets consomment le même `refresh`.
+
+## 5. Format d'erreur
+
+Toutes les erreurs de l'API ont la même forme :
+
+```json
+{
+  "success": false,
+  "status_code": 400,
+  "detail": "adresse_livraison.commune: Ce champ est obligatoire.",
+  "errors": {
+    "adresse_livraison.commune": ["Ce champ est obligatoire."]
+  }
+}
+```
+
+- `detail` : toujours une chaîne, le message principal à afficher.
+- `errors` : toujours un objet (jamais `null`), clé → **liste** de messages. `{}` quand aucun champ n'est en cause (401, 403, 404, refus métier…).
+- Champs imbriqués : clé à points (`adresse_livraison.commune`, `articles.0.quantite`) ; erreur sans champ : `non_field_errors`.
+- Codes à traiter : **400** validation ou refus métier, **401** non authentifié ou jeton expiré, **403** interdit, **404** introuvable (aussi pour une ressource d'un autre utilisateur ; `detail` vaut alors « Ressource introuvable. », sauf message plus précis de la route), **409** transition impossible (annuler une commande en préparation…), **429** limite de débit (§ 7), **503** service indisponible, **500** erreur interne (message générique, rien de technique).
+- Seule exception : les webhooks des fournisseurs de paiement, qui ne concernent pas le frontend.
+
+## 6. Pagination
+
+Les listes sont paginées par défaut :
+
+```json
+{ "count": 42, "next": "http://…?page=3", "previous": "http://…?page=1", "results": [ … ] }
+```
+
+20 éléments par page, paramètre `?page=N`. Exception : `GET /api/catalogue/categories/` renvoie un tableau simple (liste courte, ordonnée pour l'affichage). Swagger indique pour chaque liste si elle est paginée.
+
+## 7. Limites de débit (429)
+
+Au-delà d'une limite, l'API répond **429** au format commun ; l'en-tête **`Retry-After`** donne le nombre de secondes à attendre. Afficher un message (« Trop de tentatives, réessayez dans N minutes ») et désactiver le bouton, sans relancer automatiquement.
+
+Limites les plus visibles côté interface (production) : connexion 10/h, envoi de code OTP 5/h, inscription 10/h par IP, validation du panier 20/h, paiements 20/h, conversion de points 20/h, vérification de coupon 30/h. La liste complète est dans `REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']` (`config/settings/base.py`). En dev, certaines sont relevées pour Postman (`config/settings/dev.py`) : ne pas en déduire le comportement de production.
+
+## 8. Conventions de données
+
+- **Montants en FCFA entiers, reçus en chaînes décimales.** Tous les champs monétaires (`prix`, `montant_total`, `frais_livraison`…) arrivent comme des chaînes : `"65000.00"`, partie décimale toujours nulle. Ne jamais les additionner tels quels (`"1500.00" + "500.00"` concatène) :
+
+  ```js
+  // Chaîne décimale de l'API → entier FCFA (null reste null, ex. prix_promo absent)
+  const versFcfa = (valeur) => (valeur == null ? null : Math.round(Number(valeur)));
+  // Affichage : « 65 000 FCFA »
+  const afficherFcfa = (valeur) => `${new Intl.NumberFormat('fr-FR').format(versFcfa(valeur))} FCFA`;
+  ```
+
+  En envoi (prix d'un produit, montant d'un coupon à vérifier), transmettre un entier (`15000`) ou sa chaîne (`"15000"`) ; les prix du catalogue (`prix`, `prix_promo`, `prix_base`) avec centimes sont refusés (400). Les montants sont positifs, sauf `montant_ajustements` (toujours ≤ 0) et `montant_net` d'un reversement. `poids_kg`, `taux_commission` (pourcentage) et `valeur` d'un coupon (pourcentage ou montant) peuvent avoir des décimales. Swagger montre pour chaque champ un exemple réaliste (`"15000.00"`).
+- **Identifiants** : entiers pour les utilisateurs, boutiques et produits ; UUID pour les commandes, paiements, livraisons, retours et tickets.
+- **Envois de fichiers** (`multipart/form-data`) : KYC, logo de boutique, images produit, photos de retour, pièces jointes du support. Un booléen **absent** du formulaire est ignoré, comme en JSON : il prend la valeur par défaut à la création (une boutique créée avec son logo est ouverte, un produit est actif) et garde sa valeur actuelle en modification. Pour changer un booléen, l'envoyer explicitement (`est_active=false`).
+- **Images publiques** (produits, catégories, logos et bannières de boutiques) : l'API renvoie une URL absolue `…/media/…`, utilisable telle quelle dans un `<img src>`, sans jeton. En production, nginx les sert directement sous `https://anitche.com/media/` (cache 7 jours) ; tout autre chemin sous `/media/` répond 404.
+- **Fichiers protégés** (KYC, photos de retour, pièces jointes) : jamais d'URL média directe ; les télécharger via leurs endpoints dédiés, avec le jeton.
+
+## 9. Emails de dev et types TypeScript
+
+**Mailpit** (http://localhost:8025) reçoit tous les emails envoyés en dev : codes OTP, code de livraison, notifications. Aucun email ne sort vers l'extérieur. Détails : [`GUIDE_STRUCTURE_ANITCHE.md`](./GUIDE_STRUCTURE_ANITCHE.md) § 4.
+
+**Types générés depuis le schéma** avec [openapi-typescript](https://openapi-ts.dev) (OpenAPI 3.1) :
+
+```bash
+cd frontend
+npx openapi-typescript ../backend-django/schema.yaml -o src/services/api-types.d.ts
+```
+
+À relancer à chaque modification de `schema.yaml`. Le frontend étant en JavaScript, les types s'utilisent via JSDoc (l'éditeur les vérifie) :
+
+```js
+/** @typedef {import('./api-types').components['schemas']['ProduitPublicDetail']} ProduitDetail */
+```
+
+Les corps de requête ont leur propre composant (`…Request`, sans les champs en lecture seule) ; les énumérations ont des noms stables (`StatutCommandeEnum`, `StatutLivraisonEnum`…).
+
+## 10. Index des « Impact frontend »
+
+Chaque module documente les changements de contrat à intégrer côté interface :
+
+| Module | Section |
+|---|---|
+| Utilisateurs | [`MODULE_UTILISATEURS.md` § 11](./MODULE_UTILISATEURS.md#11-impact-frontend) |
+| Commandes | [`MODULE_COMMANDES.md` § 9](./MODULE_COMMANDES.md#9-impact-frontend) |
+| Paiements | [`MODULE_PAIEMENTS.md` § 10](./MODULE_PAIEMENTS.md#10-impact-frontend) |
+| Livraison | [`MODULE_LIVRAISON.md` § 10](./MODULE_LIVRAISON.md#10-impact-frontend) |
+| Retours | [`MODULE_RETOURS.md` § 8](./MODULE_RETOURS.md#8-impact-frontend) |
+| Fidélité | [`MODULE_FIDELITE.md` § 6](./MODULE_FIDELITE.md#6-impact-frontend) |
+| Notifications | [`MODULE_NOTIFICATIONS.md` § 5](./MODULE_NOTIFICATIONS.md#5-impact-frontend) |
+| Support | [`MODULE_SUPPORT.md` § 6](./MODULE_SUPPORT.md#6-impact-frontend) |
+| Vendeurs, catalogue, panier, passeports QR | pas de section dédiée : le contrat de chaque endpoint est dans le `MODULE_*.md` correspondant |
+
+## 11. Point GPS au checkout (« ma position »)
+
+Facultatif. Le checkout (`POST /api/commandes/valider-panier/` et `simuler-frais/`) fonctionne sans point, comme avant. Avec un point, le livreur peut naviguer jusqu'au lieu exact, et le suivi peut estimer son arrivée. **Sans point, aucune distance ni estimation n'est affichée** : ne pas en inventer une.
+
+```json
+{
+  "adresse_livraison": {
+    "commune": "Cocody",
+    "quartier": "Angré 8e Tranche",
+    "point_de_repere": "Derrière la pharmacie",
+    "telephone": "0707070707",
+    "latitude": 5.359952,
+    "longitude": -3.986912
+  }
+}
+```
+
+Règles du serveur ([`MODULE_COMMANDES.md`](./MODULE_COMMANDES.md) § 3 bis) :
+
+- `latitude` et `longitude` sont des **nombres** (jamais des chaînes, pas de `toFixed()`), envoyés **ensemble** ou pas du tout (`null` vaut absent).
+- Côte d'Ivoire uniquement : latitude de 4 à 11, longitude de -9 à -2. Le serveur arrondit à 6 décimales.
+- Refus **400** sur `errors["adresse_livraison.latitude"]` ou `errors["adresse_livraison.longitude"]` : coordonnée seule, point hors de Côte d'Ivoire (géolocalisation d'un ordinateur via un VPN, par exemple), valeur non numérique. Afficher « Position non reconnue » et proposer de **continuer sans point**.
+- En lecture, `adresse_livraison.latitude` / `longitude` (détail de commande, groupes) et `adresse.latitude` / `longitude` (suivi de livraison) sont des nombres, ou `null` sans point.
+
+Bouton « Utiliser ma position » :
+
+```js
+// Position de l'appareil, ou null (refus, délai dépassé, navigateur sans
+// géolocalisation) : le checkout continue alors sans point.
+function lirePosition() {
+  return new Promise((resoudre) => {
+    if (!('geolocation' in navigator)) return resoudre(null);
+    navigator.geolocation.getCurrentPosition(
+      ({ coords }) => resoudre({ latitude: coords.latitude, longitude: coords.longitude, precision: coords.accuracy }),
+      () => resoudre(null),
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 },
+    );
+  });
+}
+
+// Au clic sur le bouton (jamais au chargement de la page) :
+const position = await lirePosition();
+
+const corps = {
+  adresse_livraison: {
+    commune, quartier, point_de_repere, telephone,
+    // Des nombres, les deux ensemble ; rien du tout sans position.
+    ...(position && { latitude: position.latitude, longitude: position.longitude }),
+  },
+};
+```
+
+- Demander la position **seulement au clic**, avec une phrase claire : « Utiliser ma position actuelle comme lieu de livraison ». Le client doit être **sur le lieu de livraison** : sinon il laisse le champ vide et se fie au point de repère. Afficher `precision` (mètres) aide à juger un point approximatif.
+- La géolocalisation du navigateur exige **HTTPS** (ou `localhost` en dev).
+- Pour changer de lieu, redemander la position ou retirer le point (bouton « Ne pas utiliser ma position »).
+
+> **Vie privée.** Ce point est l'emplacement précis du domicile du client. L'API ne le montre qu'**au client**, **au livreur assigné pendant la livraison** (masqué une fois la livraison livrée ou annulée) et **à l'administration** ; **jamais au vendeur**. Côté interface : ne pas l'afficher aux autres rôles, ne pas le garder dans `localStorage` au-delà du checkout, ne pas l'envoyer à un service tiers (analytics, logs).
+
+## 12. Frais vendeur (« Mes reversements »)
+
+Règle de la plateforme depuis le **28 septembre 2026** ([`MODULE_PAIEMENTS.md`](./MODULE_PAIEMENTS.md) § 5) :
+
+- **14 % du prix de l'article** (prix effectif, promotion comprise ; un coupon du client ne réduit jamais la part du vendeur) ;
+- **plus un frais fixe par article** : **100 FCFA** si ce prix est inférieur ou égal à **3 000 FCFA**, **200 FCFA** au-delà ;
+- montants **TVA incluse** : aucune TVA ne s'y ajoute. Écrire « TVA incluse » à côté des frais ; ne pas afficher de montant HT ni de TVA séparée (la décomposition n'existe pas encore : elle viendra avec les factures de commission).
+
+Ce que voit le vendeur (`GET /api/paiements/vendeur/reversements/`) : les frais **figés à la commande**, ligne par ligne, et leur total sur le reversement. Exemple, 3 savons à 2 000 FCFA :
+
+```json
+{
+  "nom_produit": "Savon noir", "quantite": 3, "prix_unitaire": "2000.00",
+  "taux_commission": "14.00", "frais_fixe_unitaire": 100,
+  "montant_commission": "840.00", "montant_frais_fixes": "300.00", "montant_net_vendeur": "4860.00"
+}
+```
+
+- **Ne jamais recalculer les frais côté interface** : afficher ceux de l'API. Une commande passée avant le 28/09/2026 garde `"12.00"` et `200` ; une boutique peut avoir une offre propre (autre taux, autre frais fixe), prioritaire sur la règle de la plateforme.
+- La commission est arrondie au franc sur le total de la ligne (un demi-franc au franc supérieur) : 2 999 FCFA → 420 FCFA de commission, pas 419,86.
+- Le texte de la règle (page d'aide, inscription vendeur) : « Frais ANITCHE : 14 % du prix de l'article + 100 FCFA par article jusqu'à 3 000 FCFA (200 FCFA au-delà), TVA incluse. »

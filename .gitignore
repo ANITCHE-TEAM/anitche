@@ -1,12 +1,18 @@
 # Environnements virtuels Python
 env/
 venv/
+.venv/
+
+# Bases de données locales
+*.sqlite3
+db.sqlite3
 
 # Python
 __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
+.pytest_cache/
 
 # Variables d'environnement / secrets
 .env
@@ -33,3 +39,7 @@ staticfiles/
 
 # Logs
 *.log
+
+# Journal et fichiers locaux des sauvegardes (infra/scripts/backup.sh) :
+# jamais une sauvegarde dans le dépôt
+infra/backups/
