@@ -17,7 +17,7 @@ from unittest import mock
 from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.http import Http404, QueryDict
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 from PIL import Image
 from rest_framework import serializers
 from rest_framework.exceptions import NotFound, ValidationError
@@ -395,6 +395,39 @@ APPLICATIONS_METIER = [
     "utilisateurs", "vendeurs", "catalogue", "panier", "commandes", "paiements", "livraison",
     "retours", "fidelite", "notifications", "support", "passeport_qr",
 ]
+
+
+ORIGINE_PORTAIL = "https://vendeur.exemple.test"
+
+
+@override_settings(CORS_ALLOWED_ORIGINS=[ORIGINE_PORTAIL])
+class CorsEnTetesExposesTests(APITestCase):
+    """Un portail servi depuis une autre origine lit le délai d'un 429 et le
+    nom d'un fichier téléchargé (django-cors-headers)."""
+
+    def setUp(self):
+        cache.clear()
+        self.addCleanup(cache.clear)
+
+    def test_retry_after_lisible_sur_un_429(self):
+        with mock.patch.object(ScopedRateThrottle, "THROTTLE_RATES", {"catalogue_public": "0/hour"}):
+            reponse = self.client.get("/api/catalogue/produits/", HTTP_ORIGIN=ORIGINE_PORTAIL)
+        self.assertEqual(reponse.status_code, 429)
+        self.assertTrue(reponse.has_header("Retry-After"))
+        self.assertEqual(reponse["Access-Control-Allow-Origin"], ORIGINE_PORTAIL)
+        exposes = {nom.strip().lower() for nom in reponse["Access-Control-Expose-Headers"].split(",")}
+        self.assertEqual(exposes, {"retry-after", "content-disposition"})
+
+    def test_requete_prealable_mise_en_cache_un_jour(self):
+        reponse = self.client.options(
+            "/api/catalogue/produits/", HTTP_ORIGIN=ORIGINE_PORTAIL, HTTP_ACCESS_CONTROL_REQUEST_METHOD="GET",
+        )
+        self.assertEqual(reponse["Access-Control-Max-Age"], "86400")
+
+    def test_origine_non_autorisee_sans_en_tete_cors(self):
+        reponse = self.client.get("/api/catalogue/produits/", HTTP_ORIGIN="https://autre.exemple.test")
+        self.assertFalse(reponse.has_header("Access-Control-Allow-Origin"))
+        self.assertFalse(reponse.has_header("Access-Control-Expose-Headers"))
 
 
 def image_png(nom="image.png"):

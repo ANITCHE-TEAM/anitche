@@ -61,6 +61,16 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
+# CORS (origines autorisées : dev.py, prod.py). En-têtes de réponse lisibles
+# par un portail servi depuis une autre origine : le délai d'un 429
+# (Retry-After) et le nom d'un fichier téléchargé (Content-Disposition).
+# Ces en-têtes sont déjà envoyés : rien de plus n'est exposé.
+CORS_EXPOSE_HEADERS = ['Retry-After', 'Content-Disposition']
+# Durée de cache d'une requête préalable (OPTIONS), en secondes : la valeur
+# par défaut de django-cors-headers, rendue explicite. Les navigateurs la
+# plafonnent à leur propre maximum (2 h pour Chromium).
+CORS_PREFLIGHT_MAX_AGE = 86400
+
 ROOT_URLCONF = 'config.urls'
 
 TEMPLATES = [
