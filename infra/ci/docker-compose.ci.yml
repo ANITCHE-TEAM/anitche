@@ -1,0 +1,21 @@
+# Surcharge de CI, ajoutée au compose de production :
+#   docker compose -f infra/docker-compose.prod.yml -f infra/ci/docker-compose.ci.yml ...
+# Jamais lue en production. Elle ne change que deux choses :
+#   - nginx lit son certificat dans un dossier de l'hôte (certificat autosigné
+#     généré par le job, infra/ci/generer_certificat_ci.sh) au lieu du volume
+#     certbot_conf ; nginx.conf reste celui de la production. Compose fusionne
+#     les volumes par chemin cible : ce montage remplace celui de certbot_conf ;
+#   - le frontend est une page statique minimale au lieu du build de
+#     frontend/Dockerfile.prod (npm ci + build), que ce job ne teste pas.
+# CI_CERT_DIR : chemin absolu du dossier contenant live/anitche.com/.
+
+services:
+  nginx:
+    volumes:
+      - ${CI_CERT_DIR:?CI_CERT_DIR doit désigner le dossier du certificat de test}:/etc/letsencrypt:ro
+
+  frontend:
+    build: !reset null
+    image: nginx:alpine
+    volumes:
+      - ./ci/frontend/index.html:/usr/share/nginx/html/index.html:ro
