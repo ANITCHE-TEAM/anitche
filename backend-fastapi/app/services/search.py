@@ -209,7 +209,7 @@ def _order_by(sort: str, search: _TextSearch | None) -> str:
 
 
 PAGE_COLUMNS = (
-    "p.id, p.nom, p.slug, p.prix_base, p.prix_min, p.image_principale, p.categorie_id, "
+    "p.id, p.nom, p.slug, p.prix_base, p.prix_min, p.image_principale, p.miniature_principale, p.categorie_id, "
     "p.categorie_nom, p.boutique_id, p.boutique_nom, p.boutique_slug, p.en_stock, p.date_creation"
 )
 
@@ -433,6 +433,7 @@ def product_result(row, media_base_url: str) -> dict:
         "prix_base": _decimal_string(row["prix_base"]),
         "prix_min": float(prix_min),
         "image_principale": media_url(media_base_url, row["image_principale"]),
+        "miniature_principale": media_url(media_base_url, row["miniature_principale"]),
         "categorie": row["categorie_id"],
         "categorie_nom": row["categorie_nom"],
         "boutique": row["boutique_id"],
