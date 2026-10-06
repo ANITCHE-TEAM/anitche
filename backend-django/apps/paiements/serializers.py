@@ -3,6 +3,7 @@ from datetime import timedelta
 from django.utils import timezone
 from rest_framework import serializers
 
+from .fournisseurs.base import ECHEC, SUCCES
 from .models import BaremeFrais, Paiement, Remboursement, Reversement
 from .reversements import OPERATEURS
 
@@ -108,6 +109,12 @@ class RemboursementAdminSerializer(serializers.ModelSerializer):
                   "retour", "montant", "motif", "statut", "reference_externe", "commentaire",
                   "traite_par", "date_creation", "date_traitement"]
         read_only_fields = fields
+
+
+class SimulationPaiementSerializer(serializers.Serializer):
+    """Issue choisie sur la page de paiement simulé (développement)."""
+
+    statut = serializers.ChoiceField(choices=[SUCCES, ECHEC])
 
 
 class TraiterRemboursementSerializer(serializers.Serializer):

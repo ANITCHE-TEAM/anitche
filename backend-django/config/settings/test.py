@@ -12,6 +12,9 @@ INSTALLED_APPS = [*INSTALLED_APPS, 'apps.demo']
 # Routes de documentation montées pour les tests du schéma (config/tests_schema.py).
 DOCUMENTATION_API_ACTIVE = True
 
+# Aide de confirmation des paiements simulés (apps/paiements/tests.py).
+PAIEMENT_SIMULATION_API_ACTIVE = True
+
 # Fichiers écrits par les tests (pièces KYC, logos, images produit,
 # pièces jointes...) : dossier temporaire propre à chaque exécution,
 # supprimé à la fin. Sans ceci, chaque lancement de la suite déposait des

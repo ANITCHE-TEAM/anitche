@@ -18,6 +18,7 @@ from django.core.cache import cache
 from django.db import IntegrityError, connection, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase, override_settings
+from django.urls import Resolver404, clear_url_caches, resolve
 from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
 from rest_framework.throttling import AnonRateThrottle, SimpleRateThrottle
@@ -42,6 +43,7 @@ from .fournisseurs.simule import EN_TETE_SIGNATURE, FournisseurSimule, definir_e
 from .frais import bareme_en_vigueur, calculer_frais_ligne
 from .models import AjustementVendeur, BaremeFrais, JournalWebhook, Paiement, Remboursement, Reversement
 from .services import reconcilier_paiement, reconcilier_paiements_en_suspens, valider_paiement
+from .signals import paiement_valide
 from .tasks import reconcilier_paiements
 
 URL_INITIER = "/api/paiements/initier/"
@@ -294,6 +296,102 @@ class RechercheParReferenceTests(Donnees, APITestCase):
         api = self.api(self.client1)
         with self.assertNumQueries(4):
             api.get("/api/paiements/", {"reference": self.paiement.reference})
+
+
+class SimulationPaiementTests(Donnees, APITestCase):
+    """POST /api/paiements/simulation/<reference>/ : le payeur confirme ou
+    fait échouer son paiement simulé, sans le secret HMAC."""
+
+    def setUp(self):
+        self.creer_donnees()
+        (self.commande,) = self.commander((self.variante1, 1))
+        self.paiement = self.payer(self.commande)
+
+    def simuler(self, statut="succes", utilisateur=None, reference=None):
+        return self.api(utilisateur or self.client1).post(
+            f"/api/paiements/simulation/{reference or self.paiement.reference}/", {"statut": statut}, format="json",
+        )
+
+    def test_succes_valide_le_paiement_par_la_reconciliation(self):
+        recus = []
+
+        def recepteur(sender, **kwargs):
+            recus.append(kwargs["paiement"].pk)
+
+        paiement_valide.connect(recepteur)
+        self.addCleanup(paiement_valide.disconnect, recepteur)
+        r = self.simuler()
+        self.assertEqual((r.status_code, r.data["statut"], r.data["reference"]),
+                         (200, "valide", self.paiement.reference))
+        self.commande.refresh_from_db()
+        self.assertEqual(self.commande.status, Commande.Status.CONFIRMEE)
+        self.assertEqual(recus, [self.paiement.pk])
+        # Chemin de la réconciliation : aucune notification journalisée.
+        self.assertFalse(JournalWebhook.objects.exists())
+
+    def test_echec(self):
+        r = self.simuler("echec")
+        self.assertEqual((r.status_code, r.data["statut"]), (200, "echoue"))
+
+    def test_second_appel_409_sans_changer_le_paiement(self):
+        self.assertEqual(self.simuler().status_code, 200)
+        r = self.simuler("echec")
+        self.assertEqual(r.status_code, 409)
+        self.paiement.refresh_from_db()
+        self.assertEqual(self.paiement.statut, Paiement.Statut.VALIDE)
+        # L'état distant confirmé n'est pas réécrit.
+        self.assertEqual(reconcilier_paiement(self.paiement), ("succes", False))
+
+    def test_statut_absent_ou_inconnu(self):
+        for statut in ("", "en_attente", "injoignable", "valide"):
+            with self.subTest(statut=statut):
+                r = self.simuler(statut)
+                self.assertEqual(r.status_code, 400)
+                self.assertIn("statut", r.data["errors"])
+        self.assertEqual(self.api(self.client1).post(
+            f"/api/paiements/simulation/{self.paiement.reference}/", {}, format="json").status_code, 400)
+        self.paiement.refresh_from_db()
+        self.assertEqual(self.paiement.statut, Paiement.Statut.EN_ATTENTE)
+
+    def test_paiement_d_un_autre_compte_ou_inconnu_404(self):
+        self.assertEqual(self.simuler(utilisateur=self.client2).status_code, 404)
+        self.assertEqual(self.simuler(utilisateur=self.admin).status_code, 404)
+        self.assertEqual(self.simuler(reference="PAY-INCONNUE").status_code, 404)
+        self.paiement.refresh_from_db()
+        self.assertEqual(self.paiement.statut, Paiement.Statut.EN_ATTENTE)
+
+    def test_anonyme_401(self):
+        r = self.api().post(f"/api/paiements/simulation/{self.paiement.reference}/", {"statut": "succes"},
+                            format="json")
+        self.assertEqual(r.status_code, 401)
+
+    def test_hors_fournisseur_simule_404(self):
+        with override_settings(PAIEMENT_FOURNISSEUR="cinetpay"):
+            self.assertEqual(self.simuler().status_code, 404)
+        Paiement.objects.filter(pk=self.paiement.pk).update(fournisseur="cinetpay")
+        self.assertEqual(self.simuler().status_code, 404)
+        self.paiement.refresh_from_db()
+        self.assertEqual(self.paiement.statut, Paiement.Statut.EN_ATTENTE)
+
+    def test_route_absente_si_le_reglage_est_faux(self):
+        import config.urls
+
+        from . import urls as urls_paiements
+
+        def recharger():
+            importlib.reload(urls_paiements)
+            importlib.reload(config.urls)
+            clear_url_caches()
+
+        self.addCleanup(recharger)
+        with override_settings(PAIEMENT_SIMULATION_API_ACTIVE=False):
+            recharger()
+            self.assertEqual(self.simuler().status_code, 404)
+            with self.assertRaises(Resolver404):
+                resolve(f"/api/paiements/simulation/{self.paiement.reference}/")
+        recharger()
+        self.assertEqual(resolve(f"/api/paiements/simulation/{self.paiement.reference}/").url_name,
+                         "paiement-simulation")
 
 
 # =====================================================================
@@ -2000,7 +2098,7 @@ class ReconciliationReponsesCinetPayTests(ReponsesCinetPay, DonneesReconciliatio
 class ConfigurationProductionTests(APITestCase):
     """prod.py refuse le fournisseur simulé, une clé de sandbox ou l'absence de clés."""
 
-    def importer_prod(self, **variables):
+    def importer_prod(self, script="import config.settings.prod", **variables):
         env = {
             **os.environ,
             "DJANGO_SETTINGS_MODULE": "config.settings.prod",
@@ -2020,9 +2118,32 @@ class ConfigurationProductionTests(APITestCase):
             **variables,
         }
         return subprocess.run(
-            [sys.executable, "-c", "import config.settings.prod"],
+            [sys.executable, "-c", script],
             cwd=Path(settings.BASE_DIR), env=env, capture_output=True, text=True,
         )
+
+    def test_simulation_figee_a_false_dans_prod(self):
+        source = (Path(settings.BASE_DIR) / "config" / "settings" / "prod.py").read_text(encoding="utf-8")
+        self.assertIn("\nPAIEMENT_SIMULATION_API_ACTIVE = False\n", source)
+
+    def test_simulation_jamais_montee_en_production(self):
+        """Settings de production, même avec PAIEMENT_SIMULATION_API_ACTIVE=True
+        dans l'environnement : la route n'existe pas."""
+        script = (
+            "import django, json\n"
+            "django.setup()\n"
+            "from django.conf import settings\n"
+            "from django.urls import Resolver404, resolve\n"
+            "try:\n"
+            "    resolve('/api/paiements/simulation/PAY-2026-0000000000/')\n"
+            "    montee = True\n"
+            "except Resolver404:\n"
+            "    montee = False\n"
+            "print(json.dumps({'active': settings.PAIEMENT_SIMULATION_API_ACTIVE, 'montee': montee}))\n"
+        )
+        resultat = self.importer_prod(script=script, PAIEMENT_SIMULATION_API_ACTIVE="True")
+        self.assertEqual(resultat.returncode, 0, resultat.stderr[-800:])
+        self.assertEqual(json.loads(resultat.stdout.strip().splitlines()[-1]), {"active": False, "montee": False})
 
     def test_configuration_valide(self):
         cas = {

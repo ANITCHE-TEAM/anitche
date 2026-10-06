@@ -1,5 +1,6 @@
 import logging
 
+from django.conf import settings
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
 from rest_framework.exceptions import NotFound, ValidationError
@@ -16,6 +17,7 @@ from apps.vendeurs.permissions import ROLES_ADMINISTRATION, EstAdministrateur, E
 
 from . import reversements, services
 from .fournisseurs.base import ErreurFournisseur, MontantHorsLimites
+from .fournisseurs.simule import FournisseurSimule, definir_etat_distant
 from .models import BaremeFrais, Paiement, Remboursement, Reversement
 from .serializers import (
     CODE_BAREME_DEJA_APPLIQUE,
@@ -27,6 +29,7 @@ from .serializers import (
     ReversementAdminSerializer,
     ResumeReversementsSerializer,
     ReversementVendeurSerializer,
+    SimulationPaiementSerializer,
     TransfererReversementSerializer,
     TraiterRemboursementSerializer,
     VerserReversementSerializer,
@@ -172,6 +175,47 @@ class AnnulerPaiementView(APIView):
         except services.TransitionPaiementImpossible as erreur:
             raise ErreurMetier(str(erreur), status.HTTP_409_CONFLICT)
         return Response(PaiementSerializer(paiements_visibles(request.user).get(pk=pk)).data)
+
+
+@extend_schema(exclude=True)
+class SimulationPaiementView(APIView):
+    """Développement et tests E2E : le payeur choisit l'issue de son paiement
+    simulé (page /paiement/simulation/<reference> du portail), sans détenir
+    le secret HMAC des notifications.
+
+    Même chemin que la commande simuler_etat_paiement suivie de la
+    réconciliation : état fixé chez le fournisseur simulé, puis
+    reconcilier_paiement (montant et devise contrôlés, transition sous
+    verrou, signal paiement_valide). Aucune notification n'est journalisée.
+
+    Trois fermetures : route montée seulement si
+    PAIEMENT_SIMULATION_API_ACTIVE (False en production, figé dans prod.py),
+    404 hors du fournisseur simulé, 404 pour le paiement d'un autre compte."""
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "paiements"
+
+    def post(self, request, reference):
+        if settings.PAIEMENT_FOURNISSEUR != FournisseurSimule.code:
+            raise NotFound()
+        paiement = get_object_or_404(
+            Paiement, reference=reference, client=request.user, fournisseur=FournisseurSimule.code,
+        )
+        serializer = SimulationPaiementSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        # Vérifié avant de toucher à l'état distant : un paiement déjà réglé
+        # garde l'état que son fournisseur a confirmé.
+        if paiement.statut != Paiement.Statut.EN_ATTENTE:
+            raise ErreurMetier("Ce paiement n'est plus en attente.", status.HTTP_409_CONFLICT)
+        definir_etat_distant(
+            paiement.reference, serializer.validated_data["statut"], int(paiement.montant), paiement.devise,
+            paiement.transaction_id_externe or "",
+        )
+        _, change = services.reconcilier_paiement(paiement)
+        if not change:
+            raise ErreurMetier("Ce paiement n'est plus en attente.", status.HTTP_409_CONFLICT)
+        return Response(PaiementSerializer(paiements_visibles(request.user).get(pk=paiement.pk)).data)
 
 
 # =====================================================================

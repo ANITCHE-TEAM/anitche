@@ -27,6 +27,10 @@ DEBUG = False
 # figée ici, jamais lue dans l'environnement. Vérifié par un test permanent.
 DOCUMENTATION_API_ACTIVE = False
 
+# Aide de confirmation des paiements simulés : jamais montée en production,
+# valeur figée ici. Vérifié par un test permanent.
+PAIEMENT_SIMULATION_API_ACTIVE = False
+
 SECRET_KEY = config('SECRET_KEY', default='')
 # Le check sur le préfixe 'django-insecure-' vise le placeholder connu de
 # startproject, mais ne protège pas contre une future valeur par défaut

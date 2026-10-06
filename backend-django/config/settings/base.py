@@ -263,6 +263,12 @@ REST_FRAMEWORK = {
 # frontend, vérifié par la CI.
 DOCUMENTATION_API_ACTIVE = False
 
+# Aide de développement POST /api/paiements/simulation/<reference>/ : le
+# payeur confirme ou fait échouer son paiement simulé (page de simulation du
+# portail, tests E2E). Montée seulement si ce réglage est vrai (dev.py,
+# test.py) ; prod.py le force à False.
+PAIEMENT_SIMULATION_API_ACTIVE = False
+
 SPECTACULAR_SETTINGS = {
     'TITLE': 'API ANITCHE',
     'DESCRIPTION': (
