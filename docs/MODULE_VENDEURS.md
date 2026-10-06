@@ -110,7 +110,7 @@ Aucune spec détaillée vendeur n'est présente dans `docs/` (le backlog des 18 
 
 ## 7. Tests
 
-`backend-django/apps/vendeurs/tests.py` — 72 tests : modèle et visibilité, unicité normalisée du nom, services de décision, boutique publique (dont filtres `ville` et `recherche`, jeton expiré ignoré, seau `catalogue_public` partagé avec le catalogue et les tarifs, ni `anon` ni `user`), espace vendeur (dont gel pendant suspension et perte du KYC), limites d'images, throttling, back-office, concurrence.
+`backend-django/apps/vendeurs/tests.py` — 73 tests : modèle et visibilité, unicité normalisée du nom, services de décision, boutique publique (dont filtres `ville` et `recherche`, jeton expiré ignoré, seau `catalogue_public` partagé avec le catalogue et les tarifs, ni `anon` ni `user`), espace vendeur (dont gel pendant suspension et perte du KYC), limites d'images, throttling, back-office, concurrence.
 
 ⚠️ **Toujours lancer les tests sur PostgreSQL.** Sans `DJANGO_SETTINGS_MODULE`, `manage.py test` bascule sur `config.settings.test` (SQLite) : `test_deux_creations_simultanees_une_seule_acceptee` y est alors **sauté silencieusement** (`select_for_update()` est un no-op sous SQLite). Il faut forcer `config.settings.ci` :
 

@@ -107,7 +107,7 @@ Les listes sont paginées par défaut :
 
 ## 7. Limites de débit (429)
 
-Au-delà d'une limite, l'API répond **429** au format commun ; l'en-tête **`Retry-After`** donne le nombre de secondes à attendre. Afficher un message (« Trop de tentatives, réessayez dans N minutes ») et désactiver le bouton, sans relancer automatiquement.
+Au-delà d'une limite, l'API répond **429** au format commun ; l'en-tête **`Retry-After`** donne le nombre de secondes à attendre. Il est **lisible depuis un portail d'une autre origine** : l'API l'expose en CORS (`Access-Control-Expose-Headers: Retry-After, Content-Disposition`, § 15.5). Afficher un message (« Trop de tentatives, réessayez dans N minutes ») et désactiver le bouton, sans relancer automatiquement.
 
 Limites les plus visibles côté interface (production) : connexion 10/h, envoi de code OTP 5/h, inscription 10/h par IP, validation du panier 20/h, paiements 20/h, conversion de points 20/h, vérification de coupon 30/h.
 
@@ -174,7 +174,7 @@ Chaque module documente les changements de contrat à intégrer côté interface
 | Scan QR (FastAPI) | § 12 ci-dessous et [`MODULE_SCAN_QR.md`](./MODULE_SCAN_QR.md) |
 | Retours | [`MODULE_RETOURS.md` § 8](./MODULE_RETOURS.md#8-impact-frontend) |
 | Fidélité | [`MODULE_FIDELITE.md` § 6](./MODULE_FIDELITE.md#6-impact-frontend) |
-| Notifications | [`MODULE_NOTIFICATIONS.md` § 5](./MODULE_NOTIFICATIONS.md#5-impact-frontend) |
+| Notifications | [`MODULE_NOTIFICATIONS.md` § 5](./MODULE_NOTIFICATIONS.md#5-impact-frontend) et § 15.1 ci-dessous (routes logiques) |
 | Support | [`MODULE_SUPPORT.md` § 6](./MODULE_SUPPORT.md#6-impact-frontend) |
 | Vendeurs, catalogue, panier, passeports QR | pas de section dédiée : le contrat de chaque endpoint est dans le `MODULE_*.md` correspondant |
 
@@ -514,7 +514,7 @@ Contrat complet : [`MODULE_PAIEMENTS.md`](./MODULE_PAIEMENTS.md) § 4 et § 8.
 **Page `/paiement/retour?reference=PAY-…`** (URL de retour du fournisseur). Le fournisseur peut rouvrir un autre onglet : ne pas compter sur le `sessionStorage`.
 
 ```ts
-const { results } = await api.get('/api/paiements/', { params: { reference } });
+const { results } = await api.get('/api/paiements/', { params: { reference, perimetre: 'achats' } });
 if (results.length === 0) { /* référence inconnue ou d'un autre compte : message neutre */ }
 // puis interroger GET /api/paiements/<id>/ jusqu'à statut « valide » ou « echoue »
 ```
@@ -530,3 +530,56 @@ await api.post(`/api/paiements/simulation/${reference}/`, { statut: 'succes' });
 
 - Appel écrit à la main (route **hors** de `schema.yaml`), avec le jeton du payeur ; aucun secret dans le bundle.
 - La route n'existe pas en production (404) : la page de simulation ne doit être construite que pour le dev et les tests E2E.
+
+## 15. Contrats pour les portails (liens, miniatures, périmètres, administration, CORS)
+
+### 15.1 Liens de notification
+
+`lien_redirection` est une **route logique** : un chemin sans hôte ni requête, ou `""` (aucun lien). La liste est fermée (`apps/notifications/liens.py`, détail et destinataires dans [`MODULE_NOTIFICATIONS.md`](./MODULE_NOTIFICATIONS.md) § 4) :
+
+| Portail | Routes |
+|---|---|
+| Client | `/commandes`, `/commandes/{uuid}`, `/livraisons/{uuid}`, `/retours/{uuid}`, `/paiements/{uuid}`, `/fidelite/mon-compte`, `/support/tickets/{uuid}` |
+| Vendeur | `/vendeur/commandes/{uuid}`, `/vendeur/produits/{id}`, `/vendeur/retours/{uuid}`, `/vendeur/reversements`, `/support/tickets/{uuid}` |
+| Administration | `/administration/retours/{uuid}`, `/administration/remboursements`, `/administration/livraisons/{uuid}` |
+
+- Chaque portail associe ces chemins à ses pages ; **tout préfixe inconnu mène au centre de notifications**. Ne jamais naviguer vers une valeur reçue sans la résoudre, et ne jamais lire `metadata` pour naviguer (ses clés varient).
+- Le préfixe d'administration est `/administration/`, jamais `/admin/` (admin Django). Les anciennes notifications `/admin/retours/…` ont été réécrites.
+
+### 15.2 Miniatures des images produit
+
+- **Liste** (`GET /api/catalogue/produits/`) : afficher `miniature_principale` (WebP, 480 px de large au plus, quelques dizaines de Ko), avec **repli sur `image_principale`** quand elle est `null`. **Fiche et galerie** : chaque image a `miniature` (`null` si absente) à côté de `image` ; l'original sert au zoom.
+- Dimensionner la vignette d'après sa largeur d'affichage (jamais plus de 480 px utiles) ; réserver sa hauteur (rapport 4/3 ou carré) pour éviter les sauts de mise en page.
+- La liste **FastAPI** `/recherche/produits` ne renvoie pas encore `miniature_principale` : tant que la branche FastAPI ne l'a pas ajoutée, repli sur `image_principale` pour ces écrans.
+- Espace vendeur : `POST …/images/` renvoie `miniature` dans la réponse (générée pendant l'envoi). Une miniature `null` n'est pas une erreur : l'image est bien enregistrée.
+
+### 15.3 Périmètres « mes achats » et « mes tickets »
+
+Un compte n'a qu'un rôle, mais il peut acheter. Le **portail client envoie toujours** ces paramètres, quel que soit le rôle du compte :
+
+| Appel | Paramètre | Effet |
+|---|---|---|
+| `GET /api/livraison/` et `GET /api/livraison/<id>/` | `perimetre=achats` | seulement les livraisons de ses propres commandes, représentation client (un livreur ou un administrateur qui achète) |
+| `GET /api/paiements/` et `GET /api/paiements/<id>/` | `perimetre=achats` | seulement ses propres paiements, représentation client |
+| `GET /api/support/tickets/` et `GET /api/support/tickets/<id>/` | `perimetre=mes_tickets` | seulement les tickets qu'il a créés (sans les litiges de sa boutique pour un vendeur) |
+
+Le paramètre **restreint** toujours, il n'élargit jamais ; une valeur inconnue est ignorée ; un objet hors périmètre répond **404**. Les espaces vendeur, livreur et administration **n'envoient pas** ces paramètres.
+
+### 15.4 Routes d'administration (lecture seule, rôles `admin` et `super_admin`)
+
+Autres rôles et `is_staff` seul : **403** ; anonyme : **401**. Listes paginées (20) ; un filtre invalide est ignoré ; le `count` d'une liste filtrée sert de compteur de tableau de bord (il n'y a pas de route d'agrégats).
+
+| Écran | Appel | Filtres |
+|---|---|---|
+| Commandes | `GET /api/commandes/administration/` et `…/<uuid>/` | `status`, `boutique`, `client`, `numero` (début, 20 caractères), `date_min`, `date_max` (ISO 8601 ; une date seule couvre la journée) |
+| Comptes (sélecteur de livreur ou d'agent) | `GET /api/utilisateurs/administration/` | `recherche` (email, nom, prénom, téléphone), `role`, `est_actif` |
+| Produits (modération) | `GET /api/catalogue/administration/produits/` | `recherche`, `est_actif`, `boutique`, `categorie` (inactifs compris) |
+| File du support | `GET /api/support/tickets/` | `non_assigne=1`, `status` |
+| Compteurs existants | `admin/remboursements/?statut=a_traiter`, `admin/reversements/?statut=disponible`, `livraison/?contestation=ouverte`, demandes vendeur en attente | — |
+
+Représentations : la commande ajoute `client` (`id`, `email`, `nom`, `prenom`) et `boutique` (`id`, `nom`, `slug`), jamais le point GPS ; le compte ne contient que `id`, `email`, `prenom`, `nom`, `telephone`, `role`, `is_active`, `email_verifie`, `statut_kyc`, `date_creation`. Une pièce KYC s'affiche d'après le `Content-Type` de sa réponse (§ 15.5).
+
+### 15.5 En-têtes CORS et téléchargements
+
+- **En-têtes lisibles** depuis une autre origine (portails sur sous-domaines) : `Retry-After` (délai d'un 429, § 7) et `Content-Disposition` (nom d'un fichier téléchargé). Le préalable `OPTIONS` est mis en cache **un jour** (`Access-Control-Max-Age: 86400`) ; les navigateurs plafonnent cette durée à leur propre maximum.
+- **Téléchargements protégés** (pièce KYC, photo de retour, pièce jointe de support) : appel avec le jeton, réponse binaire servie avec son **vrai `Content-Type`** (`image/jpeg`, `image/png`, `image/webp`, et `application/pdf` pour les pièces KYC et les pièces jointes) et `Content-Disposition: inline; filename="<uuid>.<ext>"`. Le schéma OpenAPI décrit ces types (jamais `application/json`) : un client généré ne doit pas parser la réponse en JSON. Afficher un PDF dans un lecteur, une image dans une balise image, d'après le `Content-Type` reçu.

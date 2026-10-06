@@ -53,7 +53,7 @@ FastAPI (recherche, listes publiques) ne lit pas les tables du catalogue : il li
 
 | Vue | Traduit | Colonnes |
 |---|---|---|
-| `catalogue_produit_public` | `Produit.objects.visibles_publiquement()`, prix affiché et `en_stock` de `ProduitPublicListView`, image principale de `ProduitPublicListSerializer` | `id`, `nom`, `slug`, `prix_base`, `date_creation`, `categorie_id`, `categorie_nom`, `categorie_slug`, `categorie_parent_id`, `categorie_parent_slug`, `boutique_id`, `boutique_nom`, `boutique_slug`, `prix_min`, `en_stock`, `image_principale` (chemin relatif au dossier média), `nom_normalise`, `texte_normalise` |
+| `catalogue_produit_public` | `Produit.objects.visibles_publiquement()`, prix affiché et `en_stock` de `ProduitPublicListView`, image principale de `ProduitPublicListSerializer` | `id`, `nom`, `slug`, `prix_base`, `date_creation`, `categorie_id`, `categorie_nom`, `categorie_slug`, `categorie_parent_id`, `categorie_parent_slug`, `boutique_id`, `boutique_nom`, `boutique_slug`, `prix_min`, `en_stock`, `image_principale` (chemin relatif au dossier média), `nom_normalise`, `texte_normalise`, `miniature_principale` (chemin relatif de la miniature de **la même image** que `image_principale` ; `NULL` tant qu'elle n'existe pas ; colonne ajoutée **en fin de liste** par la migration 0005) |
 | `catalogue_categorie_publique` | `Categorie.objects.actives()` | `id`, `nom`, `slug`, `parent_id`, `nom_normalise` |
 | `catalogue_boutique_publique` | `Boutique.objects.publiques()` | `id`, `nom`, `slug`, `nom_normalise` |
 
@@ -69,7 +69,7 @@ FastAPI (recherche, listes publiques) ne lit pas les tables du catalogue : il li
 |---|---|---|
 | GET | `categories/` | Catégories racines actives et leurs **sous-catégories actives** (non paginé) |
 | GET | `categories/<slug>/` | Détail d'une catégorie active |
-| GET | `produits/` | Liste paginée des produits visibles. Filtres : `recherche` (nom, description, nom de boutique), `categorie` (slug **ou** id ; une catégorie au slug numérique comme « 2024 » est trouvée), `boutique` (slug ou id), `prix_min`, `prix_max` (entiers). Tri : `tri=prix_asc`, `prix_desc`, `date_asc` (défaut : plus récents) |
+| GET | `produits/` | Liste paginée des produits visibles (chaque produit porte `image_principale` et `miniature_principale`, § 3 ter). Filtres : `recherche` (nom, description, nom de boutique), `categorie` (slug **ou** id ; une catégorie au slug numérique comme « 2024 » est trouvée), `boutique` (slug ou id), `prix_min`, `prix_max` (entiers). Tri : `tri=prix_asc`, `prix_desc`, `date_asc` (défaut : plus récents) |
 | GET | `produits/<slug>/` | Fiche : variantes actives, images, boutique, catégorie |
 
 - **Prix affiché, filtré et trié** = plus petit prix effectif (promo comprise) des **variantes actives** (`prix_min` dans la liste). Une variante inactive n'influence ni filtre ni tri.
@@ -88,7 +88,7 @@ FastAPI (recherche, listes publiques) ne lit pas les tables du catalogue : il li
 | GET / PUT / PATCH | `vendeur/variantes/<id>/` | Détail et modification. **`produit` n'est pas modifiable** : un autre produit → 400 `errors.produit` ; renvoyer le même (PUT) est accepté |
 | DELETE | `vendeur/variantes/<id>/` | **Désactivation** (`est_active = false`), **204**. Réactivation : PATCH `est_active: true` |
 | PUT / PATCH | `vendeur/variantes/<id>/stock/` | `quantite_disponible` (≥ 0), `seuil_alerte`. Écriture partielle sous verrou (§ 5) |
-| GET / POST | `vendeur/produits/<id>/images/` | Galerie ; ajout (multipart `image`, `est_principale`, `ordre`) |
+| GET / POST | `vendeur/produits/<id>/images/` | Galerie ; ajout (multipart `image`, `est_principale`, `ordre`). La miniature est générée dans la même requête (§ 3 ter) |
 | DELETE | `vendeur/images/<id>/` | Suppression réelle d'une image (aucun historique n'en dépend) |
 
 Accès :
@@ -103,12 +103,26 @@ Accès :
 - 11ᵉ image d'un produit : `errors.image` « Un produit ne peut pas avoir plus de 10 images… ». Image de plus de **5 Mo**, format autre que JPEG/PNG/WebP, ou contenu qui ne correspond pas à l'extension (signature binaire vérifiée) : `errors.image`.
 - Stock négatif.
 
-### 3 bis. Administration — `administration/produits/<id>/` (`IsAuthenticated` + `EstAdministrateur`)
+### 3 bis. Administration — `administration/produits/` et `administration/produits/<id>/` (`IsAuthenticated` + `EstAdministrateur`)
 
-| Méthode | Description |
-|---|---|
-| GET | Produit de n'importe quelle boutique : `id`, `boutique`, `boutique_nom`, `nom`, `slug`, `est_actif`, `desactive_par`, dates |
-| PATCH / PUT | **Seul `est_actif` est modifiable.** Tout autre champ → 400 « Seul le champ est_actif est modifiable ici (champs refusés : …) », comme `est_suspendue` sur la boutique. Chaque changement est journalisé (logger `securite`) |
+| Méthode | URL | Description |
+|---|---|---|
+| GET | `administration/produits/` | **Liste** paginée (20) des produits de toutes les boutiques, **inactifs compris**, plus récents d'abord. Filtres combinables : `recherche` (nom du produit ou de la boutique, 100 caractères au plus), `est_actif` (`true` ou `false`), `boutique` et `categorie` (identifiants) ; une valeur invalide est ignorée. Nombre de requêtes constant. Autres rôles et `is_staff` seul : **403** ; anonyme **401** |
+| GET | `administration/produits/<id>/` | Produit de n'importe quelle boutique : `id`, `boutique`, `boutique_nom`, `categorie`, `nom`, `slug`, `est_actif`, `desactive_par`, dates (même représentation que la liste) |
+| PATCH / PUT | `administration/produits/<id>/` | **Seul `est_actif` est modifiable.** Tout autre champ → 400 « Seul le champ est_actif est modifiable ici (champs refusés : …) », comme `est_suspendue` sur la boutique. Chaque changement est journalisé (logger `securite`) |
+
+### 3 ter. Miniatures des images
+
+Une liste de produits renvoie l'image originale (jusqu'à 5 Mo) : trop lourd en 3G pour 20 vignettes. Chaque `ImageProduit` a donc une `miniature`.
+
+- **Format** : WebP, **480 px de large au plus** (jamais agrandie : une image plus petite garde sa taille), qualité 75, orientation EXIF appliquée (une photo prise en portrait n'est pas couchée), transparence conservée. Fichier dans `catalogue/miniatures/<année>/<mois>/`, nommé comme l'original (`.webp`). Logique dans `apps/catalogue/images.py` (`contenu_miniature`, `generer_miniature`).
+- **Génération synchrone**, dans la requête d'envoi (`ImageProduitListCreateView`), **après** le bloc verrouillé qui limite à 10 images : un envoi lent ne retarde pas les autres. Coût (quelques centaines de ms pour 5 Mo) : hypothèse, à mesurer. L'envoi est rare (geste du vendeur).
+- **Échec de génération** (image corrompue après validation, fichier illisible) : l'image est **enregistrée quand même**, `miniature` reste vide et une ligne est journalisée (`apps.catalogue.images`, niveau `WARNING`). Aucune erreur 500 : le frontend affiche l'original en repli.
+- **API** : `ImageProduit.miniature` (URL absolue ou `null`, lecture seule) dans la galerie et la fiche produit ; `miniature_principale` (URL absolue ou `null`) dans la liste publique, **pour la même image que `image_principale`** (la principale, sinon la première) : jamais la miniature d'une autre image du produit. `image` et `image_principale` ne changent pas.
+- **Images existantes** : `python manage.py generer_miniatures [--lot N]` (défaut 100). **Idempotente** (seules les images sans miniature sont traitées), par lots d'identifiants croissants (mémoire bornée), une image qui échoue n'est pas retentée dans la même exécution. Affiche `N miniature(s) générée(s), M échec(s).` Relançable à volonté ; à lancer une fois après `migrate`.
+- **Vue SQL** : `miniature_principale` est exposée par `catalogue_produit_public` (§ 2) pour la recherche FastAPI (la lecture côté FastAPI relève de la branche `backend-fastapi`).
+- **Fichiers orphelins** : supprimer une image ne supprime pas ses fichiers (aucun `post_delete` dans le projet) ; il y a désormais deux fichiers orphelins par image au lieu d'un. À traiter avec la purge des médias (§ 9).
+- **Hors périmètre** : logos et bannières de boutique (une image par boutique), à traiter de la même façon si la mesure le justifie.
 
 ## 4. Suppression : jamais par l'API
 
@@ -160,6 +174,7 @@ Le seau est **partagé** avec les boutiques publiques (`/api/vendeurs/boutiques/
 - **Niveau 2, seulement sur mesure** : tri par prix et facettes du catalogue entier calculent le prix minimum de chaque produit (≈ 0,9 s à 100 000 produits synthétiques dans la vue, ≈ 0,6 s dans la liste Django ; sous 70 ms à 10 000). Colonnes `prix_min` / `en_stock` dénormalisées et tenues à jour par Django si un test de charge le justifie, pas avant.
 - **Produit rangé dans une catégorie inactive** : il reste visible et filtrable par l'id de sa catégorie (vue `catalogue_produit_public` comprise). À décider (masquer, ou interdire le rattachement à une catégorie inactive) ; la vue et le test de parité suivront.
 - Les images de catégorie et la gestion des catégories ne passent que par le Django admin (aucune API).
+- **Fichiers d'images orphelins** : ni l'original ni la miniature ne sont supprimés du stockage quand une `ImageProduit` est supprimée (aucun `post_delete`). À traiter avec une purge des médias (niveau 2).
 
 ## 10. Points du contrat à connaître côté frontend
 
@@ -195,6 +210,8 @@ Vérifier dans la sortie `-v 2` que tout est `ok` et rien `skipped`. Les tests d
 
 Couverture (`apps/catalogue/tests.py`, classes `Catalogue*Tests`) : suspension (9 écritures), isolation (12 routes, `is_staff`, administration), variante non déplaçable, stock public, visibilité (produit sans variante active, variante inactive, sous-catégories, prix effectif, slug numérique), désactivation au lieu de suppression (commandes, paniers, passeports, tickets, PROTECT en base), modération (12 cas), prix (règles API et contraintes en base), stock (mise à jour concurrente, négatif), images (10 max, contenu falsifié, 5 Mo), N+1 (nombre de requêtes constant), limite de débit (par IP, par compte avec un jeton valide), jeton expiré ignoré sur les quatre routes publiques.
 
+Miniatures (`CatalogueMiniaturesTests`, `MigrationMiniaturesTests`) : grande image réduite en WebP de 480 px (rapport conservé), petite image jamais agrandie, orientation EXIF appliquée, échec de génération sans erreur 500 (image enregistrée, `miniature` nulle, ligne de journal), liste publique et fiche (`miniature_principale`, `miniature`, originaux inchangés), commande `generer_miniatures` (lots, rapport, idempotence), migration 0005 dans les deux sens ; la parité de la vue SQL (`CatalogueVuesPubliquesTests`) compare `miniature_principale` à la liste Django et vérifie qu'elle vient de la même image que `image_principale`. Liste d'administration (`CatalogueAdministrationListeTests`) : inactifs compris, chaque filtre, représentation, refus par rôle, requêtes constantes.
+
 Vues SQL (`CatalogueVuesPubliquesTests`) : pour chaque cas de visibilité (produit désactivé par le vendeur ou par l'administration, boutique suspendue ou fermée, vendeur KYC en attente ou refusé, redevenu client ou inactif, variantes toutes inactives, sans variante, rupture de stock, promotion, catégorie inactive ou absente, image principale), les produits de `catalogue_produit_public` = `visibles_publiquement()` et la liste publique Django, avec les mêmes prix affichés, `en_stock`, image et champs de liste ; boutiques et catégories publiques identiques ; colonnes exposées = liste autorisée, aucune colonne sensible. Sous SQLite (`config.settings.test`), les vues ne sont pas créées et ces tests sont ignorés : d'où la règle « toujours PostgreSQL ».
 
 **Postman** : `postman_catalogue.json` (hors dépôt) — 1. Connexions et lecture, 2. Administration (remise en état), 3. Préparation vendeur, 4. Parcours public, 5. Parcours vendeur, 6. Scénarios sécurité, 7–8. Nettoyage. Rejouable : produits et variantes retrouvés par leur nom et créés seulement s'ils manquent ; chaque scénario remet l'état qu'il modifie. `admin_password` à renseigner à la main. Les images ne sont pas couvertes (fichier à joindre manuellement).
@@ -219,6 +236,13 @@ Base de dev vérifiée avant application : 2 produits, 0 inactif, 0 donnée hors
 
   Vérifié sur la base de dev : application, retour arrière, nouvelle application sans erreur ; 18 produits dans la vue, identiques à la liste Django (le produit sans variante active est absent), 0 écart de prix ou de stock ; les deux index trigrammes sont utilisés à travers la vue (plan générique, paramètres liés).
 
+- **catalogue 0005** `miniatures_images_produit` :
+  1. `ImageProduit.miniature` : `ImageField` nullable (`ALTER TABLE … ADD COLUMN`, sans réécriture de table ni verrou long sous PostgreSQL 16) ;
+  2. PostgreSQL uniquement : `CREATE OR REPLACE VIEW catalogue_produit_public`, avec `miniature_principale` **en fin de liste** (seul ajout accepté par `CREATE OR REPLACE`). Le SQL est recopié dans la migration, comme pour 0004. Les droits accordés au rôle FastAPI en lecture seule sont **conservés** (vérifié sur une base jetable : retour à 0004, script de droits, puis 0005, et le rôle lit la vue, nouvelle colonne comprise) ;
+  3. images existantes : `python manage.py generer_miniatures` (§ 3 ter), à lancer une fois après `migrate`.
+
+  Retour arrière (`migrate catalogue 0004`) : la vue est supprimée puis recréée telle que 0004 l'a créée (une colonne ne se retire pas par `CREATE OR REPLACE`), puis la colonne est retirée. **La suppression de la vue retire les droits de FastAPI sur elle : relancer le script de droits.** Testé dans les deux sens (`MigrationMiniaturesTests`). Le test d'intégration FastAPI `test_product_view_exposes_only_public_columns` compare la liste **exacte** des colonnes de la vue : toute colonne ajoutée à la vue doit l'être aussi dans `backend-fastapi/tests/integration/test_recherche_vues.py`, dans le même commit.
+
 ### Règle : une migration qui modifie une colonne utilisée par ces vues doit supprimer puis recréer les vues
 
 PostgreSQL refuse sinon (« cannot alter type of a column used by a view or rule » ; même refus pour supprimer la colonne). Changer le `max_length` d'un `CharField` est un changement de type. Colonnes utilisées, **modules vendeurs et utilisateurs compris** :
@@ -228,7 +252,7 @@ PostgreSQL refuse sinon (« cannot alter type of a column used by a view or rule
 | `catalogue_produit` | `id`, `nom`, `slug`, `description`, `prix_base`, `est_actif`, `date_creation`, `boutique_id`, `categorie_id` |
 | `catalogue_varianteproduit` | `id`, `produit_id`, `prix`, `prix_promo`, `est_active` |
 | `catalogue_stock` | `variante_id`, `quantite_disponible` |
-| `catalogue_imageproduit` | `id`, `produit_id`, `image`, `est_principale`, `ordre` |
+| `catalogue_imageproduit` | `id`, `produit_id`, `image`, `miniature`, `est_principale`, `ordre` |
 | `catalogue_categorie` | `id`, `nom`, `slug`, `parent_id`, `est_active` |
 | `vendeurs_boutique` | `id`, `nom`, `slug`, `est_active`, `est_suspendue`, `proprietaire_id` |
 | `utilisateurs_utilisateur` | `id`, `role`, `statut_kyc`, `is_active` |
