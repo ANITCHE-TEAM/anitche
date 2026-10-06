@@ -46,6 +46,22 @@ class SchemaOpenAPITests(SimpleTestCase):
     def schema_de_reponse(self, chemin, methode, code):
         return self.operation(chemin, methode)["responses"][code]["content"]["application/json"]["schema"]
 
+    def test_telechargements_decrits_avec_leur_vrai_type(self):
+        """Un FileResponse n'est jamais décrit en application/json."""
+        attendus = {
+            ("/api/retours/{id}/photos/{photo_id}/", "get"): ["image/jpeg", "image/png", "image/webp"],
+            ("/api/support/attachments/{id}/", "get"): ["image/jpeg", "image/png", "image/webp", "application/pdf"],
+            ("/api/utilisateurs/kyc/{utilisateur_id}/{champ}/", "get"): [
+                "image/jpeg", "image/png", "image/webp", "application/pdf",
+            ],
+        }
+        for (chemin, methode), types in attendus.items():
+            with self.subTest(chemin):
+                contenu = self.operation(chemin, methode)["responses"]["200"]["content"]
+                self.assertEqual(list(contenu), types)
+                for schema in contenu.values():
+                    self.assertEqual(schema["schema"], {"type": "string", "format": "binary"})
+
     def test_version_openapi(self):
         self.assertEqual(self.schema["openapi"], "3.1.0")
 

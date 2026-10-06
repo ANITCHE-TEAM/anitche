@@ -673,6 +673,26 @@ class PhotosTests(RetoursCycleBase):
         self.client.force_authenticate(user=None)
         self.assertEqual(self.client.get(url).status_code, 401)
 
+    def test_type_de_contenu_reel_documente_dans_le_schema(self):
+        from config.schema import FICHIER_IMAGE
+
+        (cle,) = FICHIER_IMAGE
+        tampon = io.BytesIO()
+        Image.new("RGB", (4, 4)).save(tampon, "WEBP")
+        webp = SimpleUploadedFile("preuve.webp", tampon.getvalue(), content_type="image/webp")
+        self.client.force_authenticate(user=self.client1)
+        envois = {
+            "image/png": self.ajouter(),
+            "image/webp": self.client.post(f"{URL_RETOURS}{self.demande.id}/photos/", {"image": webp},
+                                           format="multipart"),
+        }
+        for attendu, envoi in envois.items():
+            with self.subTest(attendu=attendu):
+                self.assertEqual(envoi.status_code, 201, envoi.data)
+                reponse = self.client.get(envoi.data["image"])
+                self.assertEqual(reponse["Content-Type"], attendu)
+                self.assertIn(reponse["Content-Type"], cle[1:])
+
     def test_photo_d_une_autre_demande_introuvable(self):
         r = self.ajouter()
         autre = self.demande_au_statut(DemandeRetour.Statut.DEMANDE)

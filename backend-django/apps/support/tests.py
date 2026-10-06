@@ -636,6 +636,19 @@ class PiecesJointesTests(SupportTicketsBase):
         self.client.force_authenticate(user=None)
         self.assertEqual(self.client.get(url).status_code, 401)
 
+    def test_type_de_contenu_reel_documente_dans_le_schema(self):
+        from config.schema import FICHIER_DOCUMENT
+
+        (cle,) = FICHIER_DOCUMENT
+        pdf = SimpleUploadedFile("facture.pdf", b"%PDF-1.4\nfacture", content_type="application/pdf")
+        for attendu, fichier in (("image/png", png()), ("application/pdf", pdf)):
+            with self.subTest(attendu=attendu):
+                r = self.upload(self.client_user, fichier=fichier)
+                self.assertEqual(r.status_code, 201, r.data)
+                reponse = self.client.get(r.data["file"])
+                self.assertEqual(reponse["Content-Type"], attendu)
+                self.assertIn(reponse["Content-Type"], cle[1:])
+
     def test_piece_d_une_note_interne_jamais_telechargee_par_le_client(self):
         piece = TicketAttachment.objects.create(message=self.note, file=png(), original_filename="n.png", file_size=10)
         self.as_user(self.client_user)

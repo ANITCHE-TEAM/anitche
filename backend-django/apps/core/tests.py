@@ -53,6 +53,15 @@ class AdresseIPClientTestCase(SimpleTestCase):
         self.assertEqual(adresse_ip_client(self.requete(remote_addr='2001:db8::1')), '2001:db8::1')
 
 
+class TypesDeFichiersTests(SimpleTestCase):
+    def test_webp_connu_de_mimetypes(self):
+        """FileResponse déduit le type de l'extension : .webp doit donner
+        image/webp, quel que soit le Python ou le système (apps/core/apps.py)."""
+        import mimetypes
+
+        self.assertEqual(mimetypes.guess_type('photo.webp'), ('image/webp', None))
+
+
 def taux_de_production():
     """Taux de base.py tels qu'en production, lus dans une copie fraîche du
     module : pendant les tests, config.settings.test remplace en place le

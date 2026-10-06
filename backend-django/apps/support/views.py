@@ -13,7 +13,7 @@ from apps.core.exceptions import ErreurMetier
 from drf_spectacular.utils import extend_schema, extend_schema_view, inline_serializer
 from rest_framework import serializers
 
-from config.schema import FICHIER, erreurs
+from config.schema import FICHIER_DOCUMENT, erreurs
 
 from . import services
 from .models import SupportTicket, TicketAttachment, TicketMessage
@@ -268,7 +268,7 @@ class TicketAttachmentListCreateView(ScopedOnPostMixin, generics.ListCreateAPIVi
 
 @extend_schema(
     summary="Télécharger une pièce jointe",
-    responses={200: FICHIER},
+    responses=FICHIER_DOCUMENT,
 )
 class TicketAttachmentDownloadView(APIView):
     """Fichier servi par Django après contrôle d'accès (mêmes règles que le

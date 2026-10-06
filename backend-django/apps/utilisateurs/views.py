@@ -18,7 +18,7 @@ from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_seriali
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, TokenRefreshSerializer
 
-from config.schema import FICHIER, JetonsSerializer, MessageSerializer, erreurs
+from config.schema import FICHIER_DOCUMENT, JetonsSerializer, MessageSerializer, erreurs
 from .permissions import EmailVerifie
 
 logger_securite = logging.getLogger('securite')
@@ -403,7 +403,7 @@ class UploadKYCView(generics.CreateAPIView):
 @extend_schema(
     summary="Télécharger une pièce du dossier KYC",
     description="Titulaire du dossier ou administration. `champ` : piece_identite_recto, piece_identite_verso ou selfie.",
-    responses={200: FICHIER, **erreurs(403)},
+    responses={**FICHIER_DOCUMENT, **erreurs(403)},
 )
 class TelechargerDocumentKYCView(APIView):
     """

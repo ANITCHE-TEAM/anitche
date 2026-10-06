@@ -1650,6 +1650,26 @@ class TelechargerDocumentKYCTests(TestCase):
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_type_de_contenu_reel_documente_dans_le_schema(self):
+        from config.schema import FICHIER_DOCUMENT
+
+        (cle,) = FICHIER_DOCUMENT
+        types_documentes = cle[1:]
+        self.client.force_authenticate(user=self.proprietaire)
+        for champ, attendu in (('piece_identite_recto', 'application/pdf'), ('selfie', 'image/png')):
+            with self.subTest(champ=champ):
+                response = self.client.get(self._url(champ))
+                self.assertEqual(response['Content-Type'], attendu)
+                self.assertIn(response['Content-Type'], types_documentes)
+
+    def test_nom_du_fichier_lisible_par_un_portail_d_une_autre_origine(self):
+        origine = 'https://admin.exemple.test'
+        self.client.force_authenticate(user=self.proprietaire)
+        with self.settings(CORS_ALLOWED_ORIGINS=[origine]):
+            response = self.client.get(self._url('piece_identite_recto'), HTTP_ORIGIN=origine)
+        self.assertRegex(response['Content-Disposition'], r'^inline; filename="[0-9a-f-]+\.pdf"$')
+        self.assertIn('Content-Disposition', response['Access-Control-Expose-Headers'])
+
 
 class UtilisateurManagerTestCase(TestCase):
     """create_superuser() doit produire un compte qui a réellement les

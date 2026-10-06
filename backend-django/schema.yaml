@@ -5161,11 +5161,20 @@ paths:
       responses:
         '200':
           content:
-            application/json:
+            image/jpeg:
               schema:
                 type: string
                 format: binary
-          description: 'Contenu du fichier (Content-Disposition : attachment).'
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+          description: 'Contenu du fichier (Content-Disposition : inline, avec le
+            nom du fichier).'
         '401':
           content:
             application/json:
@@ -5312,11 +5321,24 @@ paths:
       responses:
         '200':
           content:
-            application/json:
+            image/jpeg:
               schema:
                 type: string
                 format: binary
-          description: 'Contenu du fichier (Content-Disposition : attachment).'
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+          description: 'Contenu du fichier (Content-Disposition : inline, avec le
+            nom du fichier).'
         '401':
           content:
             application/json:
@@ -6372,11 +6394,24 @@ paths:
       responses:
         '200':
           content:
-            application/json:
+            image/jpeg:
               schema:
                 type: string
                 format: binary
-          description: 'Contenu du fichier (Content-Disposition : attachment).'
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+          description: 'Contenu du fichier (Content-Disposition : inline, avec le
+            nom du fichier).'
         '401':
           content:
             application/json:

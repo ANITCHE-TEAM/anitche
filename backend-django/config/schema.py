@@ -62,8 +62,24 @@ class JetonsSerializer(serializers.Serializer):
         ref_name = "Jetons"
 
 
-#: Réponse d'un téléchargement de fichier (pièce KYC, photo, pièce jointe).
-FICHIER = OpenApiResponse(OpenApiTypes.BINARY, description="Contenu du fichier (Content-Disposition : attachment).")
+def _fichier(*types_de_contenu):
+    """Réponse 200 d'un téléchargement (FileResponse), déclarée sous les
+    types réels du fichier (déduits de son extension), jamais sous
+    application/json : un client généré ne tente pas de la lire en JSON.
+    À fusionner dans extend_schema(responses=...)."""
+    return {
+        (200, *types_de_contenu): OpenApiResponse(
+            OpenApiTypes.BINARY, description="Contenu du fichier (Content-Disposition : inline, avec le nom du fichier).",
+        ),
+    }
+
+
+#: Types d'image acceptés à l'envoi (validateur_image_standard).
+TYPES_IMAGE = ("image/jpeg", "image/png", "image/webp")
+#: Photo justificative d'un retour.
+FICHIER_IMAGE = _fichier(*TYPES_IMAGE)
+#: Pièce KYC (recto, verso : images ou PDF ; selfie : image) ou pièce jointe de support.
+FICHIER_DOCUMENT = _fichier(*TYPES_IMAGE, "application/pdf")
 
 
 DESCRIPTIONS_ERREURS = {
