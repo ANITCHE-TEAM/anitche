@@ -148,6 +148,7 @@ def product_row(**overrides) -> dict:
         "prix_base": Decimal("3500.00"),
         "prix_min": Decimal("3500.00"),
         "image_principale": "catalogue/produits/2026/09/produit_GJzjrY5.png",
+        "miniature_principale": "catalogue/miniatures/2026/09/produit_GJzjrY5.webp",
         "categorie_id": 8,
         "categorie_nom": "Beauté",
         "boutique_id": 14,

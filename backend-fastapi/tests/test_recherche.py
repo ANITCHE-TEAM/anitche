@@ -27,8 +27,8 @@ from tests.fakes import AUTH_HEADERS, FakeDjango, FakePool, make_settings, produ
 
 VIEWS = {"catalogue_produit_public", "catalogue_categorie_publique", "catalogue_boutique_publique"}
 DJANGO_LIST_FIELDS = {
-    "id", "nom", "slug", "prix_base", "prix_min", "image_principale", "categorie", "categorie_nom",
-    "boutique", "boutique_nom", "boutique_slug", "en_stock", "date_creation",
+    "id", "nom", "slug", "prix_base", "prix_min", "image_principale", "miniature_principale",
+    "categorie", "categorie_nom", "boutique", "boutique_nom", "boutique_slug", "en_stock", "date_creation",
 }
 ERROR_KEYS = {"success", "status_code", "detail", "errors"}
 
@@ -303,6 +303,7 @@ def test_response_has_the_django_envelope_and_fields_only(client, db):
         "prix_base": "3500.00",
         "prix_min": 3500.0,
         "image_principale": "http://localhost:8000/media/catalogue/produits/2026/09/produit_GJzjrY5.png",
+        "miniature_principale": "http://localhost:8000/media/catalogue/miniatures/2026/09/produit_GJzjrY5.webp",
         "categorie": 8,
         "categorie_nom": "Beauté",
         "boutique": 14,
@@ -323,11 +324,35 @@ def test_product_without_category_image_or_price(client, db):
     assert item["prix_min"] == 3500.0
 
 
+@pytest.mark.parametrize("miniature", [None, ""])
+def test_thumbnail_null_when_missing_and_original_kept(client, db, miniature):
+    """Miniature pas encore générée : clé présente, valeur null, l'original
+    reste renvoyé (le client s'y replie)."""
+    db.search_rows = [product_row(miniature_principale=miniature)]
+    (item,) = client.get("/recherche/produits").json()["results"]
+    assert "miniature_principale" in item and item["miniature_principale"] is None
+    assert item["image_principale"].endswith("/catalogue/produits/2026/09/produit_GJzjrY5.png")
+
+
+def test_page_query_selects_the_thumbnail_column():
+    sql, _ = search.page_query(SearchFilters(), "date_desc", 1)
+    assert "p.miniature_principale" in sql
+
+
 @pytest.mark.parametrize("settings", [{"media_base_url": "https://cdn.anitche.test/media"}], indirect=True)
 def test_image_url_uses_media_base_url_and_django_encoding(client, db):
     db.search_rows = [product_row(image_principale="catalogue/produits/photo été (1).png")]
     (item,) = client.get("/recherche/produits").json()["results"]
     assert item["image_principale"] == "https://cdn.anitche.test/media/catalogue/produits/photo%20%C3%A9t%C3%A9%20(1).png"
+
+
+@pytest.mark.parametrize("settings", [{"media_base_url": "https://cdn.anitche.test/media"}], indirect=True)
+def test_thumbnail_url_uses_media_base_url_and_django_encoding(client, db):
+    db.search_rows = [product_row(miniature_principale="catalogue/miniatures/2026/09/photo été (1).webp")]
+    (item,) = client.get("/recherche/produits").json()["results"]
+    assert item["miniature_principale"] == (
+        "https://cdn.anitche.test/media/catalogue/miniatures/2026/09/photo%20%C3%A9t%C3%A9%20(1).webp"
+    )
 
 
 @pytest.mark.parametrize("settings", [{"public_base_url": "https://anitche.test/fast"}], indirect=True)

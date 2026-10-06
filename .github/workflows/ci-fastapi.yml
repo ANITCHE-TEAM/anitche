@@ -56,6 +56,11 @@ jobs:
       - name: Vérifier que l'app se construit
         run: python -c "from app.main import create_app; create_app(); print('Application construite.')"
 
+      # openapi.json : référence du frontend pour /fast. En cas d'échec, le
+      # message donne la commande à lancer.
+      - name: Schéma à jour
+        run: python scripts/exporter_openapi.py --check
+
       - name: Lancer les tests
         run: python -m pytest -q -m "not integration"
 
