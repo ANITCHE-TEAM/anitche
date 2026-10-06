@@ -146,12 +146,19 @@ def test_django_display_rules_are_reproduced(catalogue, make_search_app):
     promo = catalogue.product(
         f"Promo {marker}", shop=shop, base_price=12000,
         variants=((12000, 8000, True, 2), (5000, None, False, 9)),  # variante inactive moins chère
-        images=(("catalogue/produits/b.png", False, 0), ("catalogue/produits/a b.png", True, 5)),
+        images=(
+            ("catalogue/produits/b.png", False, 0, "catalogue/miniatures/b.webp"),
+            ("catalogue/produits/a b.png", True, 5, "catalogue/miniatures/a b.webp"),
+        ),
         created=datetime(2026, 9, 1, 10, 0, 0, 123456, tzinfo=UTC),
     )
     no_stock = catalogue.product(
         f"Rupture {marker}", shop=shop, variants=((3000, None, True, 0),),
-        images=(("catalogue/produits/deux.png", False, 2), ("catalogue/produits/un.png", False, 1)),
+        # Aucune principale : la première par ordre (un.png), sans miniature.
+        images=(
+            ("catalogue/produits/deux.png", False, 2, "catalogue/miniatures/deux.webp"),
+            ("catalogue/produits/un.png", False, 1),
+        ),
     )
     no_stock_row = catalogue.product(f"Sans ligne {marker}", shop=shop, variants=((4000, None, True, None),))
     inactive_only_in_stock = catalogue.product(
@@ -166,6 +173,11 @@ def test_django_display_rules_are_reproduced(catalogue, make_search_app):
     assert results[promo]["prix_min"] == 8000.0 and results[promo]["prix_base"] == "12000.00"
     assert results[promo]["en_stock"] is True
     assert results[promo]["image_principale"] == "https://media.anitche.test/media/catalogue/produits/a%20b.png"
+    # Miniature de la MÊME image que `image_principale`, jamais d'une autre.
+    assert results[promo]["miniature_principale"] == "https://media.anitche.test/media/catalogue/miniatures/a%20b.webp"
+    assert results[no_stock]["miniature_principale"] is None
+    assert results[no_stock_row]["miniature_principale"] is None
+    assert results[inactive_only_in_stock]["miniature_principale"] is None
     assert results[promo]["date_creation"] == "2026-09-01T10:00:00.123456Z"
     assert results[no_stock]["en_stock"] is False and results[no_stock]["prix_min"] == 3000.0
     assert results[no_stock]["image_principale"].endswith("/catalogue/produits/un.png")

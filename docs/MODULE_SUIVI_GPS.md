@@ -195,6 +195,21 @@ Côté serveur : aucun écho, messages construits par Pydantic (JSON strict, san
 - `tests/integration/` (marqueur `integration`) : **vrais** PostgreSQL et Redis. Droits par colonne exacts (`information_schema.column_privileges`), colonnes refusées, écriture refusée, requête d'accès sur le schéma des migrations Django, pub/sub entre deux applications, parcours complet jusqu'à `fin_suivi`.
 - CI (`.github/workflows/ci-fastapi.yml`) : job `test` sans service (`-m "not integration"`), job `integration` (Postgres 16, Redis 7, `migrate`, vrai script du rôle, `REQUIRE_INTEGRATION=1` : un test sauté fait échouer le job).
 
+### Contrat OpenAPI versionné (tout le service FastAPI)
+
+`backend-fastapi/openapi.json` est le schéma de **toutes** les routes `/fast` (recherche, IA, QR, suivi GPS, `/health`). `/openapi.json` n'existe pas en production : ce fichier est la référence du frontend, comme `backend-django/schema.yaml` pour `/api`.
+
+```bash
+cd backend-fastapi
+python scripts/exporter_openapi.py           # régénère le fichier
+python scripts/exporter_openapi.py --check   # échoue s'il n'est pas à jour, et donne la commande
+```
+
+- Le fichier est identique d'un poste à l'autre : le script construit l'application avec des réglages figés (`environment="test"`, valeurs par défaut du code) et **ne lit ni variable d'environnement ni `.env`**. JSON stable : indentation 2, sans échappement ASCII, `\n` final, ordre des clés conservé (celui des routes).
+- Les chemins sont **sans le préfixe nginx** `/fast` et le schéma n'a pas de `servers` : la base de l'URL appartient au client (`GUIDE_FRONTEND.md` § 12, « Base et authentification »). Le WebSocket n'est pas décrit par OpenAPI : son contrat est le § 7.
+- À régénérer et à versionner dans le même commit que tout changement de route, de modèle de réponse ou de description. `tests/test_openapi_versionne.py` (fichier à jour, indépendance de l'environnement, message de `--check`) et l'étape « Schéma à jour » de `ci-fastapi.yml` font échouer un oubli.
+- Changer `app_version` ou `app_name` (`app/core/settings.py`) change le fichier : le régénérer.
+
 En local, jamais sur la base de dev `anitche` (refusé par les fixtures) :
 
 ```bash

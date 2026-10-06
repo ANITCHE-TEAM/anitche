@@ -361,7 +361,8 @@ class CatalogueSeed:
         created: datetime | None = None,
     ) -> int:
         """`variants` : (prix, prix promo, active, stock ou None sans ligne de
-        stock) ; `images` : (chemin, principale, ordre)."""
+        stock) ; `images` : (chemin, principale, ordre
+        et, en option, chemin de la miniature)."""
         product_id = run(self._insert_product(
             name, shop, description, category, active, base_price, variants, images, created,
         ))
@@ -402,13 +403,13 @@ class CatalogueSeed:
                             """,
                             stock, variant_id,
                         )
-                for path, principal, order in images:
+                for path, principal, order, *thumbnail in images:
                     await connection.execute(
                         """
-                        INSERT INTO catalogue_imageproduit (image, est_principale, ordre, date_creation, produit_id)
-                        VALUES ($1, $2, $3, now(), $4)
+                        INSERT INTO catalogue_imageproduit (image, miniature, est_principale, ordre, date_creation, produit_id)
+                        VALUES ($1, $2, $3, $4, now(), $5)
                         """,
-                        path, principal, order, product_id,
+                        path, thumbnail[0] if thumbnail else None, principal, order, product_id,
                     )
                 return product_id
         finally:
