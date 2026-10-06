@@ -70,6 +70,7 @@ Tout passe par l'API réelle (mêmes vues, permissions et services que le fronte
 4. Déconnexion : `POST /api/utilisateurs/deconnexion/` avec `{"refresh"}` (révoque le jeton).
 5. Un changement de mot de passe invalide tous les jetons existants.
 6. **Email non vérifié** : certaines actions (commander, devenir vendeur, changer de contact) répondent **403** avec `errors.code = ["email_non_verifie"]`. Afficher alors l'écran de saisie du code (voir [`MODULE_UTILISATEURS.md`](./MODULE_UTILISATEURS.md) § 11).
+7. **Routes publiques** : catégories (liste, détail), produits (liste, fiche), boutiques publiques (liste, fiche), grille des tarifs de livraison (`GET /api/livraison/tarifs/`) et vérification de passeport (`GET /api/passeports/verifier/{code}/`). L'en-tête `Authorization` y est facultatif. Un jeton valide identifie le compte (la limite de débit est alors comptée par compte, pas par IP) ; un jeton refusé (expiré, révoqué, malformé) est **ignoré** : la réponse est celle d'un visiteur, jamais 401. Le client peut donc garder son intercepteur sur ces routes. Le **panier** n'en fait pas partie : son contenu dépend du compte, un jeton expiré y donne 401 (rafraîchir puis rejouer).
 
 Un intercepteur axios qui rafraîchit sur 401 puis rejoue la requête une seule fois suffit ; sérialiser les rafraîchissements concurrents (un seul appel à la fois), sinon deux onglets consomment le même `refresh`.
 
@@ -378,7 +379,7 @@ Le QR imprimé sur l'étiquette contient `url_verification_publique` (donnée pa
 | Appareil photo du téléphone (hors application) | Le navigateur ouvre directement la page `/qr/verifier/:code` |
 | Scanner intégré (caméra) ou saisie du code imprimé sous le QR | `POST /fast/qr/scan` avec `{"qr_data": <contenu brut>}` → 200 : ouvrir `url_verification_publique` (la page `/qr/verifier/:code`) |
 
-La page `/qr/verifier/:code` appelle **Django** `GET /api/passeports/verifier/{code}/`, **sans en-tête `Authorization`** (route publique ; un jeton expiré donnerait 401). C'est cet appel qui certifie, compte et journalise le scan : **un seul appel par affichage**. Affichage selon `statut_passeport` (`valide`, `revoque`) et `disponible_a_la_vente` ([`MODULE_PASSEPORT_QR.md`](./MODULE_PASSEPORT_QR.md) § 4) ; 404 : « Ce code ne correspond à aucun passeport ANITCHE » ; 429 : attendre `Retry-After`.
+La page `/qr/verifier/:code` appelle **Django** `GET /api/passeports/verifier/{code}/`, sans jeton nécessaire (route publique ; un jeton expiré ou révoqué est ignoré, jamais 401, § 4). C'est cet appel qui certifie, compte et journalise le scan : **un seul appel par affichage**. Affichage selon `statut_passeport` (`valide`, `revoque`) et `disponible_a_la_vente` ([`MODULE_PASSEPORT_QR.md`](./MODULE_PASSEPORT_QR.md) § 4) ; 404 : « Ce code ne correspond à aucun passeport ANITCHE » ; 429 : attendre `Retry-After`.
 
 **La page `/qr/verifier/:code` doit exister avant toute impression de QR**, et le domaine (`anitche.com` ou `anitche.ci`) doit être fixé avant : l'URL est figée dès l'impression.
 
@@ -412,7 +413,7 @@ async function ouvrirPasseport(contenuBrut, naviguer) {
   return { refus: corps.errors?.code?.[0] ?? (reponse.status === 400 ? 'saisie_invalide' : reponse.status) };
 }
 
-// Page /qr/verifier/:code : un seul appel par affichage, sans Authorization.
+// Page /qr/verifier/:code : un seul appel par affichage, aucun jeton nécessaire.
 async function verifierPasseport(code) {
   const reponse = await fetch(`${DJANGO_API_URL}/passeports/verifier/${encodeURIComponent(code)}/`);
   return { statut: reponse.status, corps: await reponse.json() };
