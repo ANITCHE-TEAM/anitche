@@ -368,3 +368,95 @@ class AnnulationTests(DonneesCycleDeVie, APITestCase):
         client = Notification.objects.get(destinataire=self.client_user, titre__contains="annulée")
         self.assertIn("remboursement", client.message)
         self.assertTrue(Notification.objects.filter(destinataire=self.vendeur1, titre__contains="annulée").exists())
+        self.assertEqual(client.lien_redirection, f"/commandes/{self.commande.pk}")
+        vendeur = Notification.objects.get(destinataire=self.vendeur1, titre__contains="annulée")
+        self.assertEqual(vendeur.lien_redirection, f"/vendeur/commandes/{self.commande.pk}")
+
+
+# =====================================================================
+# ROUTES LOGIQUES (apps/notifications/liens.py)
+# =====================================================================
+
+import importlib
+import inspect
+import re
+import uuid
+from types import SimpleNamespace
+
+from django.apps import apps as registre_apps
+from django.test import SimpleTestCase, TestCase
+
+from . import liens
+
+MIGRATION_LIENS = importlib.import_module("apps.notifications.migrations.0003_liens_routes_logiques")
+
+
+class LiensTests(SimpleTestCase):
+    """Chaque fonction produit un chemin conforme à l'un des gabarits de
+    ROUTES, et aucun ne mène à l'admin Django."""
+
+    def chemin_conforme(self, chemin):
+        for gabarit in liens.ROUTES:
+            motif = re.escape(gabarit).replace(r"\{uuid\}", r"[0-9a-f-]{36}").replace(r"\{id\}", r"\d+")
+            if re.fullmatch(motif, chemin):
+                return gabarit
+        return None
+
+    def test_chaque_fonction_produit_une_route_de_la_liste(self):
+        objet_uuid = SimpleNamespace(pk=uuid.uuid4())
+        objet_entier = SimpleNamespace(pk=42)
+        produits = {}
+        for nom, fonction in inspect.getmembers(liens, inspect.isfunction):
+            if not nom.startswith("lien_"):
+                continue
+            parametres = inspect.signature(fonction).parameters
+            argument = objet_entier if "produit" in parametres else objet_uuid
+            chemin = fonction(argument) if parametres else fonction()
+            with self.subTest(fonction=nom, chemin=chemin):
+                gabarit = self.chemin_conforme(chemin)
+                self.assertIsNotNone(gabarit)
+                self.assertTrue(chemin.startswith("/"))
+                self.assertNotIn("?", chemin)
+                self.assertNotIn("//", chemin)
+                self.assertFalse(chemin.startswith("/admin/"))
+                produits[gabarit] = nom
+        # Chaque gabarit est produit par une fonction (pas de route morte).
+        self.assertEqual(set(produits), set(liens.ROUTES))
+
+    def test_texte_d_aide_du_champ_liste_toutes_les_routes(self):
+        aide = Notification._meta.get_field("lien_redirection").help_text
+        for gabarit in liens.ROUTES:
+            self.assertIn(gabarit, aide)
+
+
+class MigrationLiensAdministrationTests(TestCase):
+    """Migration 0003 : `/admin/…` devient `/administration/…`, le reste
+    du chemin conservé ; les autres liens ne bougent pas ; retour arrière."""
+
+    def setUp(self):
+        self.destinataire = Utilisateur.objects.create_user(email="migr@anitche.ci", password="x", nom="M", prenom="G")
+
+    def creer(self, lien):
+        return Notification.objects.create(destinataire=self.destinataire, titre="t", message="m",
+                                           lien_redirection=lien)
+
+    def test_aller_retour(self):
+        identifiant = uuid.uuid4()
+        admin = self.creer(f"/admin/retours/{identifiant}")
+        client = self.creer(f"/retours/{identifiant}")
+        vide = self.creer("")
+        MIGRATION_LIENS.vers_administration(registre_apps, None)
+        for notification in (admin, client, vide):
+            notification.refresh_from_db()
+        self.assertEqual(admin.lien_redirection, f"/administration/retours/{identifiant}")
+        self.assertEqual((client.lien_redirection, vide.lien_redirection), (f"/retours/{identifiant}", ""))
+        # Rejouée, elle ne change plus rien.
+        MIGRATION_LIENS.vers_administration(registre_apps, None)
+        admin.refresh_from_db()
+        self.assertEqual(admin.lien_redirection, f"/administration/retours/{identifiant}")
+
+        MIGRATION_LIENS.vers_admin(registre_apps, None)
+        for notification in (admin, client):
+            notification.refresh_from_db()
+        self.assertEqual(admin.lien_redirection, f"/admin/retours/{identifiant}")
+        self.assertEqual(client.lien_redirection, f"/retours/{identifiant}")

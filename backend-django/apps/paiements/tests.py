@@ -543,6 +543,10 @@ class RemboursementTests(Donnees, APITestCase):
         self.assertFalse(Livraison.objects.filter(commande=self.commande_a).exists())
         self.assertFalse(CompteFidelite.objects.filter(utilisateur=self.client1, solde_points__gt=0).exists())
         self.assertTrue(Notification.objects.filter(destinataire=self.admin, titre="Remboursement à traiter").exists())
+        self.assertEqual(
+            Notification.objects.get(destinataire=self.admin, titre="Remboursement à traiter").lien_redirection,
+            "/administration/remboursements",
+        )
 
     def test_second_paiement_d_une_commande_deja_payee_rembourse(self):
         premier = self.payer(self.commande_a)
@@ -597,6 +601,10 @@ class RemboursementTests(Donnees, APITestCase):
         self.assertEqual((r.status_code, r.data["statut"], r.data["traite_par"]), (200, "effectue", self.admin.pk))
         self.assertEqual(admin.post(url, {"decision": "effectue", "reference_externe": "X"}).status_code, 409)
         self.assertTrue(Notification.objects.filter(destinataire=self.client1, titre="Remboursement effectué").exists())
+        self.assertEqual(
+            Notification.objects.get(destinataire=self.client1, titre="Remboursement effectué").lien_redirection,
+            f"/paiements/{paiement.pk}",
+        )
         donnees = self.api(self.client1).get(f"/api/paiements/{paiement.pk}/").data
         self.assertEqual(donnees["remboursements"][0]["statut"], "effectue")
 
@@ -1727,6 +1735,10 @@ class ReversementTests(Donnees, APITestCase):
         self.assertEqual((self.reversement.numero_destinataire, self.reversement.verse_par),
                          ("0707070707", self.admin))
         self.assertTrue(Notification.objects.filter(destinataire=self.vendeur1, titre="Reversement effectué").exists())
+        self.assertEqual(
+            Notification.objects.get(destinataire=self.vendeur1, titre="Reversement effectué").lien_redirection,
+            "/vendeur/reversements",
+        )
 
     def test_transfert_par_le_fournisseur(self):
         self.livrer(il_y_a_jours=8)

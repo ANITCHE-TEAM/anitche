@@ -546,6 +546,15 @@ class TransitionsTests(RetoursCycleBase):
         self.assertEqual(self.agir(demande.id, self.vendeur1, "rejeter", reponse="Hors délai.").status_code, 200)
         self.assertTrue(Notification.objects.filter(destinataire=self.admin, titre__icontains="rejeté").exists())
         self.assertTrue(Notification.objects.filter(destinataire=self.client1, metadata__retour_id=str(demande.id)).exists())
+        # Lien du portail d'administration, jamais /admin/ (admin Django).
+        self.assertEqual(
+            Notification.objects.get(destinataire=self.admin, titre__icontains="rejeté").lien_redirection,
+            f"/administration/retours/{demande.id}",
+        )
+        self.assertEqual(
+            Notification.objects.get(destinataire=self.client1, metadata__retour_id=str(demande.id)).lien_redirection,
+            f"/retours/{demande.id}",
+        )
 
     def test_client_marque_expedie_et_le_vendeur_est_prevenu(self):
         demande = self.demande_au_statut(DemandeRetour.Statut.APPROUVE)

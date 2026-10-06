@@ -508,6 +508,7 @@ def creer_remboursement(paiement, commande, motif, montant=None, retour=None):
 
 def alerter_administration(remboursement):
     """Journal de sécurité + notification de chaque administrateur actif."""
+    from apps.notifications import liens
     from apps.notifications.models import Notification
     from apps.notifications.services import ServiceNotification
 
@@ -521,6 +522,7 @@ def alerter_administration(remboursement):
         titre="Remboursement à traiter",
         message=message,
         type_notification=Notification.TypeNotification.PAIEMENT,
+        lien_redirection=liens.lien_remboursements_administration(),
         metadata={"remboursement": str(remboursement.pk), "commande": str(commande.pk)},
     )
 
@@ -528,6 +530,7 @@ def alerter_administration(remboursement):
 def traiter_remboursement(remboursement, administrateur, decision, reference_externe="", commentaire=""):
     """L'administration a remboursé depuis le tableau de bord du fournisseur
     (effectue, référence obligatoire) ou refuse le remboursement (refuse)."""
+    from apps.notifications import liens
     from apps.notifications.models import Notification
     from apps.notifications.services import ServiceNotification
 
@@ -551,6 +554,7 @@ def traiter_remboursement(remboursement, administrateur, decision, reference_ext
             titre="Remboursement effectué",
             message=f"Votre remboursement de {int(verrouille.montant)} FCFA ({verrouille.reference}) a été effectué.",
             type_notification=Notification.TypeNotification.PAIEMENT,
+            lien_redirection=liens.lien_paiement_client(verrouille.paiement),
             metadata={"remboursement": str(verrouille.pk)},
         )
     return verrouille

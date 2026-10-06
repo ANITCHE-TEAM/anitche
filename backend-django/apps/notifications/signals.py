@@ -1,6 +1,7 @@
 import logging
 from django.dispatch import receiver
 
+from . import liens
 from .models import Notification
 from .services import ServiceNotification
 
@@ -23,7 +24,9 @@ try:
                 f"a été validé avec succès. Vos articles sont en cours de préparation."
             ),
             type_notification=Notification.TypeNotification.PAIEMENT,
-            lien_redirection=f"/commandes/{commandes[0].id}" if len(commandes) == 1 else "/commandes",
+            lien_redirection=(
+                liens.lien_commande_client(commandes[0]) if len(commandes) == 1 else liens.lien_commandes_client()
+            ),
             metadata={"paiement_id": str(paiement.id), "reference": paiement.reference},
         )
 
@@ -40,7 +43,7 @@ try:
                         f"a été payée. Vous pouvez débuter sa préparation."
                     ),
                     type_notification=Notification.TypeNotification.COMMANDE,
-                    lien_redirection=f"/vendeur/commandes/{c.id}",
+                    lien_redirection=liens.lien_commande_vendeur(c),
                     metadata={"commande_id": str(c.id), "numero_commande": c.numero_commande},
                 )
 
@@ -82,7 +85,7 @@ try:
             titre=f"Livraison {livraison.commande.numero_commande} : {livraison.get_status_display()}",
             message=message_corps,
             type_notification=Notification.TypeNotification.LIVRAISON,
-            lien_redirection=f"/livraisons/{livraison.id}",
+            lien_redirection=liens.lien_livraison_client(livraison),
             metadata={
                 "livraison_id": str(livraison.id),
                 "commande_numero": livraison.commande.numero_commande,

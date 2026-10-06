@@ -674,6 +674,10 @@ class ContestationTests(DonneesLivraison, APITestCase):
         self.assertEqual(self.reversement().statut, Reversement.Statut.SUSPENDU)
         self.assertTrue(Notification.objects.filter(destinataire=self.admin, titre="Livraison contestée").exists())
         self.assertEqual(self.detail(self.client_user).data["contestation"]["statut"], "ouverte")
+        self.assertEqual(
+            Notification.objects.get(destinataire=self.admin, titre="Livraison contestée").lien_redirection,
+            f"/administration/livraisons/{self.livraison.pk}",
+        )
 
     def test_une_seule_contestation_par_son_client(self):
         self.assertEqual(self.contester(self.autre_client).status_code, 404)
@@ -694,6 +698,8 @@ class ContestationTests(DonneesLivraison, APITestCase):
         self.assertEqual(self.resoudre("rejetee").status_code, 200)
         self.assertEqual(self.reversement().statut, Reversement.Statut.EN_RETRACTATION)
         self.assertEqual(self.resoudre("fondee").status_code, 400)  # déjà traitée
+        decision = Notification.objects.get(destinataire=self.client_user, titre__startswith="Contestation de la commande")
+        self.assertEqual(decision.lien_redirection, f"/livraisons/{self.livraison.pk}")
 
     def test_fondee_remboursement_et_reversement_annule(self):
         self.contester(self.client_user)

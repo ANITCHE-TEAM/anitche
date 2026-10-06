@@ -1,6 +1,8 @@
 import logging
 from django.dispatch import Signal, receiver
 
+from apps.notifications import liens
+
 logger = logging.getLogger(__name__)
 
 # Émis par apps.retours.services.traiter, après le commit, à chaque
@@ -53,7 +55,7 @@ def notifier_nouvelle_demande(demande):
             f"({demande.get_motif_display()}). Répondez depuis votre espace retours."
         ),
         demande=demande,
-        lien=f"/vendeur/retours/{demande.id}",
+        lien=liens.lien_retour_vendeur(demande),
     )
 
 
@@ -80,7 +82,7 @@ def _prevenir(demande, nouveau_statut, action, par_client):
             titre=f"Retour {demande.numero_retour} : {demande.get_statut_display()}",
             message=MESSAGES_VENDEUR[action].format(numero=demande.numero_retour),
             demande=demande,
-            lien=f"/vendeur/retours/{demande.id}",
+            lien=liens.lien_retour_vendeur(demande),
             statut=nouveau_statut,
         )
         return
@@ -90,7 +92,7 @@ def _prevenir(demande, nouveau_statut, action, par_client):
         titre=f"Retour {demande.numero_retour} : {demande.get_statut_display()}",
         message=MESSAGES_CLIENT.get(nouveau_statut, f"Statut de votre retour : {demande.get_statut_display()}."),
         demande=demande,
-        lien=f"/retours/{demande.id}",
+        lien=liens.lien_retour_client(demande),
         statut=nouveau_statut,
     )
     if nouveau_statut == "rejete":
@@ -102,6 +104,6 @@ def _prevenir(demande, nouveau_statut, action, par_client):
                 f"a été rejeté : « {demande.reponse_vendeur[:200]} »."
             ),
             type_notification=Notification.TypeNotification.COMMANDE,
-            lien_redirection=f"/admin/retours/{demande.id}",
+            lien_redirection=liens.lien_retour_administration(demande),
             metadata={"retour_id": str(demande.id)},
         )

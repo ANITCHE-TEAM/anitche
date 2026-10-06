@@ -3,6 +3,8 @@ from django.db import models
 from django.conf import settings
 from django.utils import timezone
 
+from .liens import ROUTES
+
 
 class Notification(models.Model):
     """Notification destinée à un utilisateur (client, vendeur, livreur, administrateur)."""
@@ -53,7 +55,12 @@ class Notification(models.Model):
     lien_redirection = models.CharField(
         max_length=255,
         blank=True,
-        help_text="URL relative ou deep-link vers la ressource associée (ex: /commandes/CMD-2026-X)",
+        help_text=(
+            "Route logique de la ressource, à associer à une page par chaque portail : un chemin (jamais une "
+            "URL, ni un hôte, ni une requête), ou vide si la notification ne mène nulle part. Liste fermée "
+            "(apps/notifications/liens.py) : " + ", ".join(ROUTES) + ". Un préfixe inconnu mène au centre "
+            "de notifications."
+        ),
     )
 
     metadata = models.JSONField(
