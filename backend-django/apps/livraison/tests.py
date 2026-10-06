@@ -872,6 +872,67 @@ class PositionLivraisonTests(DonneesLivraison, APITestCase):
             self.assertEqual(self.point(utilisateur), (None, None))
 
 
+class PerimetreAchatsTests(DonneesLivraison, APITestCase):
+    """?perimetre=achats : les livraisons des commandes du compte, en
+    représentation client, quel que soit le rôle (livreur ou administrateur
+    qui achète). Le paramètre restreint, il n'élargit jamais."""
+
+    def setUp(self):
+        self.creer_donnees()
+        self.achat_livreur = self.achat(self.livreur, livreur=self.autre_livreur)
+        self.achat_admin = self.achat(self.admin)
+
+    def achat(self, acheteur, livreur=None):
+        groupe = GroupeCommande.objects.create(
+            client=acheteur, livraison_zone="abidjan", livraison_commune="Cocody", livraison_quartier="Riviera",
+            livraison_point_de_repere="Carrefour", livraison_telephone="0700000009",
+        )
+        commande = Commande.objects.create(
+            boutique=self.boutique, client=acheteur, groupe=groupe, montant_total=Decimal("3000"),
+            status=Commande.Status.CONFIRMEE,
+        )
+        return Livraison.objects.create(commande=commande, livreur=livreur, adresse_livraison="Cocody, Riviera")
+
+    def ids(self, utilisateur, **params):
+        r = self.api(utilisateur).get(reverse("livraison:livraison-list"), params)
+        self.assertEqual(r.status_code, 200)
+        return {ligne["id"] for ligne in r.data["results"]}
+
+    def detail_achat(self, utilisateur, livraison):
+        return self.api(utilisateur).get(
+            reverse("livraison:livraison-detail", args=[livraison.pk]), {"perimetre": "achats"},
+        )
+
+    def test_livreur_acheteur(self):
+        self.assertEqual(self.ids(self.livreur), {str(self.livraison.pk)})  # sans paramètre : inchangé
+        self.assertEqual(self.ids(self.livreur, perimetre="achats"), {str(self.achat_livreur.pk)})
+        self.assertEqual(self.detail_achat(self.livreur, self.achat_livreur).status_code, 200)
+        # Une livraison qu'il transporte n'est pas un de ses achats.
+        self.assertEqual(self.detail_achat(self.livreur, self.livraison).status_code, 404)
+        # L'achat d'un autre client : jamais visible.
+        self.assertEqual(self.detail_achat(self.autre_livreur, self.achat_livreur).status_code, 404)
+        self.assertEqual(self.ids(self.autre_livreur, perimetre="achats"), set())
+
+    def test_representation_client(self):
+        achat = self.detail_achat(self.livreur, self.achat_livreur).data
+        cles_client = set(self.detail(self.client_user).data)
+        self.assertEqual(set(achat), cles_client)
+
+    def test_administrateur_acheteur(self):
+        self.assertEqual(len(self.ids(self.admin)), 3)
+        self.assertEqual(self.ids(self.admin, perimetre="achats"), {str(self.achat_admin.pk)})
+        # Les filtres d'administration ne rouvrent pas le périmètre.
+        self.assertEqual(self.ids(self.admin, perimetre="achats", status="en_attente"), {str(self.achat_admin.pk)})
+        self.assertEqual(self.detail_achat(self.admin, self.livraison).status_code, 404)
+
+    def test_client_et_valeur_inconnue_inchanges(self):
+        attendu = {str(self.livraison.pk)}
+        self.assertEqual(self.ids(self.client_user), attendu)
+        self.assertEqual(self.ids(self.client_user, perimetre="achats"), attendu)
+        self.assertEqual(self.ids(self.livreur, perimetre="tout"), attendu)
+        self.assertEqual(len(self.ids(self.admin, perimetre="tout")), 3)
+
+
 class PerformanceEtLimitesTests(DonneesLivraison, APITestCase):
     """Pas de N+1 et limite de débit dédiée."""
 

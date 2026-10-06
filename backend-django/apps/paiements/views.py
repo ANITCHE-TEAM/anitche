@@ -40,10 +40,24 @@ logger_securite = logging.getLogger("securite")
 MESSAGE_FOURNISSEUR_INDISPONIBLE = "Le service de paiement est momentanément indisponible. Réessayez dans un instant."
 
 
-def paiements_visibles(utilisateur):
-    """Client : ses paiements. Administration (rôle, jamais is_staff) : tous."""
+#: ?perimetre=achats : les paiements du compte, quel que soit son rôle
+#: (portail client d'un administrateur qui achète).
+PERIMETRE_ACHATS = "achats"
+
+PARAMETRE_PERIMETRE = OpenApiParameter(
+    "perimetre", enum=[PERIMETRE_ACHATS],
+    description=(
+        "`achats` : seulement les paiements du compte, en représentation Paiement, quel que soit le rôle "
+        "(le portail client l'envoie toujours). Valeur inconnue : ignorée."
+    ),
+)
+
+
+def paiements_visibles(utilisateur, perimetre=None):
+    """Client : ses paiements. Administration (rôle, jamais is_staff) : tous,
+    sauf avec `perimetre="achats"` (les siens seulement)."""
     qs = Paiement.objects.select_related("client").prefetch_related("commandes", "remboursements")
-    if utilisateur.role in ROLES_ADMINISTRATION:
+    if utilisateur.role in ROLES_ADMINISTRATION and perimetre != PERIMETRE_ACHATS:
         return qs
     return qs.filter(client=utilisateur)
 
@@ -58,8 +72,10 @@ def paiement_selon_role(many=False):
     )
 
 
-def serializer_paiement(utilisateur):
-    return PaiementAdminSerializer if utilisateur.role in ROLES_ADMINISTRATION else PaiementSerializer
+def serializer_paiement(utilisateur, perimetre=None):
+    if utilisateur.role in ROLES_ADMINISTRATION and perimetre != PERIMETRE_ACHATS:
+        return PaiementAdminSerializer
+    return PaiementSerializer
 
 
 # =====================================================================
@@ -101,10 +117,23 @@ class InitierPaiementView(APIView):
                         status=status.HTTP_201_CREATED)
 
 
+class PerimetreMixin:
+    """`?perimetre=achats` : représentation client, même pour l'administration."""
+
+    def perimetre(self):
+        return self.request.query_params.get("perimetre")
+
+    def get_serializer_class(self):
+        if getattr(self, "swagger_fake_view", False):  # génération du schéma OpenAPI
+            return PaiementSerializer
+        return serializer_paiement(self.request.user, self.perimetre())
+
+
 @extend_schema(
     summary="Mes paiements (tous pour l'administration)",
-    description="Représentation PaiementAdmin pour l'administration, Paiement sinon.",
+    description="Représentation PaiementAdmin pour l'administration (sauf `perimetre=achats`), Paiement sinon.",
     parameters=[
+        PARAMETRE_PERIMETRE,
         OpenApiParameter(
             "reference", str,
             description=(
@@ -115,13 +144,13 @@ class InitierPaiementView(APIView):
     ],
     responses={200: paiement_selon_role(many=True)},
 )
-class PaiementListView(generics.ListAPIView):
+class PaiementListView(PerimetreMixin, generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):  # génération du schéma OpenAPI
             return Paiement.objects.none()
-        queryset = paiements_visibles(self.request.user)
+        queryset = paiements_visibles(self.request.user, self.perimetre())
         # Filtre appliqué après paiements_visibles : un client ne retrouve
         # jamais le paiement d'un autre compte par sa référence.
         # Longueur bornée à celle du champ.
@@ -130,29 +159,23 @@ class PaiementListView(generics.ListAPIView):
             queryset = queryset.filter(reference=reference)
         return queryset
 
-    def get_serializer_class(self):
-        if getattr(self, "swagger_fake_view", False):  # génération du schéma OpenAPI
-            return PaiementSerializer
-        return serializer_paiement(self.request.user)
-
 
 @extend_schema(
     summary="Détail d'un paiement",
-    description="Représentation PaiementAdmin pour l'administration, Paiement sinon.",
+    description=(
+        "Représentation PaiementAdmin pour l'administration (sauf `perimetre=achats`), Paiement sinon. "
+        "Avec `perimetre=achats` : 404 si le paiement n'est pas celui du compte."
+    ),
+    parameters=[PARAMETRE_PERIMETRE],
     responses={200: paiement_selon_role()},
 )
-class PaiementDetailView(generics.RetrieveAPIView):
+class PaiementDetailView(PerimetreMixin, generics.RetrieveAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):  # génération du schéma OpenAPI
             return Paiement.objects.none()
-        return paiements_visibles(self.request.user)
-
-    def get_serializer_class(self):
-        if getattr(self, "swagger_fake_view", False):  # génération du schéma OpenAPI
-            return PaiementSerializer
-        return serializer_paiement(self.request.user)
+        return paiements_visibles(self.request.user, self.perimetre())
 
 
 @extend_schema(

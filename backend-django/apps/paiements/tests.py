@@ -298,6 +298,47 @@ class RechercheParReferenceTests(Donnees, APITestCase):
             api.get("/api/paiements/", {"reference": self.paiement.reference})
 
 
+class PerimetreAchatsTests(Donnees, APITestCase):
+    """?perimetre=achats sur la liste et le détail : un administrateur qui
+    achète voit ses paiements en représentation client, rien de plus."""
+
+    def setUp(self):
+        self.creer_donnees()
+        (commande,) = self.commander((self.variante1, 1))
+        self.paiement_client = self.payer(commande)
+        commande_admin = Commande.objects.create(boutique=self.boutique2, client=self.admin,
+                                                 montant_total=Decimal("10000"))
+        self.paiement_admin = Paiement.objects.create(client=self.admin, commande=commande_admin,
+                                                      montant=Decimal("10000"), fournisseur="simule")
+        self.paiement_admin.commandes.add(commande_admin)
+
+    def test_liste(self):
+        api = self.api(self.admin)
+        self.assertEqual(api.get("/api/paiements/").data["count"], 2)
+        r = api.get("/api/paiements/", {"perimetre": "achats"})
+        self.assertEqual([ligne["id"] for ligne in r.data["results"]], [str(self.paiement_admin.pk)])
+        self.assertNotIn("fournisseur", r.data["results"][0])  # représentation client
+        r = api.get("/api/paiements/", {"perimetre": "achats", "reference": self.paiement_client.reference})
+        self.assertEqual(r.data["count"], 0)
+
+    def test_detail(self):
+        api = self.api(self.admin)
+        self.assertEqual(api.get(f"/api/paiements/{self.paiement_client.pk}/").status_code, 200)
+        url_achat = f"/api/paiements/{self.paiement_client.pk}/"
+        self.assertEqual(api.get(url_achat, {"perimetre": "achats"}).status_code, 404)
+        r = api.get(f"/api/paiements/{self.paiement_admin.pk}/", {"perimetre": "achats"})
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn("fournisseur", r.data)
+
+    def test_client_et_valeur_inconnue_inchanges(self):
+        api = self.api(self.client1)
+        for params in ({}, {"perimetre": "achats"}, {"perimetre": "tout"}):
+            with self.subTest(params=params):
+                r = api.get("/api/paiements/", params)
+                self.assertEqual([ligne["id"] for ligne in r.data["results"]], [str(self.paiement_client.pk)])
+        self.assertEqual(self.api(self.admin).get("/api/paiements/", {"perimetre": "tout"}).data["count"], 2)
+
+
 class SimulationPaiementTests(Donnees, APITestCase):
     """POST /api/paiements/simulation/<reference>/ : le payeur confirme ou
     fait échouer son paiement simulé, sans le secret HMAC."""

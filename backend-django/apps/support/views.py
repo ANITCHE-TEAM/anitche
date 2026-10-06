@@ -41,10 +41,33 @@ class ScopedOnPostMixin:
 
 # ---------- SupportTicket ----------
 
+#: ?perimetre=mes_tickets : les tickets créés par le compte, quel que soit son
+#: rôle (portail client d'un vendeur, sans les litiges de sa boutique).
+PERIMETRE_MES_TICKETS = "mes_tickets"
+
+PARAMETRE_PERIMETRE = OpenApiParameter(
+    "perimetre", enum=[PERIMETRE_MES_TICKETS],
+    description=(
+        "`mes_tickets` : seulement les tickets créés par ce compte, quel que soit le rôle (le portail client "
+        "l'envoie toujours). Valeur inconnue : ignorée."
+    ),
+)
+
+
+def tickets_du_perimetre(request):
+    """Tickets visibles, restreints à ceux créés par le compte si
+    `?perimetre=mes_tickets` (ne restreint que l'ensemble déjà autorisé)."""
+    queryset = get_visible_tickets(request.user)
+    if request.query_params.get("perimetre") == PERIMETRE_MES_TICKETS:
+        queryset = queryset.filter(created_by=request.user)
+    return queryset
+
+
 @extend_schema_view(
     get=extend_schema(
         summary="Tickets visibles par ce compte",
         parameters=[
+            PARAMETRE_PERIMETRE,
             OpenApiParameter(
                 "non_assigne", bool,
                 description="Administration seulement : `1` ou `true` pour la file des tickets sans agent. Ignoré pour les autres rôles.",
@@ -63,7 +86,7 @@ class SupportTicketListCreateView(ScopedOnPostMixin, generics.ListCreateAPIView)
     post_throttle_scope = "support_ticket"
 
     def get_queryset(self):
-        queryset = get_visible_tickets(self.request.user)
+        queryset = tickets_du_perimetre(self.request)
         if self.request.user.role in ROLES_ADMINISTRATION:
             # Tableau de bord : file d'attente et tickets par statut (le
             # `count` de la liste filtrée sert de compteur).
@@ -91,7 +114,7 @@ class SupportTicketListCreateView(ScopedOnPostMixin, generics.ListCreateAPIView)
 
 
 @extend_schema_view(
-    get=extend_schema(summary="Détail d'un ticket"),
+    get=extend_schema(summary="Détail d'un ticket", parameters=[PARAMETRE_PERIMETRE]),
     put=extend_schema(
         summary="Reclasser un ticket (équipe support)",
         responses={200: SupportTicketSerializer, **erreurs(403)},
@@ -110,7 +133,7 @@ class SupportRetrieveUpdateView(generics.RetrieveUpdateAPIView):
     serializer_class = SupportTicketSerializer
 
     def get_queryset(self):
-        return get_visible_tickets(self.request.user)
+        return tickets_du_perimetre(self.request)
 
     def perform_update(self, serializer):
         """La visibilité autorise à VOIR ce ticket, pas à le MODIFIER."""

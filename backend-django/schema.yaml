@@ -2252,7 +2252,7 @@ paths:
       description: 'Client : livraisons de ses commandes ; livreur : celles qui lui
         sont assignées ; administration : toutes. La représentation dépend du rôle
         (LivraisonClient, LivraisonLivreur ou LivraisonAdministration). Filtres `status`
-        et `contestation` réservés à l''administration (ignorés sinon).'
+        et `contestation` réservés à l''administration (ignorés sinon, et avec `perimetre=achats`).'
       summary: Mes livraisons (selon le rôle)
       parameters:
       - in: query
@@ -2268,6 +2268,15 @@ paths:
         description: Un numéro de page de l'ensemble des résultats.
         schema:
           type: integer
+      - in: query
+        name: perimetre
+        schema:
+          type: string
+          enum:
+          - achats
+        description: '`achats` : seulement les livraisons des commandes du compte,
+          en représentation LivraisonClient, quel que soit le rôle (le portail client
+          l''envoie toujours). Valeur inconnue : ignorée.'
       - in: query
         name: status
         schema:
@@ -2354,6 +2363,8 @@ paths:
   /api/livraison/{id}/:
     get:
       operationId: livraison_retrieve
+      description: 'Avec `perimetre=achats` : 404 si la livraison n''est pas celle
+        d''une commande du compte.'
       summary: Détail d'une livraison (selon le rôle)
       parameters:
       - in: path
@@ -2362,6 +2373,15 @@ paths:
           type: string
           format: uuid
         required: true
+      - in: query
+        name: perimetre
+        schema:
+          type: string
+          enum:
+          - achats
+        description: '`achats` : seulement les livraisons des commandes du compte,
+          en représentation LivraisonClient, quel que soit le rôle (le portail client
+          l''envoie toujours). Valeur inconnue : ignorée.'
       tags:
       - Livraison
       security:
@@ -3561,7 +3581,8 @@ paths:
   /api/paiements/:
     get:
       operationId: paiements_list
-      description: Représentation PaiementAdmin pour l'administration, Paiement sinon.
+      description: Représentation PaiementAdmin pour l'administration (sauf `perimetre=achats`),
+        Paiement sinon.
       summary: Mes paiements (tous pour l'administration)
       parameters:
       - name: page
@@ -3570,6 +3591,15 @@ paths:
         description: Un numéro de page de l'ensemble des résultats.
         schema:
           type: integer
+      - in: query
+        name: perimetre
+        schema:
+          type: string
+          enum:
+          - achats
+        description: '`achats` : seulement les paiements du compte, en représentation
+          Paiement, quel que soit le rôle (le portail client l''envoie toujours).
+          Valeur inconnue : ignorée.'
       - in: query
         name: reference
         schema:
@@ -3603,7 +3633,9 @@ paths:
   /api/paiements/{id}/:
     get:
       operationId: paiements_retrieve
-      description: Représentation PaiementAdmin pour l'administration, Paiement sinon.
+      description: 'Représentation PaiementAdmin pour l''administration (sauf `perimetre=achats`),
+        Paiement sinon. Avec `perimetre=achats` : 404 si le paiement n''est pas celui
+        du compte.'
       summary: Détail d'un paiement
       parameters:
       - in: path
@@ -3612,6 +3644,15 @@ paths:
           type: string
           format: uuid
         required: true
+      - in: query
+        name: perimetre
+        schema:
+          type: string
+          enum:
+          - achats
+        description: '`achats` : seulement les paiements du compte, en représentation
+          Paiement, quel que soit le rôle (le portail client l''envoie toujours).
+          Valeur inconnue : ignorée.'
       tags:
       - Paiements
       security:
@@ -5677,6 +5718,15 @@ paths:
         schema:
           type: integer
       - in: query
+        name: perimetre
+        schema:
+          type: string
+          enum:
+          - mes_tickets
+        description: '`mes_tickets` : seulement les tickets créés par ce compte, quel
+          que soit le rôle (le portail client l''envoie toujours). Valeur inconnue
+          : ignorée.'
+      - in: query
         name: status
         schema:
           type: string
@@ -5772,6 +5822,15 @@ paths:
           type: string
           format: uuid
         required: true
+      - in: query
+        name: perimetre
+        schema:
+          type: string
+          enum:
+          - mes_tickets
+        description: '`mes_tickets` : seulement les tickets créés par ce compte, quel
+          que soit le rôle (le portail client l''envoie toujours). Valeur inconnue
+          : ignorée.'
       tags:
       - Support
       security:

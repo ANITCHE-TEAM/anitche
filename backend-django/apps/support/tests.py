@@ -547,6 +547,45 @@ class FiltresAdministrationTests(SupportTicketsBase):
         self.assertEqual(self.ids(self.agent, non_assigne="1"), self.ids(self.agent))
 
 
+class PerimetreMesTicketsTests(SupportTicketsBase):
+    """?perimetre=mes_tickets : les tickets créés par le compte, quel que
+    soit son rôle (portail client d'un vendeur)."""
+
+    def setUp(self):
+        super().setUp()
+        r = self.create_ticket(order=str(self.order.id), product=self.produit.id)
+        self.assertEqual(r.status_code, 201, r.data)
+        self.litige = SupportTicket.objects.get(pk=r.data["id"])
+        r = self.create_ticket(user=self.vendor_user, category="payment", subject="Mon reversement")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.ticket_vendeur = SupportTicket.objects.get(pk=r.data["id"])
+
+    def ids(self, user, **params):
+        self.as_user(user)
+        r = self.client.get(f"{URL}tickets/", params)
+        self.assertEqual(r.status_code, 200)
+        return {ligne["id"] for ligne in r.data["results"]}
+
+    def test_vendeur_sans_les_litiges_de_sa_boutique(self):
+        self.assertEqual(self.ids(self.vendor_user), {str(self.litige.pk), str(self.ticket_vendeur.pk)})
+        self.assertEqual(self.ids(self.vendor_user, perimetre="mes_tickets"), {str(self.ticket_vendeur.pk)})
+        self.as_user(self.vendor_user)
+        url = f"{URL}tickets/{self.litige.pk}/"
+        self.assertEqual(self.client.get(url).status_code, 200)
+        self.assertEqual(self.client.get(url, {"perimetre": "mes_tickets"}).status_code, 404)
+
+    def test_administration_et_agent(self):
+        self.assertEqual(self.ids(self.admin_user, perimetre="mes_tickets"), set())
+        self.assertEqual(len(self.ids(self.admin_user)), 3)
+        self.assertEqual(self.ids(self.agent, perimetre="mes_tickets"), set())
+
+    def test_client_et_valeur_inconnue_inchanges(self):
+        attendu = {str(self.ticket.pk), str(self.litige.pk)}
+        self.assertEqual(self.ids(self.client_user), attendu)
+        self.assertEqual(self.ids(self.client_user, perimetre="mes_tickets"), attendu)
+        self.assertEqual(self.ids(self.vendor_user, perimetre="tout"), {str(self.litige.pk), str(self.ticket_vendeur.pk)})
+
+
 class TestsCollectesTests(SupportTicketsBase):
     """La classe de tests des messages est au niveau du module : imbriquée
     dans une autre classe, elle ne serait jamais exécutée."""
