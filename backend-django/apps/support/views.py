@@ -10,9 +10,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.core.exceptions import ErreurMetier
-from drf_spectacular.utils import extend_schema, extend_schema_view, inline_serializer
+from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view, inline_serializer
 from rest_framework import serializers
 
+from apps.vendeurs.permissions import ROLES_ADMINISTRATION
 from config.schema import FICHIER_DOCUMENT, erreurs
 
 from . import services
@@ -41,7 +42,19 @@ class ScopedOnPostMixin:
 # ---------- SupportTicket ----------
 
 @extend_schema_view(
-    get=extend_schema(summary="Tickets visibles par ce compte"),
+    get=extend_schema(
+        summary="Tickets visibles par ce compte",
+        parameters=[
+            OpenApiParameter(
+                "non_assigne", bool,
+                description="Administration seulement : `1` ou `true` pour la file des tickets sans agent. Ignoré pour les autres rôles.",
+            ),
+            OpenApiParameter(
+                "status", enum=[valeur for valeur, _ in SupportTicket.Status.choices],
+                description="Administration seulement. Ignoré pour les autres rôles.",
+            ),
+        ],
+    ),
     post=extend_schema(summary="Ouvrir un ticket"),
 )
 class SupportTicketListCreateView(ScopedOnPostMixin, generics.ListCreateAPIView):
@@ -50,7 +63,17 @@ class SupportTicketListCreateView(ScopedOnPostMixin, generics.ListCreateAPIView)
     post_throttle_scope = "support_ticket"
 
     def get_queryset(self):
-        return get_visible_tickets(self.request.user)
+        queryset = get_visible_tickets(self.request.user)
+        if self.request.user.role in ROLES_ADMINISTRATION:
+            # Tableau de bord : file d'attente et tickets par statut (le
+            # `count` de la liste filtrée sert de compteur).
+            parametres = self.request.query_params
+            if parametres.get("non_assigne") in ("1", "true"):
+                queryset = queryset.filter(assigned_to__isnull=True)
+            statut = parametres.get("status")
+            if statut in SupportTicket.Status.values:
+                queryset = queryset.filter(status=statut)
+        return queryset
 
     def perform_create(self, serializer):
         order = serializer.validated_data.get("order")

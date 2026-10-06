@@ -509,6 +509,44 @@ class SupportTicketsBase(APITestCase):
         return self.client.patch(f"{URL}tickets/{(ticket or self.ticket).id}/status/", {"status": value}, format="json")
 
 
+class FiltresAdministrationTests(SupportTicketsBase):
+    """?non_assigne= et ?status= : file d'attente et compteurs du tableau de
+    bord de l'administration ; ignorés pour les autres rôles."""
+
+    def setUp(self):
+        super().setUp()
+        self.assigne = SupportTicket.objects.create(
+            created_by=self.client_user, subject="Suivi", description="d", category=SupportTicket.Category.OTHER,
+            assigned_to=self.agent, status=SupportTicket.Status.IN_PROGRESS,
+        )
+        self.ferme = SupportTicket.objects.create(
+            created_by=self.other_client, subject="Fini", description="d", category=SupportTicket.Category.OTHER,
+            status=SupportTicket.Status.CLOSED,
+        )
+
+    def ids(self, user, **params):
+        self.as_user(user)
+        r = self.client.get(f"{URL}tickets/", params)
+        self.assertEqual(r.status_code, 200)
+        return {ligne["id"] for ligne in r.data["results"]}
+
+    def test_filtres_de_l_administration(self):
+        tous = {str(t.pk) for t in (self.ticket, self.assigne, self.ferme)}
+        self.assertEqual(self.ids(self.admin_user), tous)
+        self.assertEqual(self.ids(self.admin_user, non_assigne="1"), {str(self.ticket.pk), str(self.ferme.pk)})
+        self.assertEqual(self.ids(self.admin_user, non_assigne="true", status="open"), {str(self.ticket.pk)})
+        self.assertEqual(self.ids(self.admin_user, status="in_progress"), {str(self.assigne.pk)})
+        self.as_user(self.admin_user)
+        self.assertEqual(self.client.get(f"{URL}tickets/", {"non_assigne": "1", "status": "open"}).data["count"], 1)
+        self.assertEqual(self.ids(self.admin_user, non_assigne="0", status="inconnu"), tous)
+
+    def test_ignores_pour_les_autres_roles(self):
+        # Un client garde ses tickets, un agent sa liste : les filtres n'y changent rien.
+        self.assertEqual(self.ids(self.client_user, status="closed", non_assigne="1"),
+                         self.ids(self.client_user))
+        self.assertEqual(self.ids(self.agent, non_assigne="1"), self.ids(self.agent))
+
+
 class TestsCollectesTests(SupportTicketsBase):
     """La classe de tests des messages est au niveau du module : imbriquée
     dans une autre classe, elle ne serait jamais exécutée."""

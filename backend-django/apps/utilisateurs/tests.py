@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from django.db import connection
 from django.test import TestCase, TransactionTestCase
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIClient
 from rest_framework import status
@@ -1669,6 +1670,83 @@ class TelechargerDocumentKYCTests(TestCase):
             response = self.client.get(self._url('piece_identite_recto'), HTTP_ORIGIN=origine)
         self.assertRegex(response['Content-Disposition'], r'^inline; filename="[0-9a-f-]+\.pdf"$')
         self.assertIn('Content-Disposition', response['Access-Control-Expose-Headers'])
+
+
+URL_ADMIN_UTILISATEURS = '/api/utilisateurs/administration/'
+
+
+class UtilisateursAdministrationTests(TestCase):
+    """GET administration/ : recherche de comptes, rôle admin seulement,
+    représentation minimale."""
+
+    CHAMPS = {
+        'id', 'email', 'prenom', 'nom', 'telephone', 'role', 'is_active', 'email_verifie', 'statut_kyc',
+        'date_creation',
+    }
+
+    def setUp(self):
+        creer = Utilisateur.objects.create_user
+        self.admin = creer(email='admin@adm.ci', password='x', nom='Admin', prenom='Un', role=Role.ADMIN)
+        self.awa = creer(email='awa.kone@adm.ci', password='x', nom='Koné', prenom='Awa', telephone='0700000001')
+        self.livreur = creer(email='livreur@adm.ci', password='x', nom='Traoré', prenom='Moussa', role=Role.LIVREUR)
+        self.inactif = creer(email='parti@adm.ci', password='x', nom='Parti', prenom='Ancien', is_active=False)
+        self.client = APIClient()
+
+    def emails(self, **params):
+        self.client.force_authenticate(self.admin)
+        r = self.client.get(URL_ADMIN_UTILISATEURS, params)
+        self.assertEqual(r.status_code, 200)
+        return {ligne['email'] for ligne in r.data['results']}
+
+    def test_reserve_a_l_administration(self):
+        for role in (Role.CLIENT, Role.VENDEUR, Role.LIVREUR, Role.SUPPORT, Role.MODERATEUR):
+            utilisateur = Utilisateur.objects.create_user(
+                email=f'{role}-x@adm.ci', password='x', nom='R', prenom='O', role=role, is_staff=True,
+            )
+            with self.subTest(role=role):
+                self.client.force_authenticate(utilisateur)
+                self.assertEqual(self.client.get(URL_ADMIN_UTILISATEURS).status_code, 403)
+        self.client.force_authenticate(None)
+        self.assertEqual(self.client.get(URL_ADMIN_UTILISATEURS).status_code, 401)
+
+    def test_recherche_et_filtres(self):
+        tous = {'admin@adm.ci', 'awa.kone@adm.ci', 'livreur@adm.ci', 'parti@adm.ci'}
+        self.assertEqual(self.emails(), tous)
+        self.assertEqual(self.emails(recherche='AWA'), {'awa.kone@adm.ci'})
+        self.assertEqual(self.emails(recherche='traoré'), {'livreur@adm.ci'})
+        self.assertEqual(self.emails(recherche='0700000001'), {'awa.kone@adm.ci'})
+        self.assertEqual(self.emails(role='livreur'), {'livreur@adm.ci'})
+        self.assertEqual(self.emails(est_actif='false'), {'parti@adm.ci'})
+        self.assertEqual(self.emails(est_actif='true', role='client'), {'awa.kone@adm.ci'})
+        self.assertEqual(self.emails(role='pirate', est_actif='peut-etre'), tous)
+
+    def test_representation_minimale(self):
+        from apps.utilisateurs.models import DocumentKYC, TypePieceIdentite
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        DocumentKYC.objects.create(
+            utilisateur=self.awa, type_piece=TypePieceIdentite.CNI,
+            piece_identite_recto=SimpleUploadedFile('recto.pdf', b'%PDF-1.4\nfake'),
+            selfie=SimpleUploadedFile('selfie.png', b'\x89PNG\r\n\x1a\nfake'),
+            numero_mobile_money='0799999999', adresse='Cocody',
+        )
+        self.client.force_authenticate(self.admin)
+        r = self.client.get(URL_ADMIN_UTILISATEURS, {'recherche': 'awa'})
+        (ligne,) = r.data['results']
+        self.assertEqual(set(ligne), self.CHAMPS)
+        contenu = r.content.decode()
+        for fragment in ('password', 'pbkdf2', 'md5', '0799999999', 'recto', 'google_id', 'is_staff'):
+            self.assertNotIn(fragment, contenu)
+
+    def test_nombre_de_requetes_constant(self):
+        self.client.force_authenticate(self.admin)
+        with CaptureQueriesContext(connection) as avant:
+            self.client.get(URL_ADMIN_UTILISATEURS)
+        for i in range(5):
+            Utilisateur.objects.create_user(email=f'n{i}@adm.ci', password='x', nom='N', prenom=str(i))
+        with CaptureQueriesContext(connection) as apres:
+            self.assertEqual(self.client.get(URL_ADMIN_UTILISATEURS).data['count'], 9)
+        self.assertEqual(len(avant.captured_queries), len(apres.captured_queries))
 
 
 class UtilisateurManagerTestCase(TestCase):

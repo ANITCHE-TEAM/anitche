@@ -1,8 +1,11 @@
 import logging
+from datetime import datetime, time
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
+from django.utils.dateparse import parse_date, parse_datetime
 from rest_framework import generics, serializers
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -14,6 +17,7 @@ from rest_framework import status
 from .models import Commande, GroupeCommande, CommandeItem
 from .serializers import (
     AdresseLivraisonSerializer,
+    CommandeAdministrationSerializer,
     CommandeDetailSerializer,
     CommandeSerializer,
     CommandeVendeurSerializer,
@@ -33,7 +37,7 @@ from .services import (
 )
 from apps.catalogue.models import Stock
 from apps.core.exceptions import ErreurMetier
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 
 from config.schema import erreurs
 from apps.panier.models import Panier
@@ -377,6 +381,79 @@ class PasserEnPreparationView(APIView):
 # =====================================================================
 # ADMINISTRATION
 # =====================================================================
+
+def commandes_administration():
+    return Commande.objects.select_related("client", "groupe", "boutique").prefetch_related("article")
+
+
+@extend_schema(
+    summary="Toutes les commandes (administration)",
+    description="Filtres combinables ; une valeur invalide est ignorée, comme pour les autres listes.",
+    parameters=[
+        OpenApiParameter("status", enum=[valeur for valeur, _ in Commande.Status.choices]),
+        OpenApiParameter("boutique", int, description="Identifiant de la boutique."),
+        OpenApiParameter("client", int, description="Identifiant du client."),
+        OpenApiParameter("numero", str, description="Début du numéro de commande (`CMD-2026-…`), 20 caractères au plus."),
+        OpenApiParameter("date_min", str, description="Créées à partir de cette date (ISO 8601, date ou date-heure)."),
+        OpenApiParameter("date_max", str, description="Créées jusqu'à cette date (ISO 8601 ; une date seule inclut toute la journée)."),
+    ],
+)
+class CommandeAdministrationListView(generics.ListAPIView):
+    """Le portail d'administration retrouve une commande sans passer par
+    l'admin Django."""
+    permission_classes = [IsAuthenticated, EstAdministrateur]
+    serializer_class = CommandeAdministrationSerializer
+
+    def get_queryset(self):
+        parametres = self.request.query_params
+        queryset = commandes_administration()
+        statut = parametres.get("status")
+        if statut in Commande.Status.values:
+            queryset = queryset.filter(status=statut)
+        for parametre, champ in (("boutique", "boutique_id"), ("client", "client_id")):
+            valeur = parametres.get(parametre, "")
+            if valeur.isdigit():
+                queryset = queryset.filter(**{champ: int(valeur)})
+        numero = parametres.get("numero", "")[:20]
+        if numero:
+            queryset = queryset.filter(numero_commande__startswith=numero.upper())
+        debut = _borne_de_date(parametres.get("date_min", ""), fin_de_journee=False)
+        if debut is not None:
+            queryset = queryset.filter(created_at__gte=debut)
+        fin = _borne_de_date(parametres.get("date_max", ""), fin_de_journee=True)
+        if fin is not None:
+            queryset = queryset.filter(created_at__lte=fin)
+        return queryset
+
+
+def _borne_de_date(valeur, fin_de_journee):
+    """Date-heure ISO 8601, ou date seule (début ou fin de la journée, fuseau
+    du serveur). None si la valeur est vide ou invalide."""
+    valeur = valeur[:40]
+    try:
+        # Date seule d'abord : parse_datetime l'accepterait aussi (minuit),
+        # et date_max exclurait alors toute la journée.
+        jour = parse_date(valeur)
+        if jour is not None:
+            moment = datetime.combine(jour, time.max if fin_de_journee else time.min)
+        else:
+            moment = parse_datetime(valeur)
+            if moment is None:
+                return None
+    except ValueError:
+        return None
+    if timezone.is_naive(moment):
+        moment = timezone.make_aware(moment)
+    return moment
+
+
+class CommandeAdministrationDetailView(generics.RetrieveAPIView):
+    permission_classes = [IsAuthenticated, EstAdministrateur]
+    serializer_class = CommandeAdministrationSerializer
+
+    def get_queryset(self):
+        return commandes_administration()
+
 
 @extend_schema(
     summary="Annuler une commande (administration)",

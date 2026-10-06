@@ -1173,6 +1173,7 @@ class SimulationDuCheckoutTests(DonneesCycleDeVie, APITestCase):
 # =====================================================================
 
 import json
+import uuid
 
 from django.db import IntegrityError, transaction
 
@@ -1365,3 +1366,89 @@ class PositionLivraisonVisibiliteTests(DonneesCycleDeVie, APITestCase):
         GroupeCommande.objects.filter(pk=self.commande.groupe_id).update(
             livraison_latitude=None, livraison_longitude=None,
         )
+
+
+URL_ADMIN_COMMANDES = "/api/commandes/administration/"
+
+
+class CommandesAdministrationTests(DonneesCycleDeVie, APITestCase):
+    """GET administration/ et administration/<id>/ : rôle admin seulement,
+    filtres, aucun point GPS, nombre de requêtes constant."""
+
+    def setUp(self):
+        self.creer_donnees()
+        self.assertEqual(self.commander((self.variante1, 1), (self.variante2, 1)).status_code, 201)
+        self.assertEqual(self.commander((self.variante1, 2), client=self.autre_client).status_code, 201)
+        self.c1_b1 = Commande.objects.get(client=self.client_user, boutique=self.boutique1)
+        self.c1_b2 = Commande.objects.get(client=self.client_user, boutique=self.boutique2)
+        self.c2_b1 = Commande.objects.get(client=self.autre_client)
+
+    def ids(self, **params):
+        self.en_tant_que(self.admin)
+        r = self.client.get(URL_ADMIN_COMMANDES, params)
+        self.assertEqual(r.status_code, 200)
+        return {ligne["id"] for ligne in r.data["results"]}
+
+    def test_reserve_a_l_administration(self):
+        creer = Utilisateur.objects.create_user
+        roles = [self.client_user, self.vendeur1]
+        for role in (Role.LIVREUR, Role.SUPPORT, Role.MODERATEUR):
+            roles.append(creer(email=f"{role}@cmd.ci", password="x", nom="R", prenom="O", role=role))
+        roles.append(creer(email="staff@cmd.ci", password="x", nom="S", prenom="T", is_staff=True))
+        for utilisateur in roles:
+            with self.subTest(role=utilisateur.role, staff=utilisateur.is_staff):
+                self.en_tant_que(utilisateur)
+                self.assertEqual(self.client.get(URL_ADMIN_COMMANDES).status_code, 403)
+                self.assertEqual(self.client.get(f"{URL_ADMIN_COMMANDES}{self.c1_b1.pk}/").status_code, 403)
+        self.client.force_authenticate(None)
+        self.assertEqual(self.client.get(URL_ADMIN_COMMANDES).status_code, 401)
+        super_admin = creer(email="sa@cmd.ci", password="x", nom="S", prenom="A", role=Role.SUPER_ADMIN)
+        self.en_tant_que(super_admin)
+        self.assertEqual(self.client.get(URL_ADMIN_COMMANDES).data["count"], 3)
+
+    def test_filtres(self):
+        tous = {str(c.pk) for c in (self.c1_b1, self.c1_b2, self.c2_b1)}
+        self.assertEqual(self.ids(), tous)
+        self.assertEqual(self.ids(boutique=self.boutique1.pk), {str(self.c1_b1.pk), str(self.c2_b1.pk)})
+        self.assertEqual(self.ids(client=self.autre_client.pk), {str(self.c2_b1.pk)})
+        self.assertEqual(self.ids(numero=self.c1_b2.numero_commande[:-2]), {str(self.c1_b2.pk)})
+        self.assertEqual(self.ids(numero=self.c1_b2.numero_commande.lower()), {str(self.c1_b2.pk)})
+        Commande.objects.filter(pk=self.c2_b1.pk).update(status=Commande.Status.ANNULEE)
+        self.assertEqual(self.ids(status="annulee"), {str(self.c2_b1.pk)})
+        Commande.objects.filter(pk=self.c1_b1.pk).update(created_at=timezone.now() - timedelta(days=10))
+        hier = (timezone.localdate() - timedelta(days=1)).isoformat()
+        self.assertEqual(self.ids(date_min=hier), {str(self.c1_b2.pk), str(self.c2_b1.pk)})
+        self.assertEqual(self.ids(date_max=hier), {str(self.c1_b1.pk)})
+        self.assertEqual(self.ids(date_max=timezone.localdate().isoformat()), tous)
+        il_y_a_5_jours = (timezone.now() - timedelta(days=5)).isoformat()
+        self.assertEqual(self.ids(date_max=il_y_a_5_jours), {str(self.c1_b1.pk)})
+        self.assertEqual(self.ids(date_min=il_y_a_5_jours), {str(self.c1_b2.pk), str(self.c2_b1.pk)})
+        # Valeurs invalides : ignorées.
+        self.assertEqual(self.ids(status="inconnu", boutique="abc", client="-1", date_min="hier"), tous)
+
+    def test_representation_sans_point_gps_avec_client_et_boutique(self):
+        GroupeCommande.objects.filter(pk=self.c1_b1.groupe_id).update(
+            livraison_latitude=Decimal("5.359952"), livraison_longitude=Decimal("-3.986912"),
+        )
+        self.en_tant_que(self.admin)
+        detail = self.client.get(f"{URL_ADMIN_COMMANDES}{self.c1_b1.pk}/")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.data["client"], {
+            "id": self.client_user.pk, "email": "client@cmd.ci", "nom": "Kouassi", "prenom": "Awa",
+        })
+        self.assertEqual(detail.data["boutique"], {
+            "id": self.boutique1.pk, "nom": "Cycle Un", "slug": self.boutique1.slug,
+        })
+        self.assertEqual(len(detail.data["articles"]), 1)
+        self.assertNotIn("latitude", detail.content.decode())
+        self.assertEqual(self.client.get(f"{URL_ADMIN_COMMANDES}{uuid.uuid4()}/").status_code, 404)
+
+    def test_nombre_de_requetes_constant(self):
+        self.en_tant_que(self.admin)
+        with CaptureQueriesContext(connection) as avant:
+            self.client.get(URL_ADMIN_COMMANDES)
+        for _ in range(4):
+            self.assertEqual(self.commander((self.variante2, 1), client=self.autre_client).status_code, 201)
+        with CaptureQueriesContext(connection) as apres:
+            self.assertEqual(self.client.get(URL_ADMIN_COMMANDES).data["count"], 7)
+        self.assertEqual(len(avant.captured_queries), len(apres.captured_queries))

@@ -13,6 +13,70 @@ info:
 
     Guide complet : docs/GUIDE_FRONTEND.md.
 paths:
+  /api/catalogue/administration/produits/:
+    get:
+      operationId: catalogue_administration_produits_list
+      description: Produits inactifs compris. Filtres combinables ; une valeur invalide
+        est ignorée.
+      summary: Tous les produits (administration)
+      parameters:
+      - in: query
+        name: boutique
+        schema:
+          type: integer
+        description: Identifiant de la boutique.
+      - in: query
+        name: categorie
+        schema:
+          type: integer
+        description: Identifiant de la catégorie.
+      - in: query
+        name: est_actif
+        schema:
+          type: boolean
+        description: '`true` ou `false`.'
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      - in: query
+        name: recherche
+        schema:
+          type: string
+        description: Partie du nom du produit ou de la boutique (100 caractères au
+          plus).
+      tags:
+      - Catalogue
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedProduitAdministrationList'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
   /api/catalogue/administration/produits/{id}/:
     get:
       operationId: catalogue_administration_produits_retrieve
@@ -1445,6 +1509,133 @@ paths:
                 $ref: '#/components/schemas/Erreur'
           description: 'Conflit : l''état actuel de la ressource ne permet pas cette
             action.'
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/commandes/administration/:
+    get:
+      operationId: commandes_administration_list
+      description: Filtres combinables ; une valeur invalide est ignorée, comme pour
+        les autres listes.
+      summary: Toutes les commandes (administration)
+      parameters:
+      - in: query
+        name: boutique
+        schema:
+          type: integer
+        description: Identifiant de la boutique.
+      - in: query
+        name: client
+        schema:
+          type: integer
+        description: Identifiant du client.
+      - in: query
+        name: date_max
+        schema:
+          type: string
+        description: Créées jusqu'à cette date (ISO 8601 ; une date seule inclut toute
+          la journée).
+      - in: query
+        name: date_min
+        schema:
+          type: string
+        description: Créées à partir de cette date (ISO 8601, date ou date-heure).
+      - in: query
+        name: numero
+        schema:
+          type: string
+        description: Début du numéro de commande (`CMD-2026-…`), 20 caractères au
+          plus.
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      - in: query
+        name: status
+        schema:
+          type: string
+          enum:
+          - annulee
+          - confirmee
+          - creee
+          - expediee
+          - livree
+          - preparation
+      tags:
+      - Commandes
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedCommandeAdministrationList'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/commandes/administration/{id}/:
+    get:
+      operationId: commandes_administration_retrieve
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Commandes
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandeAdministration'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
         '429':
           content:
             application/json:
@@ -5473,12 +5664,29 @@ paths:
       description: Dedicated rate limit on creation only; reads keep the general rate.
       summary: Tickets visibles par ce compte
       parameters:
+      - in: query
+        name: non_assigne
+        schema:
+          type: boolean
+        description: 'Administration seulement : `1` ou `true` pour la file des tickets
+          sans agent. Ignoré pour les autres rôles.'
       - name: page
         required: false
         in: query
         description: Un numéro de page de l'ensemble des résultats.
         schema:
           type: integer
+      - in: query
+        name: status
+        schema:
+          type: string
+          enum:
+          - closed
+          - in_progress
+          - open
+          - resolved
+          - waiting_customer
+        description: Administration seulement. Ignoré pour les autres rôles.
       tags:
       - Support
       security:
@@ -6036,6 +6244,72 @@ paths:
               schema:
                 $ref: '#/components/schemas/Erreur'
           description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/utilisateurs/administration/:
+    get:
+      operationId: utilisateurs_administration_list
+      description: Pour retrouver un client, nommer un livreur ou assigner un agent
+        sans l'admin Django. Filtres combinables ; une valeur invalide est ignorée.
+      summary: Rechercher un compte (administration)
+      parameters:
+      - in: query
+        name: est_actif
+        schema:
+          type: boolean
+        description: '`true` ou `false`.'
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      - in: query
+        name: recherche
+        schema:
+          type: string
+        description: Partie de l'email, du nom, du prénom ou du téléphone (100 caractères
+          au plus).
+      - in: query
+        name: role
+        schema:
+          type: string
+          enum:
+          - admin
+          - client
+          - livreur
+          - moderateur
+          - super_admin
+          - support
+          - vendeur
+      tags:
+      - Utilisateurs
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedUtilisateurAdministrationList'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
         '429':
           content:
             application/json:
@@ -8006,6 +8280,19 @@ components:
           type: boolean
           description: 'Suspension par l''administration : la boutique disparaît du
             catalogue public et le vendeur ne peut pas la lever lui-même.'
+    BoutiqueCommandeAdministration:
+      type: object
+      properties:
+        id:
+          type: integer
+        nom:
+          type: string
+        slug:
+          type: string
+      required:
+      - id
+      - nom
+      - slug
     BoutiquePublique:
       type: object
       description: |-
@@ -8200,6 +8487,23 @@ components:
         * `vendor_dispute` - Litige vendeur
         * `account` - Compte
         * `other` - Autre
+    ClientCommandeAdministration:
+      type: object
+      properties:
+        id:
+          type: integer
+        email:
+          type: string
+          format: email
+        nom:
+          type: string
+        prenom:
+          type: string
+      required:
+      - email
+      - id
+      - nom
+      - prenom
     Commande:
       type: object
       properties:
@@ -8277,6 +8581,92 @@ components:
       - numero_commande
       - status
       - update_at
+    CommandeAdministration:
+      type: object
+      description: |-
+        Commande vue par l'administration : celle du vendeur, plus le client
+        (identité et email, pour le support) et la boutique. Jamais le point GPS
+        du lieu de livraison.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        numero_commande:
+          type: string
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        status:
+          allOf:
+          - $ref: '#/components/schemas/StatutCommandeEnum'
+          readOnly: true
+        motif_annulation:
+          allOf:
+          - $ref: '#/components/schemas/MotifAnnulationEnum'
+          readOnly: true
+        montant_total:
+          type: string
+          format: decimal
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
+          readOnly: true
+          example: '15000.00'
+        montant_remise:
+          type: string
+          format: decimal
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
+          readOnly: true
+          example: '1500.00'
+        frais_livraison:
+          type: string
+          format: decimal
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
+          readOnly: true
+          example: '1500.00'
+        livraison_offerte:
+          type: boolean
+          readOnly: true
+        frais_livraison_vendeur:
+          type: string
+          format: decimal
+          pattern: ^\d{0,10}(?:\.\d{0,2})?$
+          readOnly: true
+          example: '1500.00'
+        articles:
+          type: array
+          items:
+            $ref: '#/components/schemas/ArticleVendeur'
+          readOnly: true
+        client:
+          allOf:
+          - $ref: '#/components/schemas/ClientCommandeAdministration'
+          readOnly: true
+        adresse_livraison:
+          oneOf:
+          - $ref: '#/components/schemas/AdresseLivraisonLecture'
+          - type: 'null'
+          readOnly: true
+        boutique:
+          allOf:
+          - $ref: '#/components/schemas/BoutiqueCommandeAdministration'
+          readOnly: true
+      required:
+      - adresse_livraison
+      - articles
+      - boutique
+      - client
+      - created_at
+      - frais_livraison
+      - frais_livraison_vendeur
+      - id
+      - livraison_offerte
+      - montant_remise
+      - montant_total
+      - motif_annulation
+      - numero_commande
+      - status
     CommandeDetail:
       type: object
       description: |-
@@ -10232,6 +10622,29 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/BoutiquePublique'
+    PaginatedCommandeAdministrationList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/CommandeAdministration'
     PaginatedCommandeItemList:
       type: object
       required:
@@ -10623,6 +11036,29 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/PasseportVendeur'
+    PaginatedProduitAdministrationList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProduitAdministration'
     PaginatedProduitPublicListList:
       type: object
       required:
@@ -10853,6 +11289,29 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/TransactionFidelite'
+    PaginatedUtilisateurAdministrationList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/UtilisateurAdministration'
     PaginatedVarianteVendeurCreateList:
       type: object
       required:
@@ -11957,6 +12416,12 @@ components:
         boutique_nom:
           type: string
           readOnly: true
+        categorie:
+          type:
+          - integer
+          - 'null'
+          readOnly: true
+          title: Catégorie
         nom:
           type: string
           readOnly: true
@@ -11987,6 +12452,7 @@ components:
       required:
       - boutique
       - boutique_nom
+      - categorie
       - date_creation
       - date_mise_a_jour
       - desactive_par
@@ -13716,6 +14182,60 @@ components:
         * `mdp_oublie` - Mot de passe oublié
         * `changement_email` - Changement email
         * `changement_telephone` - Changement téléphone
+    UtilisateurAdministration:
+      type: object
+      description: |-
+        Compte vu par l'administration (recherche, choix d'un livreur ou d'un
+        agent). Minimal par construction : jamais le mot de passe, ni les pièces
+        KYC, ni le numéro mobile money, ni les identifiants Google.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        email:
+          type: string
+          format: email
+          readOnly: true
+        prenom:
+          type: string
+          readOnly: true
+        nom:
+          type: string
+          readOnly: true
+        telephone:
+          type:
+          - string
+          - 'null'
+          readOnly: true
+        role:
+          allOf:
+          - $ref: '#/components/schemas/RoleEnum'
+          readOnly: true
+        is_active:
+          type: boolean
+          readOnly: true
+        email_verifie:
+          type: boolean
+          readOnly: true
+        statut_kyc:
+          allOf:
+          - $ref: '#/components/schemas/StatutKycEnum'
+          readOnly: true
+        date_creation:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - date_creation
+      - email
+      - email_verifie
+      - id
+      - is_active
+      - nom
+      - prenom
+      - role
+      - statut_kyc
+      - telephone
     VariantePanier:
       type: object
       description: Variante telle qu'affichée dans une ligne de panier (lecture seule).

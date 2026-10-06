@@ -782,6 +782,60 @@ class CatalogueModerationTests(CatalogueEspacesBase):
                 Produit.objects.filter(pk=self.produit1.pk).update(est_actif=False)
 
 
+class CatalogueAdministrationListeTests(CatalogueEspacesBase):
+    """GET administration/produits/ : produits inactifs compris, filtres,
+    rôle admin seulement, nombre de requêtes constant."""
+
+    def ids(self, **params):
+        self.en_tant_que(self.administrateur)
+        response = self.client.get(URL_ADMIN, params)
+        self.assertEqual(response.status_code, 200)
+        return {ligne['id'] for ligne in response.data['results']}
+
+    def test_inactifs_compris_et_filtres(self):
+        self.produit2.desactiver(par='vendeur')
+        tous = {self.produit1.pk, self.produit2.pk}
+        self.assertEqual(self.ids(), tous)
+        self.assertEqual(self.ids(est_actif='false'), {self.produit2.pk})
+        self.assertEqual(self.ids(est_actif='true'), {self.produit1.pk})
+        self.assertEqual(self.ids(boutique=self.boutique2.pk), {self.produit2.pk})
+        self.assertEqual(self.ids(categorie=self.cat_chaussures.pk), {self.produit1.pk})
+        self.assertEqual(self.ids(recherche='baoulé'), {self.produit1.pk})
+        self.assertEqual(self.ids(recherche='diallo'), {self.produit2.pk})  # nom de la boutique
+        self.assertEqual(self.ids(est_actif='oui', boutique='x', categorie='-2'), tous)
+
+    def test_representation(self):
+        self.en_tant_que(self.administrateur)
+        response = self.client.get(URL_ADMIN, {'boutique': self.boutique1.pk})
+        (ligne,) = response.data['results']
+        self.assertEqual(
+            (ligne['boutique_nom'], ligne['categorie'], ligne['est_actif'], ligne['desactive_par']),
+            (self.boutique1.nom, self.cat_chaussures.pk, True, ''),
+        )
+        self.assertIn('date_creation', ligne)
+
+    def test_acces_reserve_a_ladministration(self):
+        for role in (Role.CLIENT, Role.VENDEUR, Role.LIVREUR, Role.SUPPORT, Role.MODERATEUR):
+            utilisateur = Utilisateur.objects.create_user(
+                email=f'{role}-liste@anitche.ci', password='x', nom='R', prenom='O', role=role, is_staff=True,
+            )
+            with self.subTest(role=role):
+                self.en_tant_que(utilisateur)
+                self.assertEqual(self.client.get(URL_ADMIN).status_code, 403)
+        self.client.force_authenticate(None)
+        self.assertEqual(self.client.get(URL_ADMIN).status_code, 401)
+
+    def test_nombre_de_requetes_constant(self):
+        self.en_tant_que(self.administrateur)
+        with CaptureQueriesContext(connection) as avant:
+            self.client.get(URL_ADMIN)
+        for i in range(5):
+            Produit.objects.create(boutique=self.boutique2, nom=f"Lot admin {i}", prix_base=Decimal("100"))
+        with CaptureQueriesContext(connection) as apres:
+            self.assertEqual(self.client.get(URL_ADMIN).data['count'], 7)
+        self.assertEqual(len(avant.captured_queries), len(apres.captured_queries))
+
+
 class CataloguePrixTests(CatalogueEspacesBase):
     """FCFA entiers, prix > 0, prix_base ≥ 0, 0 < prix_promo < prix, poids ≥ 0."""
 

@@ -228,6 +228,32 @@ class CommandeVendeurSerializer(serializers.ModelSerializer):
         return adresse_du_groupe(commande.groupe)
 
 
+class ClientCommandeAdministrationSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    email = serializers.EmailField()
+    nom = serializers.CharField()
+    prenom = serializers.CharField()
+
+
+class BoutiqueCommandeAdministrationSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    nom = serializers.CharField()
+    slug = serializers.CharField()
+
+
+class CommandeAdministrationSerializer(CommandeVendeurSerializer):
+    """Commande vue par l'administration : celle du vendeur, plus le client
+    (identité et email, pour le support) et la boutique. Jamais le point GPS
+    du lieu de livraison."""
+
+    client = ClientCommandeAdministrationSerializer(read_only=True)
+    boutique = BoutiqueCommandeAdministrationSerializer(read_only=True)
+
+    class Meta(CommandeVendeurSerializer.Meta):
+        fields = CommandeVendeurSerializer.Meta.fields + ["boutique"]
+        read_only_fields = fields
+
+
 class SimulerFraisSerializer(serializers.Serializer):
     """Entrée de la simulation du checkout (mêmes champs que la validation)."""
 

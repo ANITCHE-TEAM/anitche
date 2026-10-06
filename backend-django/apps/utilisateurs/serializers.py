@@ -79,6 +79,24 @@ class InscriptionSerializer(serializers.ModelSerializer):
 
 
 # =====================================================
+# ADMINISTRATION
+# =====================================================
+
+class UtilisateurAdministrationSerializer(serializers.ModelSerializer):
+    """Compte vu par l'administration (recherche, choix d'un livreur ou d'un
+    agent). Minimal par construction : jamais le mot de passe, ni les pièces
+    KYC, ni le numéro mobile money, ni les identifiants Google."""
+
+    class Meta:
+        model = Utilisateur
+        fields = [
+            'id', 'email', 'prenom', 'nom', 'telephone', 'role', 'is_active',
+            'email_verifie', 'statut_kyc', 'date_creation',
+        ]
+        read_only_fields = fields
+
+
+# =====================================================
 # PROFIL
 # =====================================================
 

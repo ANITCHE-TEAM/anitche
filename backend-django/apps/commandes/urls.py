@@ -11,6 +11,8 @@ from .views import (
     CommandeVendeurDetailView,
     PasserEnPreparationView,
     AnnulerCommandeAdministrationView,
+    CommandeAdministrationDetailView,
+    CommandeAdministrationListView,
 )
 
 app_name = "commandes"
@@ -26,6 +28,9 @@ urlpatterns = [
     path("vendeur/<uuid:pk>/preparation/", PasserEnPreparationView.as_view(), name="vendeur-commande-preparation"),
 
     # --- Administration ---
+    path("administration/", CommandeAdministrationListView.as_view(), name="administration-commande-list"),
+    path("administration/<uuid:pk>/", CommandeAdministrationDetailView.as_view(),
+         name="administration-commande-detail"),
     path("administration/<uuid:pk>/annuler/", AnnulerCommandeAdministrationView.as_view(), name="administration-commande-annuler"),
 
     # --- Client ---

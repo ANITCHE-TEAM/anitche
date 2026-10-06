@@ -411,7 +411,7 @@ class ProduitAdministrationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Produit
         fields = [
-            'id', 'boutique', 'boutique_nom', 'nom', 'slug', 'est_actif', 'desactive_par',
+            'id', 'boutique', 'boutique_nom', 'categorie', 'nom', 'slug', 'est_actif', 'desactive_par',
             'date_creation', 'date_mise_a_jour',
         ]
         read_only_fields = [champ for champ in fields if champ != 'est_actif']
