@@ -66,6 +66,9 @@ class BoutiquePubliqueListView(generics.ListAPIView):
     # Un jeton refusé (expiré, révoqué) est ignoré : la vitrine reste publique.
     authentication_classes = [JWTAuthentificationOptionnelle]
     permission_classes = [AllowAny]
+    # Même seau que le catalogue (même navigation), sans la limite 'anon'.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'catalogue_public'
 
     def get_queryset(self):
         queryset = Boutique.objects.publiques().select_related('proprietaire')
@@ -87,6 +90,8 @@ class BoutiquePubliqueDetailView(generics.RetrieveAPIView):
     serializer_class = BoutiquePubliqueSerializer
     authentication_classes = [JWTAuthentificationOptionnelle]
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'catalogue_public'
     lookup_field = 'slug'
 
     def get_queryset(self):

@@ -60,6 +60,7 @@ REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {
     'logout': '100000/day',
     'passeport_verification': '100000/day',
     'catalogue_public': '100000/day',
+    'panier': '100000/day',
     'livraison_statut': '100000/day',
     'livraison_contestation': '100000/day',
     'retour_creation': '100000/day',

@@ -6,6 +6,7 @@ from rest_framework import generics, status
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from apps.commandes.services import TransitionImpossible
@@ -387,6 +388,9 @@ class TarifLivraisonPublicListView(APIView):
     # Un jeton refusé (expiré, révoqué) est ignoré : la grille reste publique.
     authentication_classes = [JWTAuthentificationOptionnelle]
     permission_classes = [AllowAny]
+    # Seau du catalogue seul : la limite 'anon' (50/h par IP) bloquerait le
+    # checkout des visiteurs derrière un CGNAT.
+    throttle_classes = [ScopedRateThrottle]
     throttle_scope = "catalogue_public"
 
     def get(self, request):

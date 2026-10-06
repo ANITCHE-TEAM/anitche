@@ -1,15 +1,17 @@
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
-from unittest import skipUnless
+from unittest import mock, skipUnless
 
 import django.db
+from django.core.cache import cache
 from django.db import IntegrityError, connection, transaction
 from django.test import TransactionTestCase
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from rest_framework.test import APIClient, APITestCase
 from rest_framework import status
+from rest_framework.throttling import AnonRateThrottle, SimpleRateThrottle, UserRateThrottle
 
 from apps.utilisateurs.models import Utilisateur, Role, StatutKYC
 from apps.vendeurs.models import Boutique
@@ -447,6 +449,48 @@ class PanierProtectionsTestCase(PanierBaseTestCase):
                 self.assertEqual(lignes[0]["variante_detail"]["stock"], {"est_en_stock": True})
                 self.assertNotIn("quantite_disponible", response.content.decode())
                 self.assertNotIn("seuil_alerte", response.content.decode())
+
+
+class PanierLimiteTestCase(PanierBaseTestCase):
+    """Le panier n'a que sa limite 'panier' : ni 'anon' (par IP, partagée
+    derrière un CGNAT) ni 'user'."""
+
+    def setUp(self):
+        super().setUp()
+        cache.clear()
+
+    def parcours(self):
+        """Lecture, ajout, liste, modification, retrait : les trois vues."""
+        codes = [self.client.get(reverse("panier:panier-detail")).status_code]
+        ajout = self.client.post(reverse("panier:panier-items"), {"variante": self.variante.id, "quantite": 1})
+        codes.append(ajout.status_code)
+        url_ligne = reverse("panier:panier-item-detail", args=[ajout.data["id"]])
+        codes.append(self.client.get(reverse("panier:panier-items")).status_code)
+        codes.append(self.client.patch(url_ligne, {"quantite": 2}).status_code)
+        codes.append(self.client.delete(url_ligne).status_code)
+        return codes
+
+    def test_limites_anon_et_user_non_appliquees(self):
+        attendus = [200, 201, 200, 200, 204]
+        with mock.patch.object(AnonRateThrottle, "allow_request", return_value=False), \
+                mock.patch.object(UserRateThrottle, "allow_request", return_value=False):
+            self.assertEqual(self.parcours(), attendus)
+            self.client.force_authenticate(user=self.client_user)
+            self.assertEqual(self.parcours(), attendus)
+
+    def test_seau_panier_commun_aux_trois_vues(self):
+        with mock.patch.object(SimpleRateThrottle, "THROTTLE_RATES", {"panier": "5/hour"}):
+            codes = self.parcours()
+            codes.append(self.client.get(reverse("panier:panier-detail")).status_code)
+            # Un compte connecté depuis la même IP a son propre seau.
+            self.client.force_authenticate(user=self.client_user)
+            codes.append(self.client.get(reverse("panier:panier-detail")).status_code)
+        self.assertEqual(codes, [200, 201, 200, 200, 204, 429, 200])
+
+    def test_taux_de_production(self):
+        from apps.core.tests import taux_de_production
+
+        self.assertEqual(taux_de_production()["panier"], "600/hour")
 
 
 @skipUnless(

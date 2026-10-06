@@ -1709,7 +1709,7 @@ from django.core.cache import cache
 from django.core.management import call_command
 from django.db.migrations.executor import MigrationExecutor
 from django.test import override_settings
-from rest_framework.throttling import SimpleRateThrottle
+from rest_framework.throttling import AnonRateThrottle, SimpleRateThrottle
 
 from apps.core.fields import MESSAGE_VALEUR_ILLISIBLE, ValeurIllisible, chiffreur
 from .models import DocumentKYC, StatutKYC
@@ -2126,8 +2126,9 @@ class RafraichissementLimiteTests(TestCase):
             '/api/utilisateurs/connexion/', {'email': 'refresh@anitche.ci', 'password': 'TestPassword123!'},
         ).data['refresh']
         taux = {'anon': '1/hour', 'rafraichissement': '2/hour', 'inscription': '100/hour'}
-        with patch.object(SimpleRateThrottle, 'THROTTLE_RATES', taux):
-            client.get('/api/vendeurs/boutiques/')  # épuise 'anon'
+        # 'anon' épuisée : toute vue qui la consulterait répondrait 429.
+        with patch.object(SimpleRateThrottle, 'THROTTLE_RATES', taux), \
+                patch.object(AnonRateThrottle, 'allow_request', return_value=False):
             premier = client.post('/api/utilisateurs/connexion/rafraichir/', {'refresh': refresh})
             second = client.post('/api/utilisateurs/connexion/rafraichir/', {'refresh': premier.data['refresh']})
             troisieme = client.post('/api/utilisateurs/connexion/rafraichir/', {'refresh': second.data['refresh']})

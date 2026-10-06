@@ -13,7 +13,7 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
-from rest_framework.throttling import ScopedRateThrottle
+from rest_framework.throttling import AnonRateThrottle, ScopedRateThrottle, UserRateThrottle
 from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.commandes.models import Commande, GroupeCommande
@@ -1062,6 +1062,13 @@ class TarifsDeLivraisonTests(APITestCase):
         r = api.get(self.URL_PUBLIQUE)
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.data["autres_villes"], {"zone": "hors_abidjan", "montant": 3000})
+
+    def test_grille_publique_sans_limite_anon(self):
+        """Le checkout d'un visiteur ne dépend que du seau 'catalogue_public'."""
+        with mock.patch.object(AnonRateThrottle, "allow_request", return_value=False), \
+                mock.patch.object(UserRateThrottle, "allow_request", return_value=False):
+            self.assertEqual(self.api().get(self.URL_PUBLIQUE).status_code, 200)
+            self.assertEqual(self.api(self.client_user).get(self.URL_PUBLIQUE).status_code, 200)
 
     def test_administration_reservee_aux_administrateurs(self):
         url_detail = f"{self.URL_ADMIN}{self.defaut_abidjan.pk}/"

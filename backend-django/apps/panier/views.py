@@ -1,6 +1,7 @@
 from django.db.models import Prefetch
 from rest_framework import generics
 from rest_framework.permissions import AllowAny
+from rest_framework.throttling import ScopedRateThrottle
 
 from .models import Panier, PanierItem
 from .serializers import PanierSerializer, PanierItemSerializer
@@ -14,6 +15,10 @@ from .services import (
 
 class PanierDetailView(generics.RetrieveAPIView):
     permission_classes = [AllowAny]
+    # Limite 'panier' seule (par IP pour un visiteur, par compte sinon) :
+    # la limite 'anon' par IP bloquerait les visiteurs derrière un CGNAT.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'panier'
     serializer_class = PanierSerializer
 
     def get_object(self):
@@ -35,6 +40,8 @@ class PanierDetailView(generics.RetrieveAPIView):
 
 class PanierItemListCreateView(generics.ListCreateAPIView):
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'panier'
     serializer_class = PanierItemSerializer
 
     def get_queryset(self):
@@ -54,6 +61,8 @@ class PanierItemListCreateView(generics.ListCreateAPIView):
 
 class PanierItemDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'panier'
     serializer_class = PanierItemSerializer
 
     def get_queryset(self):

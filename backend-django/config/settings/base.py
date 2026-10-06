@@ -197,6 +197,10 @@ REST_FRAMEWORK = {
         # visiteur : même raison CGNAT, et une navigation normale enchaîne
         # beaucoup plus de requêtes qu'un scan (20/min en moyenne).
         'catalogue_public': '1200/hour',
+        # Panier (lecture et écriture), par IP pour un visiteur : même raison
+        # CGNAT. Moins large que le catalogue, car un ajout sans panier
+        # existant crée une ligne en base. Taux à confirmer par la mesure.
+        'panier': '600/hour',
         # Paiements, par utilisateur : initiation et annulation d'un
         # paiement en attente (un checkout normal en consomme 1 à 3).
         'paiements': '20/hour',
