@@ -6,35 +6,146 @@ on:
     paths:
       - "backend-fastapi/**"
       - ".github/workflows/ci-fastapi.yml"
+      # Vérifiés par tests/test_core_infra.py.
+      - "infra/docker-compose.yml"
+      - "infra/docker-compose.prod.yml"
+      # Droits du rôle en lecture seule et schéma lu par FastAPI (job
+      # integration) : une migration Django peut casser FastAPI.
+      - "infra/postgres/**"
+      - "backend-django/apps/*/migrations/**"
   pull_request:
     paths:
       - "backend-fastapi/**"
+      - ".github/workflows/ci-fastapi.yml"
+      - "infra/docker-compose.yml"
+      - "infra/docker-compose.prod.yml"
+      - "infra/postgres/**"
+      - "backend-django/apps/*/migrations/**"
 
 defaults:
   run:
     working-directory: backend-fastapi
 
+env:
+  # Réglages de test (app/core/settings.py) : doc active, aucune exigence
+  # de prod. Job test : ressources simulées (Redis, Django, PostgreSQL),
+  # aucun service. Job integration : vrais PostgreSQL et Redis.
+  ENVIRONMENT: test
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Installer Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: "pip"
-          cache-dependency-path: backend-fastapi/requirements.txt
+          cache-dependency-path: |
+            backend-fastapi/requirements.txt
+            backend-fastapi/requirements-dev.txt
 
       - name: Installer les dépendances
-        run: |
-          pip install -r requirements.txt
-          pip install pytest httpx
+        run: pip install -r requirements-dev.txt
 
-      - name: Vérifier que l'app démarre (import + routes)
-        run: |
-          python -c "from app.main import app; from fastapi.routing import APIRoute; print('Routes chargées :', [r.path for r in app.routes if isinstance(r, APIRoute)])"
+      # Construit l'application comme uvicorn --factory (réglages validés,
+      # routeurs importés). Depuis FastAPI 0.137, app.routes est un arbre :
+      # on n'énumère plus les routes ici, les tests couvrent chaque route.
+      - name: Vérifier que l'app se construit
+        run: python -c "from app.main import create_app; create_app(); print('Application construite.')"
 
-      - name: Lancer les tests (si présents)
-        run: pytest -q || echo "Aucun test trouvé pour l'instant — à ajouter dans backend-fastapi/tests/"
+      - name: Lancer les tests
+        run: python -m pytest -q -m "not integration"
+
+  # Vrais services (rapport module 1 §g) : schéma créé par les migrations
+  # Django, rôle en lecture seule créé par le vrai script SQL, pub/sub Redis.
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      # Mêmes versions que le compose.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: anitche_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Mot de passe jetable du rôle, propre à cette base de CI (aucun secret).
+      FASTAPI_DB_PASSWORD: ci-fastapi-ro-password
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Installer Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: |
+            backend-django/requirements.txt
+            backend-fastapi/requirements.txt
+            backend-fastapi/requirements-dev.txt
+
+      # Deux environnements : versions de redis-py différentes (Django 8.0.1,
+      # FastAPI 8.1.0), incompatibles dans un seul environnement.
+      - name: Environnement Django
+        working-directory: backend-django
+        run: |
+          python -m venv "$RUNNER_TEMP/venv-django"
+          "$RUNNER_TEMP/venv-django/bin/pip" install -r requirements.txt
+
+      - name: Migrations Django (schéma réel)
+        working-directory: backend-django
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.ci
+          DB_NAME: anitche_test
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+          DB_HOST: localhost
+          DB_PORT: 5432
+        run: '"$RUNNER_TEMP/venv-django/bin/python" manage.py migrate --noinput'
+
+      # Le vrai fichier SQL, avec le psql 16 du conteneur (\getenv exige
+      # psql 15 ou plus), après les migrations (les tables doivent exister).
+      - name: Rôle PostgreSQL en lecture seule
+        working-directory: .
+        run: >-
+          docker exec -i -e FASTAPI_DB_PASSWORD ${{ job.services.postgres.id }}
+          psql -X -v ON_ERROR_STOP=1 -U postgres -d anitche_test
+          < infra/postgres/fastapi_readonly.sql
+
+      - name: Environnement FastAPI
+        run: |
+          python -m venv "$RUNNER_TEMP/venv-fastapi"
+          "$RUNNER_TEMP/venv-fastapi/bin/pip" install -r requirements-dev.txt
+
+      # REQUIRE_INTEGRATION=1 : un test d'intégration sauté fait échouer le
+      # job (tests/conftest.py). Aucun test collecté : pytest sort en 5, échec.
+      - name: Tests d'intégration
+        env:
+          FASTAPI_TEST_DATABASE_URL: postgresql://anitche_fastapi_ro:ci-fastapi-ro-password@localhost:5432/anitche_test
+          FASTAPI_TEST_ADMIN_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/anitche_test
+          FASTAPI_TEST_REDIS_URL: redis://localhost:6379/15
+          REQUIRE_INTEGRATION: "1"
+        run: '"$RUNNER_TEMP/venv-fastapi/bin/python" -m pytest -m integration -q -rs'

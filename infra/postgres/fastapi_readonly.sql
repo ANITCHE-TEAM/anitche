@@ -1,0 +1,87 @@
+-- Rôle PostgreSQL en lecture seule du service FastAPI : anitche_fastapi_ro.
+--
+-- Idempotent : peut être relancé à chaque déploiement (crée le rôle s'il
+-- manque, remet ses attributs et son mot de passe, redonne les droits).
+-- À exécuter avec un compte administrateur, sur la base de l'application :
+--
+--   infra/scripts/create_fastapi_readonly_role.sh          (Docker)
+--   FASTAPI_DB_PASSWORD=... psql -v ON_ERROR_STOP=1 -d anitche -f infra/postgres/fastapi_readonly.sql
+--                                                          (Postgres managé)
+--
+-- Le mot de passe est lu dans la variable d'environnement FASTAPI_DB_PASSWORD
+-- (\getenv, psql 15 ou plus), jamais écrit dans ce fichier ni passé en
+-- argument de commande.
+--
+-- Moindre privilège : CONNECT sur la base, USAGE sur le schéma public et
+-- SELECT sur les seules colonnes ou vues lues (en fin de fichier). Chaque
+-- fonctionnalité a ses GRANT SELECT par colonne, ou sur une vue publique
+-- créée pour elle par une migration Django (jamais de GRANT sur tout le schéma ni
+-- d'ALTER DEFAULT PRIVILEGES) : les tables sensibles (KYC, paiements...)
+-- restent illisibles.
+--
+-- La lecture seule côté rôle (default_transaction_read_only) et côté
+-- connexion (app/core/resources.py) protège contre une erreur de code ; la
+-- vraie barrière reste l'absence de droits d'écriture.
+
+\set ON_ERROR_STOP on
+\getenv fastapi_password FASTAPI_DB_PASSWORD
+
+\if :{?fastapi_password}
+\else
+    \set fastapi_password ''
+\endif
+SELECT length(:'fastapi_password') >= 12 AS password_ok \gset
+\if :password_ok
+\else
+    DO $$ BEGIN RAISE EXCEPTION 'FASTAPI_DB_PASSWORD doit être défini (12 caractères au moins).'; END $$;
+\endif
+
+SELECT 'CREATE ROLE anitche_fastapi_ro'
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anitche_fastapi_ro') \gexec
+
+SELECT format(
+    'ALTER ROLE anitche_fastapi_ro WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE '
+    'NOREPLICATION NOBYPASSRLS PASSWORD %L',
+    :'fastapi_password'
+) \gexec
+
+ALTER ROLE anitche_fastapi_ro SET default_transaction_read_only = on;
+ALTER ROLE anitche_fastapi_ro SET statement_timeout = '3s';
+
+SELECT format('GRANT CONNECT ON DATABASE %I TO anitche_fastapi_ro', current_database()) \gexec
+GRANT USAGE ON SCHEMA public TO anitche_fastapi_ro;
+
+-- Tables lues par FastAPI, par fonctionnalité. Les tables doivent
+-- exister : lancer ce script APRÈS `python manage.py migrate`.
+
+-- Suivi GPS (docs/MODULE_SUIVI_GPS.md) : droits PAR COLONNE.
+-- REVOKE ALL retire aussi les droits par colonne : relancer le script
+-- redonne exactement cette liste. Jamais accordés : code_hash, code_chiffre,
+-- adresse_livraison, montants, email, telephone, password, nom, prenom,
+-- adresse texte du groupe... Une colonne ajoutée par une migration Django
+-- n'est pas lisible tant qu'elle n'est pas ajoutée ici.
+REVOKE ALL ON TABLE livraison_livraison FROM anitche_fastapi_ro;
+REVOKE ALL ON TABLE commandes_commande FROM anitche_fastapi_ro;
+REVOKE ALL ON TABLE commandes_groupecommande FROM anitche_fastapi_ro;
+REVOKE ALL ON TABLE utilisateurs_utilisateur FROM anitche_fastapi_ro;
+GRANT SELECT (id, commande_id, livreur_id, status) ON TABLE livraison_livraison TO anitche_fastapi_ro;
+GRANT SELECT (id, client_id, groupe_id) ON TABLE commandes_commande TO anitche_fastapi_ro;
+-- Point GPS facultatif donné par le client au checkout (distance et temps
+-- restants indicatifs).
+GRANT SELECT (id, livraison_latitude, livraison_longitude) ON TABLE commandes_groupecommande TO anitche_fastapi_ro;
+GRANT SELECT (id, role, is_active) ON TABLE utilisateurs_utilisateur TO anitche_fastapi_ro;
+
+-- Recherche et conseiller IA (docs/MODULE_RECHERCHE.md) : les trois VUES publiques
+-- créées par la migration Django catalogue 0004, rien d'autre. AUCUNE table
+-- du catalogue n'est lisible : ni stock exact (catalogue_stock), ni seuil
+-- d'alerte, ni SKU, ni produits désactivés, ni données du propriétaire
+-- d'une boutique (vendeurs_boutique, statut KYC). Les vues s'exécutent avec
+-- les droits de leur propriétaire (le compte des migrations) : aucun droit
+-- de table n'est nécessaire. Un retour arrière de la migration 0004
+-- supprime les vues et ces droits : relancer ce script après `migrate`.
+REVOKE ALL ON TABLE catalogue_produit_public FROM anitche_fastapi_ro;
+REVOKE ALL ON TABLE catalogue_categorie_publique FROM anitche_fastapi_ro;
+REVOKE ALL ON TABLE catalogue_boutique_publique FROM anitche_fastapi_ro;
+GRANT SELECT ON TABLE catalogue_produit_public TO anitche_fastapi_ro;
+GRANT SELECT ON TABLE catalogue_categorie_publique TO anitche_fastapi_ro;
+GRANT SELECT ON TABLE catalogue_boutique_publique TO anitche_fastapi_ro;

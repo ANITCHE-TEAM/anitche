@@ -1,4 +1,5 @@
 amqp==5.3.1
+cryptography==50.0.2
 asgiref==3.12.1
 billiard==4.2.4
 celery==5.6.3
@@ -8,25 +9,52 @@ click-plugins==1.1.1.2
 click-repl==0.3.0
 colorama==0.4.6
 cron-descriptor==1.4.5
-Django==6.0.7
+Django==6.0.8
 django-celery-beat==2.9.0
 django-cors-headers==4.9.0
 django-timezone-field==7.2.2
-djangorestframework==3.17.1
+djangorestframework==3.17.2
 djangorestframework_simplejwt==5.5.1
 kombu==5.6.2
 packaging==26.2
-Pillow==12.3.0
+pillow==12.3.0
 prompt_toolkit==3.0.52
 psycopg2-binary==2.9.12
-PyJWT==2.13.0
+PyJWT==2.15.1
 python-crontab==3.3.0
 python-dateutil==2.9.0.post0
 python-decouple==3.8
 redis==8.0.1
 six==1.17.0
-sqlparse==0.5.5
+sqlparse==0.6.0
 tzdata==2026.3
 tzlocal==5.4.4
 vine==5.1.0
 wcwidth==0.8.2
+google-auth==2.35.0
+requests==2.33.0
+# Documentation d'API (OpenAPI) et ses dépendances
+drf-spectacular==0.30.0
+attrs==26.1.0
+inflection==0.5.1
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+PyYAML==6.0.3
+referencing==0.37.0
+rpds-py==2026.6.3
+typing_extensions==4.16.0
+uritemplate==4.2.0
+# Serveur WSGI de production (CMD du Dockerfile, docker-compose.prod.yml)
+gunicorn==26.2.0
+# Dépendances transitives de google-auth, requests et cryptography, épinglées
+# pour que le poste local, la CI et l'image Docker installent les mêmes versions
+cachetools==5.5.2
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.2
+idna==3.20
+pyasn1==0.6.4
+pyasn1_modules==0.4.2
+pycparser==3.0
+rsa==4.9.1
+urllib3==2.8.0
