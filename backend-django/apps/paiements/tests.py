@@ -18,6 +18,7 @@ from django.core.cache import cache
 from django.db import IntegrityError, connection, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase, override_settings
+from django.urls import Resolver404, clear_url_caches, resolve
 from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
 from rest_framework.throttling import AnonRateThrottle, SimpleRateThrottle
@@ -42,6 +43,7 @@ from .fournisseurs.simule import EN_TETE_SIGNATURE, FournisseurSimule, definir_e
 from .frais import bareme_en_vigueur, calculer_frais_ligne
 from .models import AjustementVendeur, BaremeFrais, JournalWebhook, Paiement, Remboursement, Reversement
 from .services import reconcilier_paiement, reconcilier_paiements_en_suspens, valider_paiement
+from .signals import paiement_valide
 from .tasks import reconcilier_paiements
 
 URL_INITIER = "/api/paiements/initier/"
@@ -257,6 +259,182 @@ class InitiationTests(Donnees, APITestCase):
             self.assertEqual(self.api(self.admin).get("/api/paiements/").data["count"], 3)
 
 
+class RechercheParReferenceTests(Donnees, APITestCase):
+    """GET /api/paiements/?reference= : la page de retour du fournisseur
+    retrouve le paiement par la référence de son URL."""
+
+    def setUp(self):
+        self.creer_donnees()
+        commande_a, commande_b = self.commander((self.variante1, 1), (self.variante2, 1))
+        self.paiement = self.payer(commande_a)
+        self.autre = self.payer(commande_b)
+
+    def lister(self, utilisateur, **params):
+        reponse = self.api(utilisateur).get("/api/paiements/", params)
+        self.assertEqual(reponse.status_code, 200)
+        return [ligne["id"] for ligne in reponse.data["results"]]
+
+    def test_proprietaire_et_administration_le_retrouvent(self):
+        for utilisateur in (self.client1, self.admin):
+            with self.subTest(utilisateur.email):
+                self.assertEqual(self.lister(utilisateur, reference=self.paiement.reference), [str(self.paiement.pk)])
+
+    def test_paiement_d_un_autre_compte_jamais_renvoye(self):
+        self.assertEqual(self.lister(self.client2, reference=self.paiement.reference), [])
+
+    def test_reference_inconnue_ou_trop_longue(self):
+        self.assertEqual(self.lister(self.client1, reference="PAY-INCONNUE"), [])
+        # Tronquée à la longueur du champ : une valeur plus longue ne correspond à rien.
+        self.assertEqual(self.lister(self.client1, reference=self.paiement.reference + "X" * 300), [])
+
+    def test_sans_reference_liste_complete(self):
+        attendus = {str(self.paiement.pk), str(self.autre.pk)}
+        self.assertEqual(set(self.lister(self.client1)), attendus)
+        self.assertEqual(set(self.lister(self.client1, reference="")), attendus)
+
+    def test_nombre_de_requetes_inchange(self):
+        api = self.api(self.client1)
+        with self.assertNumQueries(4):
+            api.get("/api/paiements/", {"reference": self.paiement.reference})
+
+
+class PerimetreAchatsTests(Donnees, APITestCase):
+    """?perimetre=achats sur la liste et le détail : un administrateur qui
+    achète voit ses paiements en représentation client, rien de plus."""
+
+    def setUp(self):
+        self.creer_donnees()
+        (commande,) = self.commander((self.variante1, 1))
+        self.paiement_client = self.payer(commande)
+        commande_admin = Commande.objects.create(boutique=self.boutique2, client=self.admin,
+                                                 montant_total=Decimal("10000"))
+        self.paiement_admin = Paiement.objects.create(client=self.admin, commande=commande_admin,
+                                                      montant=Decimal("10000"), fournisseur="simule")
+        self.paiement_admin.commandes.add(commande_admin)
+
+    def test_liste(self):
+        api = self.api(self.admin)
+        self.assertEqual(api.get("/api/paiements/").data["count"], 2)
+        r = api.get("/api/paiements/", {"perimetre": "achats"})
+        self.assertEqual([ligne["id"] for ligne in r.data["results"]], [str(self.paiement_admin.pk)])
+        self.assertNotIn("fournisseur", r.data["results"][0])  # représentation client
+        r = api.get("/api/paiements/", {"perimetre": "achats", "reference": self.paiement_client.reference})
+        self.assertEqual(r.data["count"], 0)
+
+    def test_detail(self):
+        api = self.api(self.admin)
+        self.assertEqual(api.get(f"/api/paiements/{self.paiement_client.pk}/").status_code, 200)
+        url_achat = f"/api/paiements/{self.paiement_client.pk}/"
+        self.assertEqual(api.get(url_achat, {"perimetre": "achats"}).status_code, 404)
+        r = api.get(f"/api/paiements/{self.paiement_admin.pk}/", {"perimetre": "achats"})
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn("fournisseur", r.data)
+
+    def test_client_et_valeur_inconnue_inchanges(self):
+        api = self.api(self.client1)
+        for params in ({}, {"perimetre": "achats"}, {"perimetre": "tout"}):
+            with self.subTest(params=params):
+                r = api.get("/api/paiements/", params)
+                self.assertEqual([ligne["id"] for ligne in r.data["results"]], [str(self.paiement_client.pk)])
+        self.assertEqual(self.api(self.admin).get("/api/paiements/", {"perimetre": "tout"}).data["count"], 2)
+
+
+class SimulationPaiementTests(Donnees, APITestCase):
+    """POST /api/paiements/simulation/<reference>/ : le payeur confirme ou
+    fait échouer son paiement simulé, sans le secret HMAC."""
+
+    def setUp(self):
+        self.creer_donnees()
+        (self.commande,) = self.commander((self.variante1, 1))
+        self.paiement = self.payer(self.commande)
+
+    def simuler(self, statut="succes", utilisateur=None, reference=None):
+        return self.api(utilisateur or self.client1).post(
+            f"/api/paiements/simulation/{reference or self.paiement.reference}/", {"statut": statut}, format="json",
+        )
+
+    def test_succes_valide_le_paiement_par_la_reconciliation(self):
+        recus = []
+
+        def recepteur(sender, **kwargs):
+            recus.append(kwargs["paiement"].pk)
+
+        paiement_valide.connect(recepteur)
+        self.addCleanup(paiement_valide.disconnect, recepteur)
+        r = self.simuler()
+        self.assertEqual((r.status_code, r.data["statut"], r.data["reference"]),
+                         (200, "valide", self.paiement.reference))
+        self.commande.refresh_from_db()
+        self.assertEqual(self.commande.status, Commande.Status.CONFIRMEE)
+        self.assertEqual(recus, [self.paiement.pk])
+        # Chemin de la réconciliation : aucune notification journalisée.
+        self.assertFalse(JournalWebhook.objects.exists())
+
+    def test_echec(self):
+        r = self.simuler("echec")
+        self.assertEqual((r.status_code, r.data["statut"]), (200, "echoue"))
+
+    def test_second_appel_409_sans_changer_le_paiement(self):
+        self.assertEqual(self.simuler().status_code, 200)
+        r = self.simuler("echec")
+        self.assertEqual(r.status_code, 409)
+        self.paiement.refresh_from_db()
+        self.assertEqual(self.paiement.statut, Paiement.Statut.VALIDE)
+        # L'état distant confirmé n'est pas réécrit.
+        self.assertEqual(reconcilier_paiement(self.paiement), ("succes", False))
+
+    def test_statut_absent_ou_inconnu(self):
+        for statut in ("", "en_attente", "injoignable", "valide"):
+            with self.subTest(statut=statut):
+                r = self.simuler(statut)
+                self.assertEqual(r.status_code, 400)
+                self.assertIn("statut", r.data["errors"])
+        self.assertEqual(self.api(self.client1).post(
+            f"/api/paiements/simulation/{self.paiement.reference}/", {}, format="json").status_code, 400)
+        self.paiement.refresh_from_db()
+        self.assertEqual(self.paiement.statut, Paiement.Statut.EN_ATTENTE)
+
+    def test_paiement_d_un_autre_compte_ou_inconnu_404(self):
+        self.assertEqual(self.simuler(utilisateur=self.client2).status_code, 404)
+        self.assertEqual(self.simuler(utilisateur=self.admin).status_code, 404)
+        self.assertEqual(self.simuler(reference="PAY-INCONNUE").status_code, 404)
+        self.paiement.refresh_from_db()
+        self.assertEqual(self.paiement.statut, Paiement.Statut.EN_ATTENTE)
+
+    def test_anonyme_401(self):
+        r = self.api().post(f"/api/paiements/simulation/{self.paiement.reference}/", {"statut": "succes"},
+                            format="json")
+        self.assertEqual(r.status_code, 401)
+
+    def test_hors_fournisseur_simule_404(self):
+        with override_settings(PAIEMENT_FOURNISSEUR="cinetpay"):
+            self.assertEqual(self.simuler().status_code, 404)
+        Paiement.objects.filter(pk=self.paiement.pk).update(fournisseur="cinetpay")
+        self.assertEqual(self.simuler().status_code, 404)
+        self.paiement.refresh_from_db()
+        self.assertEqual(self.paiement.statut, Paiement.Statut.EN_ATTENTE)
+
+    def test_route_absente_si_le_reglage_est_faux(self):
+        import config.urls
+
+        from . import urls as urls_paiements
+
+        def recharger():
+            importlib.reload(urls_paiements)
+            importlib.reload(config.urls)
+            clear_url_caches()
+
+        self.addCleanup(recharger)
+        with override_settings(PAIEMENT_SIMULATION_API_ACTIVE=False):
+            recharger()
+            self.assertEqual(self.simuler().status_code, 404)
+            with self.assertRaises(Resolver404):
+                resolve(f"/api/paiements/simulation/{self.paiement.reference}/")
+        recharger()
+        self.assertEqual(resolve(f"/api/paiements/simulation/{self.paiement.reference}/").url_name,
+                         "paiement-simulation")
+
+
 # =====================================================================
 # NOTIFICATIONS (WEBHOOKS)
 # =====================================================================
@@ -406,6 +584,10 @@ class RemboursementTests(Donnees, APITestCase):
         self.assertFalse(Livraison.objects.filter(commande=self.commande_a).exists())
         self.assertFalse(CompteFidelite.objects.filter(utilisateur=self.client1, solde_points__gt=0).exists())
         self.assertTrue(Notification.objects.filter(destinataire=self.admin, titre="Remboursement à traiter").exists())
+        self.assertEqual(
+            Notification.objects.get(destinataire=self.admin, titre="Remboursement à traiter").lien_redirection,
+            "/administration/remboursements",
+        )
 
     def test_second_paiement_d_une_commande_deja_payee_rembourse(self):
         premier = self.payer(self.commande_a)
@@ -460,6 +642,10 @@ class RemboursementTests(Donnees, APITestCase):
         self.assertEqual((r.status_code, r.data["statut"], r.data["traite_par"]), (200, "effectue", self.admin.pk))
         self.assertEqual(admin.post(url, {"decision": "effectue", "reference_externe": "X"}).status_code, 409)
         self.assertTrue(Notification.objects.filter(destinataire=self.client1, titre="Remboursement effectué").exists())
+        self.assertEqual(
+            Notification.objects.get(destinataire=self.client1, titre="Remboursement effectué").lien_redirection,
+            f"/paiements/{paiement.pk}",
+        )
         donnees = self.api(self.client1).get(f"/api/paiements/{paiement.pk}/").data
         self.assertEqual(donnees["remboursements"][0]["statut"], "effectue")
 
@@ -1590,6 +1776,10 @@ class ReversementTests(Donnees, APITestCase):
         self.assertEqual((self.reversement.numero_destinataire, self.reversement.verse_par),
                          ("0707070707", self.admin))
         self.assertTrue(Notification.objects.filter(destinataire=self.vendeur1, titre="Reversement effectué").exists())
+        self.assertEqual(
+            Notification.objects.get(destinataire=self.vendeur1, titre="Reversement effectué").lien_redirection,
+            "/vendeur/reversements",
+        )
 
     def test_transfert_par_le_fournisseur(self):
         self.livrer(il_y_a_jours=8)
@@ -1961,7 +2151,7 @@ class ReconciliationReponsesCinetPayTests(ReponsesCinetPay, DonneesReconciliatio
 class ConfigurationProductionTests(APITestCase):
     """prod.py refuse le fournisseur simulé, une clé de sandbox ou l'absence de clés."""
 
-    def importer_prod(self, **variables):
+    def importer_prod(self, script="import config.settings.prod", **variables):
         env = {
             **os.environ,
             "DJANGO_SETTINGS_MODULE": "config.settings.prod",
@@ -1981,9 +2171,32 @@ class ConfigurationProductionTests(APITestCase):
             **variables,
         }
         return subprocess.run(
-            [sys.executable, "-c", "import config.settings.prod"],
+            [sys.executable, "-c", script],
             cwd=Path(settings.BASE_DIR), env=env, capture_output=True, text=True,
         )
+
+    def test_simulation_figee_a_false_dans_prod(self):
+        source = (Path(settings.BASE_DIR) / "config" / "settings" / "prod.py").read_text(encoding="utf-8")
+        self.assertIn("\nPAIEMENT_SIMULATION_API_ACTIVE = False\n", source)
+
+    def test_simulation_jamais_montee_en_production(self):
+        """Settings de production, même avec PAIEMENT_SIMULATION_API_ACTIVE=True
+        dans l'environnement : la route n'existe pas."""
+        script = (
+            "import django, json\n"
+            "django.setup()\n"
+            "from django.conf import settings\n"
+            "from django.urls import Resolver404, resolve\n"
+            "try:\n"
+            "    resolve('/api/paiements/simulation/PAY-2026-0000000000/')\n"
+            "    montee = True\n"
+            "except Resolver404:\n"
+            "    montee = False\n"
+            "print(json.dumps({'active': settings.PAIEMENT_SIMULATION_API_ACTIVE, 'montee': montee}))\n"
+        )
+        resultat = self.importer_prod(script=script, PAIEMENT_SIMULATION_API_ACTIVE="True")
+        self.assertEqual(resultat.returncode, 0, resultat.stderr[-800:])
+        self.assertEqual(json.loads(resultat.stdout.strip().splitlines()[-1]), {"active": False, "montee": False})
 
     def test_configuration_valide(self):
         cas = {

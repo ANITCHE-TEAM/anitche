@@ -14,7 +14,7 @@ from rest_framework.views import APIView
 from apps.core.exceptions import ErreurMetier
 from drf_spectacular.utils import extend_schema, extend_schema_view
 
-from config.schema import FICHIER, erreurs
+from config.schema import FICHIER_IMAGE, erreurs
 from apps.vendeurs.permissions import ROLES_ADMINISTRATION
 
 from . import services
@@ -178,7 +178,7 @@ class AjouterPhotoRetourView(APIView):
 
 @extend_schema(
     summary="Télécharger une photo justificative",
-    responses={200: FICHIER},
+    responses=FICHIER_IMAGE,
 )
 class TelechargerPhotoRetourView(APIView):
     """Fichier d'une photo justificative, servi par Django après contrôle

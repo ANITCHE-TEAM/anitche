@@ -2,6 +2,7 @@ import io
 import os
 import shutil
 import tempfile
+from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest import mock, skipUnless
@@ -19,6 +20,7 @@ from PIL import Image
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework.throttling import SimpleRateThrottle
+from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.commandes.models import Commande, CommandeItem
 from apps.panier.models import Panier, PanierItem
@@ -26,6 +28,7 @@ from apps.passeport_qr.models import HistoriqueScanPasseport, PasseportProduit
 from apps.support.models import SupportTicket
 from apps.utilisateurs.models import Utilisateur, Role, StatutKYC
 from apps.vendeurs.models import Boutique
+from .images import LARGEUR_MINIATURE, generer_miniature
 from .models import MAX_IMAGES_PAR_PRODUIT, Categorie, Produit, VarianteProduit, Stock, ImageProduit
 from .serializers import (
     MESSAGE_DESACTIVATION_ADMINISTRATION, MESSAGE_MONTANT_ENTIER, ProduitPublicListSerializer, ProduitVendeurSerializer,
@@ -780,6 +783,174 @@ class CatalogueModerationTests(CatalogueEspacesBase):
                 Produit.objects.filter(pk=self.produit1.pk).update(est_actif=False)
 
 
+def image_jpeg(nom='photo.jpg', taille=(1200, 800), orientation=None):
+    tampon = io.BytesIO()
+    image = Image.new('RGB', taille, 'blue')
+    exif = Image.Exif()
+    if orientation:
+        exif[0x0112] = orientation  # Orientation
+    image.save(tampon, 'JPEG', exif=exif)
+    return SimpleUploadedFile(nom, tampon.getvalue(), content_type='image/jpeg')
+
+
+class CatalogueMiniaturesTests(CatalogueEspacesBase):
+    """Miniature WebP (480 px de large au plus, jamais agrandie, orientation
+    EXIF appliquée) générée à l'envoi ; rattrapage par generer_miniatures."""
+
+    def envoyer(self, fichier):
+        self.en_tant_que(self.vendeur1)
+        return self.client.post(f'{URL_V}produits/{self.produit1.pk}/images/', {'image': fichier}, format='multipart')
+
+    def ouvrir_miniature(self, image_produit):
+        image_produit.refresh_from_db()
+        with image_produit.miniature.open('rb') as fichier:
+            miniature = Image.open(fichier)
+            miniature.load()
+        return miniature
+
+    def test_grande_image_reduite_en_webp(self):
+        r = self.envoyer(image_jpeg(taille=(1200, 800)))
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertTrue(r.data['miniature'].startswith('http://testserver/'))
+        self.assertTrue(r.data['miniature'].endswith('.webp'))
+        self.assertNotEqual(r.data['miniature'], r.data['image'])  # l'original reste là
+        miniature = self.ouvrir_miniature(ImageProduit.objects.get(pk=r.data['id']))
+        self.assertEqual((miniature.format, miniature.size), ('WEBP', (LARGEUR_MINIATURE, 320)))
+
+    def test_petite_image_jamais_agrandie(self):
+        r = self.envoyer(image_png(taille=(40, 30)))
+        miniature = self.ouvrir_miniature(ImageProduit.objects.get(pk=r.data['id']))
+        self.assertEqual((miniature.format, miniature.size), ('WEBP', (40, 30)))
+
+    def test_orientation_exif_appliquee(self):
+        # Orientation 6 : la photo est à tourner de 90° (portrait pris en paysage).
+        r = self.envoyer(image_jpeg(taille=(600, 300), orientation=6))
+        miniature = self.ouvrir_miniature(ImageProduit.objects.get(pk=r.data['id']))
+        self.assertEqual(miniature.size, (300, 600))
+
+    def test_echec_de_generation_sans_erreur_500(self):
+        with mock.patch('apps.catalogue.images.contenu_miniature', side_effect=OSError("image tronquée")), \
+                self.assertLogs('apps.catalogue.images', level='WARNING'):
+            r = self.envoyer(image_png())
+        self.assertEqual(r.status_code, 201)
+        self.assertIsNone(r.data['miniature'])
+        self.assertFalse(ImageProduit.objects.get(pk=r.data['id']).miniature)
+
+    def test_liste_publique_et_fiche(self):
+        r = self.envoyer(image_jpeg())
+        image = ImageProduit.objects.get(pk=r.data['id'])
+        liste = self.client.get(URL_P + 'produits/').data['results']
+        ligne = next(p for p in liste if p['id'] == self.produit1.pk)
+        self.assertEqual(ligne['miniature_principale'], f'http://testserver{image.miniature.url}')
+        self.assertEqual(ligne['image_principale'], f'http://testserver{image.image.url}')
+        fiche = self.client.get(f'{URL_P}produits/{self.produit1.slug}/').data
+        self.assertEqual(fiche['images'][0]['miniature'], f'http://testserver{image.miniature.url}')
+        autre = next(p for p in liste if p['id'] == self.produit2.pk)
+        self.assertIsNone(autre['miniature_principale'])
+
+    def test_commande_de_rattrapage_idempotente(self):
+        from django.core.management import call_command
+
+        anciennes = [ImageProduit.objects.create(produit=self.produit2, image=image_png(f'{i}.png')) for i in range(3)]
+        sortie = io.StringIO()
+        call_command('generer_miniatures', '--lot', '2', stdout=sortie)
+        self.assertIn('3 miniature(s) générée(s), 0 échec(s).', sortie.getvalue())
+        noms = {image.pk: ImageProduit.objects.get(pk=image.pk).miniature.name for image in anciennes}
+        self.assertTrue(all(nom.endswith('.webp') for nom in noms.values()))
+        sortie = io.StringIO()
+        call_command('generer_miniatures', stdout=sortie)
+        self.assertIn('0 miniature(s) générée(s), 0 échec(s).', sortie.getvalue())
+        self.assertEqual({pk: ImageProduit.objects.get(pk=pk).miniature.name for pk in noms}, noms)
+
+
+@skipUnless(connection.vendor == 'postgresql', "Vue SQL de la migration 0005 : PostgreSQL uniquement")
+class MigrationMiniaturesTests(TransactionTestCase):
+    """Migration 0005 dans les deux sens : colonne de la table et colonne
+    de la vue apparaissent puis disparaissent ensemble."""
+
+    def migrer(self, cible=None):
+        from django.db.migrations.executor import MigrationExecutor
+
+        executeur = MigrationExecutor(connection)
+        executeur.migrate(cible or executeur.loader.graph.leaf_nodes())
+
+    def tearDown(self):
+        self.migrer()
+
+    def colonnes(self, table):
+        with connection.cursor() as curseur:
+            curseur.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() "
+                "AND table_name = %s ORDER BY ordinal_position", [table],
+            )
+            return [ligne[0] for ligne in curseur.fetchall()]
+
+    def test_aller_retour(self):
+        self.assertEqual(self.colonnes('catalogue_produit_public')[-1], 'miniature_principale')
+        self.migrer([('catalogue', '0004_recherche_publique')])
+        self.assertNotIn('miniature_principale', self.colonnes('catalogue_produit_public'))
+        self.assertNotIn('miniature', self.colonnes('catalogue_imageproduit'))
+        self.assertEqual(set(self.colonnes('catalogue_produit_public')),
+                         COLONNES_VUES_PUBLIQUES['catalogue_produit_public'] - {'miniature_principale'})
+        self.migrer()
+        self.assertIn('miniature', self.colonnes('catalogue_imageproduit'))
+        self.assertEqual(set(self.colonnes('catalogue_produit_public')), COLONNES_VUES_PUBLIQUES['catalogue_produit_public'])
+
+
+class CatalogueAdministrationListeTests(CatalogueEspacesBase):
+    """GET administration/produits/ : produits inactifs compris, filtres,
+    rôle admin seulement, nombre de requêtes constant."""
+
+    def ids(self, **params):
+        self.en_tant_que(self.administrateur)
+        response = self.client.get(URL_ADMIN, params)
+        self.assertEqual(response.status_code, 200)
+        return {ligne['id'] for ligne in response.data['results']}
+
+    def test_inactifs_compris_et_filtres(self):
+        self.produit2.desactiver(par='vendeur')
+        tous = {self.produit1.pk, self.produit2.pk}
+        self.assertEqual(self.ids(), tous)
+        self.assertEqual(self.ids(est_actif='false'), {self.produit2.pk})
+        self.assertEqual(self.ids(est_actif='true'), {self.produit1.pk})
+        self.assertEqual(self.ids(boutique=self.boutique2.pk), {self.produit2.pk})
+        self.assertEqual(self.ids(categorie=self.cat_chaussures.pk), {self.produit1.pk})
+        self.assertEqual(self.ids(recherche='baoulé'), {self.produit1.pk})
+        self.assertEqual(self.ids(recherche='diallo'), {self.produit2.pk})  # nom de la boutique
+        self.assertEqual(self.ids(est_actif='oui', boutique='x', categorie='-2'), tous)
+
+    def test_representation(self):
+        self.en_tant_que(self.administrateur)
+        response = self.client.get(URL_ADMIN, {'boutique': self.boutique1.pk})
+        (ligne,) = response.data['results']
+        self.assertEqual(
+            (ligne['boutique_nom'], ligne['categorie'], ligne['est_actif'], ligne['desactive_par']),
+            (self.boutique1.nom, self.cat_chaussures.pk, True, ''),
+        )
+        self.assertIn('date_creation', ligne)
+
+    def test_acces_reserve_a_ladministration(self):
+        for role in (Role.CLIENT, Role.VENDEUR, Role.LIVREUR, Role.SUPPORT, Role.MODERATEUR):
+            utilisateur = Utilisateur.objects.create_user(
+                email=f'{role}-liste@anitche.ci', password='x', nom='R', prenom='O', role=role, is_staff=True,
+            )
+            with self.subTest(role=role):
+                self.en_tant_que(utilisateur)
+                self.assertEqual(self.client.get(URL_ADMIN).status_code, 403)
+        self.client.force_authenticate(None)
+        self.assertEqual(self.client.get(URL_ADMIN).status_code, 401)
+
+    def test_nombre_de_requetes_constant(self):
+        self.en_tant_que(self.administrateur)
+        with CaptureQueriesContext(connection) as avant:
+            self.client.get(URL_ADMIN)
+        for i in range(5):
+            Produit.objects.create(boutique=self.boutique2, nom=f"Lot admin {i}", prix_base=Decimal("100"))
+        with CaptureQueriesContext(connection) as apres:
+            self.assertEqual(self.client.get(URL_ADMIN).data['count'], 7)
+        self.assertEqual(len(avant.captured_queries), len(apres.captured_queries))
+
+
 class CataloguePrixTests(CatalogueEspacesBase):
     """FCFA entiers, prix > 0, prix_base ≥ 0, 0 < prix_promo < prix, poids ≥ 0."""
 
@@ -930,6 +1101,38 @@ class CatalogueDebitTests(CatalogueEspacesBase):
             codes.append(self.client.get(URL_P + 'produits/', REMOTE_ADDR='8.8.8.8').status_code)
         self.assertEqual(codes, [200, 200, 200, 429, 429, 200])
 
+    def test_limite_par_compte_avec_un_jeton_valide(self):
+        """Un jeton valide identifie le compte : deux clients connectés derrière
+        la même IP (CGNAT) ont chacun leur seau ; un jeton expiré compte par IP."""
+        def get(utilisateur=None, expire=False):
+            entetes = {}
+            if utilisateur:
+                jeton = AccessToken.for_user(utilisateur)
+                if expire:
+                    jeton.set_exp(lifetime=timedelta(seconds=-1))
+                entetes['HTTP_AUTHORIZATION'] = f'Bearer {jeton}'
+            return self.client.get(URL_P + 'produits/', REMOTE_ADDR='9.9.9.9', **entetes).status_code
+
+        with mock.patch.object(SimpleRateThrottle, 'THROTTLE_RATES', {'catalogue_public': '2/hour'}):
+            codes_client = [get(self.client_user) for _ in range(3)]
+            codes_vendeur = [get(self.vendeur1) for _ in range(2)]
+            codes_ip = [get(self.vendeur2, expire=True) for _ in range(3)]
+        self.assertEqual(codes_client, [200, 200, 429])
+        self.assertEqual(codes_vendeur, [200, 200])
+        self.assertEqual(codes_ip, [200, 200, 429])
+
+    def test_jeton_expire_ignore_sur_les_routes_publiques(self):
+        """Un vieux jeton gardé par le client ne casse pas le catalogue (pas de 401)."""
+        jeton = AccessToken.for_user(self.client_user)
+        jeton.set_exp(lifetime=timedelta(seconds=-1))
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {jeton}')
+        for url in (
+            URL_P + 'categories/', f'{URL_P}categories/{self.cat_mode.slug}/',
+            URL_P + 'produits/', f'{URL_P}produits/{self.produit1.slug}/',
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(self.client.get(url).status_code, status.HTTP_200_OK)
+
 
 # =====================================================================
 # VUES SQL LUES PAR FASTAPI (migration 0004) : PARITÉ AVEC DJANGO
@@ -942,7 +1145,7 @@ COLONNES_VUES_PUBLIQUES = {
         'id', 'nom', 'slug', 'prix_base', 'date_creation',
         'categorie_id', 'categorie_nom', 'categorie_slug', 'categorie_parent_id', 'categorie_parent_slug',
         'boutique_id', 'boutique_nom', 'boutique_slug',
-        'prix_min', 'en_stock', 'image_principale', 'nom_normalise', 'texte_normalise',
+        'prix_min', 'en_stock', 'image_principale', 'nom_normalise', 'texte_normalise', 'miniature_principale',
     },
     'catalogue_categorie_publique': {'id', 'nom', 'slug', 'parent_id', 'nom_normalise'},
     'catalogue_boutique_publique': {'id', 'nom', 'slug', 'nom_normalise'},
@@ -984,7 +1187,10 @@ class CatalogueVuesPubliquesTests(CatalogueEspacesBase):
         for pk, produit in django.items():
             with self.subTest(produit=produit.nom):
                 ligne, element, categorie = vue[pk], ProduitPublicListSerializer(produit).data, produit.categorie
-                image = ligne['image_principale']
+                image, miniature = ligne['image_principale'], ligne['miniature_principale']
+                self.assertEqual(
+                    default_storage.url(miniature) if miniature else None, element['miniature_principale'],
+                )
                 self.assertEqual(ligne['prix_min'], min(v.prix_effectif for v in produit.variantes.all() if v.est_active))
                 self.assertEqual({
                     'nom': ligne['nom'], 'slug': ligne['slug'], 'prix_base': ligne['prix_base'],
@@ -1129,6 +1335,15 @@ class CatalogueVuesPubliquesTests(CatalogueEspacesBase):
         self.assertEqual(vue[sans_principale.pk]['image_principale'], premiere.image.name)
         self.assertEqual(vue[self.produit1.pk]['image_principale'], principale.image.name)
         self.assertIsNone(vue[self.produit2.pk]['image_principale'])
+        # Miniature de la MÊME image que image_principale, nulle tant qu'elle
+        # n'existe pas (jamais celle d'une autre image du produit).
+        self.assertIsNone(vue[self.produit1.pk]['miniature_principale'])
+        generer_miniature(ImageProduit.objects.get(pk=principale.pk))
+        generer_miniature(ImageProduit.objects.get(produit=sans_principale, ordre=2))
+        vue = self.verifier_parite()
+        principale.refresh_from_db()
+        self.assertEqual(vue[self.produit1.pk]['miniature_principale'], principale.miniature.name)
+        self.assertIsNone(vue[sans_principale.pk]['miniature_principale'])
 
     def test_textes_normalises_sans_accents_ni_majuscules(self):
         produit = self.nouveau_produit(nom="Écouteurs ÉLÉGANTS", description="Son clair à Abidjan")

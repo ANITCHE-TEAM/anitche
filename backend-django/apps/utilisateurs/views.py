@@ -14,12 +14,14 @@ import logging
 
 from apps.core.exceptions import ErreurMetier
 from apps.core.reseau import adresse_ip_client
-from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
+from django.db.models import Q
+from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, TokenRefreshSerializer
 
-from config.schema import FICHIER, JetonsSerializer, MessageSerializer, erreurs
+from config.schema import FICHIER_DOCUMENT, JetonsSerializer, MessageSerializer, erreurs
 from .permissions import EmailVerifie
+from apps.vendeurs.permissions import EstAdministrateur
 
 logger_securite = logging.getLogger('securite')
 
@@ -55,7 +57,8 @@ from .serializers import (
     DocumentKYCSerializer,
     DemandeMotDePasseOublieSerializer,
     ConfirmationMotDePasseOublieSerializer,
-    ConnexionGoogleSerializer
+    ConnexionGoogleSerializer,
+    UtilisateurAdministrationSerializer,
 )
 
 
@@ -403,7 +406,7 @@ class UploadKYCView(generics.CreateAPIView):
 @extend_schema(
     summary="Télécharger une pièce du dossier KYC",
     description="Titulaire du dossier ou administration. `champ` : piece_identite_recto, piece_identite_verso ou selfie.",
-    responses={200: FICHIER, **erreurs(403)},
+    responses={**FICHIER_DOCUMENT, **erreurs(403)},
 )
 class TelechargerDocumentKYCView(APIView):
     """
@@ -464,6 +467,47 @@ class TelechargerDocumentKYCView(APIView):
             raise Http404("Ce document n'est plus disponible.")
 
         return FileResponse(contenu, filename=fichier.name.rsplit("/", 1)[-1])
+
+
+# =====================================================
+# ADMINISTRATION
+# =====================================================
+
+@extend_schema(
+    summary="Rechercher un compte (administration)",
+    description=(
+        "Pour retrouver un client, nommer un livreur ou assigner un agent sans l'admin Django. "
+        "Filtres combinables ; une valeur invalide est ignorée."
+    ),
+    parameters=[
+        OpenApiParameter(
+            "recherche", str,
+            description="Partie de l'email, du nom, du prénom ou du téléphone (100 caractères au plus).",
+        ),
+        OpenApiParameter("role", enum=[valeur for valeur, _ in Role.choices]),
+        OpenApiParameter("est_actif", bool, description="`true` ou `false`."),
+    ],
+)
+class UtilisateurAdministrationListView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated, EstAdministrateur]
+    serializer_class = UtilisateurAdministrationSerializer
+
+    def get_queryset(self):
+        parametres = self.request.query_params
+        queryset = Utilisateur.objects.order_by('-date_creation', '-id')
+        recherche = parametres.get('recherche', '')[:100].strip()
+        if recherche:
+            queryset = queryset.filter(
+                Q(email__icontains=recherche) | Q(nom__icontains=recherche)
+                | Q(prenom__icontains=recherche) | Q(telephone__icontains=recherche)
+            )
+        role = parametres.get('role')
+        if role in Role.values:
+            queryset = queryset.filter(role=role)
+        est_actif = parametres.get('est_actif')
+        if est_actif in ('true', 'false'):
+            queryset = queryset.filter(is_active=est_actif == 'true')
+        return queryset
 
 
 # =====================================================

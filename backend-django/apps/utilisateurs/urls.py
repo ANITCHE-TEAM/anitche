@@ -14,7 +14,8 @@ from .views import (
     DemandeMotDePasseOublieView,
     ConfirmationMotDePasseOublieView,
     ConnexionGoogleView,
-    LogoutView
+    LogoutView,
+    UtilisateurAdministrationListView,
 )
 
 # =====================================================
@@ -118,4 +119,7 @@ urlpatterns = [
 
     # Déconnexion : révoque le refresh token fourni.
     path('deconnexion/', LogoutView.as_view(), name='deconnexion'),
+
+    # Administration : recherche de comptes (rôle admin ou super_admin).
+    path('administration/', UtilisateurAdministrationListView.as_view(), name='administration-utilisateurs'),
 ]

@@ -6,9 +6,11 @@ from rest_framework import generics, status
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from apps.commandes.services import TransitionImpossible
+from apps.core.authentification import JWTAuthentificationOptionnelle
 from apps.core.exceptions import ErreurMetier
 from drf_spectacular.utils import OpenApiParameter, PolymorphicProxySerializer, extend_schema
 
@@ -58,14 +60,31 @@ def _base():
     return Livraison.objects.select_related("commande__groupe", "livreur", "contestation")
 
 
-def livraisons_visibles(utilisateur):
+#: ?perimetre=achats : les livraisons des commandes du compte, quel que soit
+#: son rôle (portail client d'un livreur ou d'un administrateur qui achète).
+PERIMETRE_ACHATS = "achats"
+
+PARAMETRE_PERIMETRE = OpenApiParameter(
+    "perimetre", enum=[PERIMETRE_ACHATS],
+    description=(
+        "`achats` : seulement les livraisons des commandes du compte, en représentation LivraisonClient, "
+        "quel que soit le rôle (le portail client l'envoie toujours). Valeur inconnue : ignorée."
+    ),
+)
+
+
+def livraisons_visibles(utilisateur, perimetre=None):
     """Isolation par rôle : (queryset, serializer).
 
+    - `perimetre="achats"` : les livraisons de ses propres commandes, pour
+      tout rôle (restreint toujours l'ensemble autorisé, ne l'élargit jamais).
     - Administration : toutes les livraisons.
     - Livreur : uniquement celles qui lui sont assignées.
     - Tout autre compte : uniquement celles de ses propres commandes (un
       vendeur voit celles de sa boutique par /vendeur/).
     """
+    if perimetre == PERIMETRE_ACHATS:
+        return _base().filter(commande__client=utilisateur), LivraisonClientSerializer
     if utilisateur.role in ROLES_ADMINISTRATION:
         return _base(), LivraisonAdministrationSerializer
     if utilisateur.role == Role.LIVREUR:
@@ -95,24 +114,29 @@ def _refus(erreur):
     description=(
         "Client : livraisons de ses commandes ; livreur : celles qui lui sont assignées ; administration : toutes. "
         "La représentation dépend du rôle (LivraisonClient, LivraisonLivreur ou LivraisonAdministration). "
-        "Filtres `status` et `contestation` réservés à l'administration (ignorés sinon)."
+        "Filtres `status` et `contestation` réservés à l'administration (ignorés sinon, et avec "
+        "`perimetre=achats`)."
     ),
     parameters=[
+        PARAMETRE_PERIMETRE,
         OpenApiParameter("status", enum=[valeur for valeur, _ in Livraison.Status.choices], description="Administration."),
         OpenApiParameter("contestation", enum=["ouverte"], description="Administration : contestations ouvertes."),
     ],
     responses={200: livraison_selon_role(many=True)},
 )
 class LivraisonListView(generics.ListAPIView):
-    """Liste filtrée par rôle. Administration : filtres `?status=` et
-    `?contestation=ouverte`."""
+    """Liste filtrée par rôle (ou par `?perimetre=achats`). Administration :
+    filtres `?status=` et `?contestation=ouverte`."""
     permission_classes = [IsAuthenticated]
+
+    def perimetre(self):
+        return self.request.query_params.get("perimetre")
 
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):  # génération du schéma OpenAPI
             return Livraison.objects.none()
-        queryset, _ = livraisons_visibles(self.request.user)
-        if self.request.user.role in ROLES_ADMINISTRATION:
+        queryset, _ = livraisons_visibles(self.request.user, self.perimetre())
+        if self.request.user.role in ROLES_ADMINISTRATION and self.perimetre() != PERIMETRE_ACHATS:
             statut = self.request.query_params.get("status")
             if statut:
                 queryset = queryset.filter(status=statut)
@@ -123,19 +147,21 @@ class LivraisonListView(generics.ListAPIView):
     def get_serializer_class(self):
         if getattr(self, "swagger_fake_view", False):  # génération du schéma OpenAPI
             return LivraisonAdministrationSerializer
-        return livraisons_visibles(self.request.user)[1]
+        return livraisons_visibles(self.request.user, self.perimetre())[1]
 
 
 @extend_schema(
     summary="Détail d'une livraison (selon le rôle)",
+    description="Avec `perimetre=achats` : 404 si la livraison n'est pas celle d'une commande du compte.",
+    parameters=[PARAMETRE_PERIMETRE],
     responses={200: livraison_selon_role(), **erreurs(404)},
 )
 class LivraisonDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk):
-        livraison, serializer = livraison_visible(request.user, pk)
-        return Response(serializer(livraison).data)
+        queryset, serializer = livraisons_visibles(request.user, request.query_params.get("perimetre"))
+        return Response(serializer(get_object_or_404(queryset, pk=pk)).data)
 
 
 @extend_schema(
@@ -383,7 +409,12 @@ class TarifLivraisonPublicListView(APIView):
     """Menu déroulant du checkout : communes (celles du district d'Abidjan et
     les villes qui ont un tarif propre) avec le tarif appliqué à chacune, et
     le tarif des autres villes."""
+    # Un jeton refusé (expiré, révoqué) est ignoré : la grille reste publique.
+    authentication_classes = [JWTAuthentificationOptionnelle]
     permission_classes = [AllowAny]
+    # Seau du catalogue seul : la limite 'anon' (50/h par IP) bloquerait le
+    # checkout des visiteurs derrière un CGNAT.
+    throttle_classes = [ScopedRateThrottle]
     throttle_scope = "catalogue_public"
 
     def get(self, request):

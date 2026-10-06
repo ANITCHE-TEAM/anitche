@@ -315,13 +315,15 @@ def contestation_ouverte(commande):
     ).exists()
 
 
-def _alerter_administration(titre, message, metadata):
+def _alerter_administration(livraison, titre, message, metadata):
+    from apps.notifications import liens
     from apps.notifications.models import Notification
     from apps.notifications.services import ServiceNotification
 
     logger_securite.warning("ALERTE ADMINISTRATION — %s", message)
     ServiceNotification.notifier_administration(
-        titre=titre, message=message, type_notification=Notification.TypeNotification.LIVRAISON, metadata=metadata,
+        titre=titre, message=message, type_notification=Notification.TypeNotification.LIVRAISON,
+        lien_redirection=liens.lien_livraison_administration(livraison), metadata=metadata,
     )
 
 
@@ -345,6 +347,7 @@ def contester_livraison(livraison, client, motif):
         contestation = ContestationLivraison.objects.create(livraison=livraison, motif=motif.strip()[:1000])
         suspendre_reversement(livraison.commande)
     _alerter_administration(
+        livraison,
         "Livraison contestée",
         f"Le client signale la commande {livraison.commande.numero_commande} comme non reçue "
         f"(livreur_id={livraison.livreur_id}) : reversement suspendu.",
@@ -356,6 +359,7 @@ def contester_livraison(livraison, client, motif):
 def resoudre_contestation(livraison, administrateur, decision, commentaire=""):
     """Rejetée : le reversement reprend. Fondée : le reversement est annulé
     et le paiement devient un remboursement à traiter."""
+    from apps.notifications import liens
     from apps.notifications.models import Notification
     from apps.notifications.services import ServiceNotification
     from apps.paiements import reversements
@@ -401,6 +405,7 @@ def resoudre_contestation(livraison, administrateur, decision, commentaire=""):
             else "Après vérification, votre contestation n'a pas été retenue."
         ),
         type_notification=Notification.TypeNotification.LIVRAISON,
+        lien_redirection=liens.lien_livraison_client(livraison),
         metadata={"livraison_id": str(livraison.pk)},
     )
     return contestation

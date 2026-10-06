@@ -39,6 +39,8 @@ Aucun autre module n'importe `passeport_qr`. Aucun consommateur n'existe encore 
 |---|---|---|
 | GET | `verifier/<code>/` | Vérification d'un code (insensible à la casse). Journalise un scan. Réponses au § 4 |
 
+Authentification `JWTAuthentificationOptionnelle` (`apps/core/authentification.py`) : un jeton valide identifie le compte (limite comptée par compte) ; un jeton refusé (expiré, révoqué par un changement de mot de passe, malformé, compte désactivé) est ignoré et la requête est traitée comme celle d'un visiteur. Le scan ne répond donc jamais 401. La signature reste vérifiée : un jeton refusé n'authentifie personne.
+
 ### Espace vendeur (`EstVendeurValideOuAdministrateur` + `BoutiqueDuVendeurNonSuspendue`)
 
 | Méthode | URL | Description |
@@ -135,14 +137,13 @@ Avant ce correctif, `X-Forwarded-For` était lu tel quel : IP falsifiable dans l
 
 ## 9. Décisions en attente
 
-- **Domaine et route de la page de vérification** : `FRONTEND_BASE_URL` (prod : `https://anitche.com` par défaut dans `docker-compose.prod.yml`, `http://localhost:5173` en dev) et `CHEMIN_VERIFICATION_PUBLIQUE = "/qr/verifier/{code}"` (`apps/passeport_qr/models.py`). Le dépôt mentionne à la fois `anitche.com` (Nginx, `.env.example`) et `anitche.ci` (ancienne URL, messages de `prod.py`). **À confirmer par l'équipe avant d'imprimer le moindre QR** : l'URL est figée dès l'impression. La page frontend `/qr/verifier/:code` doit aussi exister avant (c'est elle qu'ouvre l'appareil photo d'un téléphone). Le décodeur FastAPI n'accepte que l'origine de `FRONTEND_BASE_URL` (même variable) : un changement de domaine après impression demandera une liste d'origines acceptées ([`MODULE_SCAN_QR.md`](./MODULE_SCAN_QR.md) § 13).
+- **Domaine et route de la page de vérification** : `FRONTEND_BASE_URL` (prod : `https://anitche.com` par défaut dans `docker-compose.prod.yml`, `http://localhost:5173` en dev) et `CHEMIN_VERIFICATION_PUBLIQUE = "/qr/verifier/{code}"` (`apps/passeport_qr/models.py`). Le code penche pour `anitche.com` (Nginx, `.env.example`, exemples des messages de `prod.py`, expéditeur des emails imposé), mais `anitche.ci` a servi d'ancienne URL. **À confirmer par l'équipe avant d'imprimer le moindre QR** : l'URL est figée dès l'impression. La page frontend `/qr/verifier/:code` doit aussi exister avant (c'est elle qu'ouvre l'appareil photo d'un téléphone). Le décodeur FastAPI n'accepte que l'origine de `FRONTEND_BASE_URL` (même variable) : un changement de domaine après impression demandera une liste d'origines acceptées ([`MODULE_SCAN_QR.md`](./MODULE_SCAN_QR.md) § 13).
 
 ## 10. Dette connue
 
 - **Niveau 2 — durée de conservation de l'historique des scans** : aucune purge. L'IP est tronquée, mais IP réseau + user-agent + date restent des données de connexion. Prévoir une tâche Celery de purge (durée à fixer, conformité loi ivoirienne n° 2013-450 sur les données personnelles) et, à forte volumétrie, un partitionnement par date (voir `ARCHITECTURE_HAUTE_ECHELLE_100K.md`).
 - **Plages Cloudflare** dans `nginx.conf` : relevées le 2026-09-25, à revérifier périodiquement (https://www.cloudflare.com/ips/). Une plage manquante ne crée pas de faille, mais regroupe des visiteurs sous une IP Cloudflare dans les limites de débit.
 - Cloudflare n'est matérialisé dans le dépôt que par des commentaires ; rien n'empêche d'atteindre l'origine sans passer par lui. Le réglage Nginx reste sûr dans les deux cas. Restreindre l'origine aux IP Cloudflare (pare-feu hôte) relève de l'infrastructure.
-- Le point d'entrée public reste soumis à l'authentification JWT par défaut : un jeton expiré envoyé par un client connecté donne 401 au lieu du certificat.
 - **À faire lors de la reprise du module `utilisateurs`** : la notification de connexion (`apps/utilisateurs/views.py`, envoi de `envoyer_notification_connexion`) lit encore `request.META['REMOTE_ADDR']` directement. Derrière Nginx, c'est l'IP du conteneur Nginx, pas celle de l'utilisateur. Elle doit passer par `adresse_ip_client()` (`apps/core/reseau.py`), seule source de l'IP client du projet.
 - Vérification publique : le 404 recopie la saisie (en majuscules, sans limite de longueur) dans `detail` et dans le journal (`anitche.exceptions`) ; à borner, par exemple en refusant d'emblée ce qui n'a pas le format d'un code. Relevé au module 3 de la refonte FastAPI ([`MODULE_SCAN_QR.md`](./MODULE_SCAN_QR.md) § 13), non modifié.
 
@@ -158,7 +159,7 @@ DJANGO_SETTINGS_MODULE=config.settings.ci DB_NAME=anitche_test DB_USER=postgres 
 
 Vérifier dans la sortie `-v 2` que `test_scans_simultanes_aucun_increment_perdu` et `test_creations_simultanees_du_meme_lot_une_seule_acceptee` affichent `ok` et non `skipped`.
 
-Couverture : accès (client, anonyme, `is_staff`, admin/super_admin, vendeur non validé, boutique suspendue, passeports d'autrui), certification, révocation, désactivation/réactivation selon l'origine (§ 5 bis, y compris modification concurrente et contrainte en base), migration 0005, unicité par lot (API, base, concurrence), produit/variante inactifs, vérification publique (6 cas non vendables, produit sans variante active ou sans variante, équivalence avec la fiche catalogue, révoqué, 404, champs exposés, URL calculée, nombre de requêtes), IP (en-tête forgé, chaîne multi-adresses, proxy de confiance, troncature), atomicité du scan, limite de débit dédiée, collision de code, réassignation vers le produit d'autrui.
+Couverture : accès (client, anonyme, `is_staff`, admin/super_admin, vendeur non validé, boutique suspendue, passeports d'autrui), certification, révocation, désactivation/réactivation selon l'origine (§ 5 bis, y compris modification concurrente et contrainte en base), migration 0005, unicité par lot (API, base, concurrence), produit/variante inactifs, vérification publique (6 cas non vendables, produit sans variante active ou sans variante, équivalence avec la fiche catalogue, révoqué, 404, champs exposés, URL calculée, nombre de requêtes, jeton expiré ou révoqué ignoré), IP (en-tête forgé, chaîne multi-adresses, proxy de confiance, troncature), atomicité du scan, limite de débit dédiée, collision de code, réassignation vers le produit d'autrui.
 
 ## 12. Migration `0003_passeport_par_lot_sans_image_ni_url`
 

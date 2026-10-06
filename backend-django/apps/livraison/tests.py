@@ -13,7 +13,8 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
-from rest_framework.throttling import ScopedRateThrottle
+from rest_framework.throttling import AnonRateThrottle, ScopedRateThrottle, UserRateThrottle
+from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.commandes.models import Commande, GroupeCommande
 from apps.commandes.services import annuler_commande
@@ -673,6 +674,10 @@ class ContestationTests(DonneesLivraison, APITestCase):
         self.assertEqual(self.reversement().statut, Reversement.Statut.SUSPENDU)
         self.assertTrue(Notification.objects.filter(destinataire=self.admin, titre="Livraison contestée").exists())
         self.assertEqual(self.detail(self.client_user).data["contestation"]["statut"], "ouverte")
+        self.assertEqual(
+            Notification.objects.get(destinataire=self.admin, titre="Livraison contestée").lien_redirection,
+            f"/administration/livraisons/{self.livraison.pk}",
+        )
 
     def test_une_seule_contestation_par_son_client(self):
         self.assertEqual(self.contester(self.autre_client).status_code, 404)
@@ -693,6 +698,8 @@ class ContestationTests(DonneesLivraison, APITestCase):
         self.assertEqual(self.resoudre("rejetee").status_code, 200)
         self.assertEqual(self.reversement().statut, Reversement.Statut.EN_RETRACTATION)
         self.assertEqual(self.resoudre("fondee").status_code, 400)  # déjà traitée
+        decision = Notification.objects.get(destinataire=self.client_user, titre__startswith="Contestation de la commande")
+        self.assertEqual(decision.lien_redirection, f"/livraisons/{self.livraison.pk}")
 
     def test_fondee_remboursement_et_reversement_annule(self):
         self.contester(self.client_user)
@@ -863,6 +870,67 @@ class PositionLivraisonTests(DonneesLivraison, APITestCase):
         GroupeCommande.objects.filter(pk=self.groupe.pk).update(livraison_latitude=None, livraison_longitude=None)
         for utilisateur in (self.client_user, self.livreur, self.admin):
             self.assertEqual(self.point(utilisateur), (None, None))
+
+
+class PerimetreAchatsTests(DonneesLivraison, APITestCase):
+    """?perimetre=achats : les livraisons des commandes du compte, en
+    représentation client, quel que soit le rôle (livreur ou administrateur
+    qui achète). Le paramètre restreint, il n'élargit jamais."""
+
+    def setUp(self):
+        self.creer_donnees()
+        self.achat_livreur = self.achat(self.livreur, livreur=self.autre_livreur)
+        self.achat_admin = self.achat(self.admin)
+
+    def achat(self, acheteur, livreur=None):
+        groupe = GroupeCommande.objects.create(
+            client=acheteur, livraison_zone="abidjan", livraison_commune="Cocody", livraison_quartier="Riviera",
+            livraison_point_de_repere="Carrefour", livraison_telephone="0700000009",
+        )
+        commande = Commande.objects.create(
+            boutique=self.boutique, client=acheteur, groupe=groupe, montant_total=Decimal("3000"),
+            status=Commande.Status.CONFIRMEE,
+        )
+        return Livraison.objects.create(commande=commande, livreur=livreur, adresse_livraison="Cocody, Riviera")
+
+    def ids(self, utilisateur, **params):
+        r = self.api(utilisateur).get(reverse("livraison:livraison-list"), params)
+        self.assertEqual(r.status_code, 200)
+        return {ligne["id"] for ligne in r.data["results"]}
+
+    def detail_achat(self, utilisateur, livraison):
+        return self.api(utilisateur).get(
+            reverse("livraison:livraison-detail", args=[livraison.pk]), {"perimetre": "achats"},
+        )
+
+    def test_livreur_acheteur(self):
+        self.assertEqual(self.ids(self.livreur), {str(self.livraison.pk)})  # sans paramètre : inchangé
+        self.assertEqual(self.ids(self.livreur, perimetre="achats"), {str(self.achat_livreur.pk)})
+        self.assertEqual(self.detail_achat(self.livreur, self.achat_livreur).status_code, 200)
+        # Une livraison qu'il transporte n'est pas un de ses achats.
+        self.assertEqual(self.detail_achat(self.livreur, self.livraison).status_code, 404)
+        # L'achat d'un autre client : jamais visible.
+        self.assertEqual(self.detail_achat(self.autre_livreur, self.achat_livreur).status_code, 404)
+        self.assertEqual(self.ids(self.autre_livreur, perimetre="achats"), set())
+
+    def test_representation_client(self):
+        achat = self.detail_achat(self.livreur, self.achat_livreur).data
+        cles_client = set(self.detail(self.client_user).data)
+        self.assertEqual(set(achat), cles_client)
+
+    def test_administrateur_acheteur(self):
+        self.assertEqual(len(self.ids(self.admin)), 3)
+        self.assertEqual(self.ids(self.admin, perimetre="achats"), {str(self.achat_admin.pk)})
+        # Les filtres d'administration ne rouvrent pas le périmètre.
+        self.assertEqual(self.ids(self.admin, perimetre="achats", status="en_attente"), {str(self.achat_admin.pk)})
+        self.assertEqual(self.detail_achat(self.admin, self.livraison).status_code, 404)
+
+    def test_client_et_valeur_inconnue_inchanges(self):
+        attendu = {str(self.livraison.pk)}
+        self.assertEqual(self.ids(self.client_user), attendu)
+        self.assertEqual(self.ids(self.client_user, perimetre="achats"), attendu)
+        self.assertEqual(self.ids(self.livreur, perimetre="tout"), attendu)
+        self.assertEqual(len(self.ids(self.admin, perimetre="tout")), 3)
 
 
 class PerformanceEtLimitesTests(DonneesLivraison, APITestCase):
@@ -1051,6 +1119,23 @@ class TarifsDeLivraisonTests(APITestCase):
         self.assertEqual(communes["Bouaké"], {"commune": "Bouaké", "zone": "hors_abidjan", "montant": 2500})
         self.assertNotIn("Korhogo", communes)  # inactive : couverte par « autres villes »
         self.assertEqual(r.data["autres_villes"], {"zone": "hors_abidjan", "montant": 3000})
+
+    def test_grille_publique_jeton_expire_ignore(self):
+        """Un vieux jeton gardé par le client ne casse pas le checkout (pas de 401)."""
+        jeton = AccessToken.for_user(self.client_user)
+        jeton.set_exp(lifetime=timedelta(seconds=-1))
+        api = self.api()
+        api.credentials(HTTP_AUTHORIZATION=f"Bearer {jeton}")
+        r = api.get(self.URL_PUBLIQUE)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["autres_villes"], {"zone": "hors_abidjan", "montant": 3000})
+
+    def test_grille_publique_sans_limite_anon(self):
+        """Le checkout d'un visiteur ne dépend que du seau 'catalogue_public'."""
+        with mock.patch.object(AnonRateThrottle, "allow_request", return_value=False), \
+                mock.patch.object(UserRateThrottle, "allow_request", return_value=False):
+            self.assertEqual(self.api().get(self.URL_PUBLIQUE).status_code, 200)
+            self.assertEqual(self.api(self.client_user).get(self.URL_PUBLIQUE).status_code, 200)
 
     def test_administration_reservee_aux_administrateurs(self):
         url_detail = f"{self.URL_ADMIN}{self.defaut_abidjan.pk}/"

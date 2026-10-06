@@ -509,6 +509,83 @@ class SupportTicketsBase(APITestCase):
         return self.client.patch(f"{URL}tickets/{(ticket or self.ticket).id}/status/", {"status": value}, format="json")
 
 
+class FiltresAdministrationTests(SupportTicketsBase):
+    """?non_assigne= et ?status= : file d'attente et compteurs du tableau de
+    bord de l'administration ; ignorés pour les autres rôles."""
+
+    def setUp(self):
+        super().setUp()
+        self.assigne = SupportTicket.objects.create(
+            created_by=self.client_user, subject="Suivi", description="d", category=SupportTicket.Category.OTHER,
+            assigned_to=self.agent, status=SupportTicket.Status.IN_PROGRESS,
+        )
+        self.ferme = SupportTicket.objects.create(
+            created_by=self.other_client, subject="Fini", description="d", category=SupportTicket.Category.OTHER,
+            status=SupportTicket.Status.CLOSED,
+        )
+
+    def ids(self, user, **params):
+        self.as_user(user)
+        r = self.client.get(f"{URL}tickets/", params)
+        self.assertEqual(r.status_code, 200)
+        return {ligne["id"] for ligne in r.data["results"]}
+
+    def test_filtres_de_l_administration(self):
+        tous = {str(t.pk) for t in (self.ticket, self.assigne, self.ferme)}
+        self.assertEqual(self.ids(self.admin_user), tous)
+        self.assertEqual(self.ids(self.admin_user, non_assigne="1"), {str(self.ticket.pk), str(self.ferme.pk)})
+        self.assertEqual(self.ids(self.admin_user, non_assigne="true", status="open"), {str(self.ticket.pk)})
+        self.assertEqual(self.ids(self.admin_user, status="in_progress"), {str(self.assigne.pk)})
+        self.as_user(self.admin_user)
+        self.assertEqual(self.client.get(f"{URL}tickets/", {"non_assigne": "1", "status": "open"}).data["count"], 1)
+        self.assertEqual(self.ids(self.admin_user, non_assigne="0", status="inconnu"), tous)
+
+    def test_ignores_pour_les_autres_roles(self):
+        # Un client garde ses tickets, un agent sa liste : les filtres n'y changent rien.
+        self.assertEqual(self.ids(self.client_user, status="closed", non_assigne="1"),
+                         self.ids(self.client_user))
+        self.assertEqual(self.ids(self.agent, non_assigne="1"), self.ids(self.agent))
+
+
+class PerimetreMesTicketsTests(SupportTicketsBase):
+    """?perimetre=mes_tickets : les tickets créés par le compte, quel que
+    soit son rôle (portail client d'un vendeur)."""
+
+    def setUp(self):
+        super().setUp()
+        r = self.create_ticket(order=str(self.order.id), product=self.produit.id)
+        self.assertEqual(r.status_code, 201, r.data)
+        self.litige = SupportTicket.objects.get(pk=r.data["id"])
+        r = self.create_ticket(user=self.vendor_user, category="payment", subject="Mon reversement")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.ticket_vendeur = SupportTicket.objects.get(pk=r.data["id"])
+
+    def ids(self, user, **params):
+        self.as_user(user)
+        r = self.client.get(f"{URL}tickets/", params)
+        self.assertEqual(r.status_code, 200)
+        return {ligne["id"] for ligne in r.data["results"]}
+
+    def test_vendeur_sans_les_litiges_de_sa_boutique(self):
+        self.assertEqual(self.ids(self.vendor_user), {str(self.litige.pk), str(self.ticket_vendeur.pk)})
+        self.assertEqual(self.ids(self.vendor_user, perimetre="mes_tickets"), {str(self.ticket_vendeur.pk)})
+        self.as_user(self.vendor_user)
+        url = f"{URL}tickets/{self.litige.pk}/"
+        self.assertEqual(self.client.get(url).status_code, 200)
+        self.assertEqual(self.client.get(url, {"perimetre": "mes_tickets"}).status_code, 404)
+
+    def test_administration_et_agent(self):
+        self.assertEqual(self.ids(self.admin_user, perimetre="mes_tickets"), set())
+        self.assertEqual(len(self.ids(self.admin_user)), 3)
+        self.assertEqual(self.ids(self.agent, perimetre="mes_tickets"), set())
+
+    def test_client_et_valeur_inconnue_inchanges(self):
+        attendu = {str(self.ticket.pk), str(self.litige.pk)}
+        self.assertEqual(self.ids(self.client_user), attendu)
+        self.assertEqual(self.ids(self.client_user, perimetre="mes_tickets"), attendu)
+        self.assertEqual(self.ids(self.vendor_user, perimetre="tout"), {str(self.litige.pk), str(self.ticket_vendeur.pk)})
+
+
 class TestsCollectesTests(SupportTicketsBase):
     """La classe de tests des messages est au niveau du module : imbriquée
     dans une autre classe, elle ne serait jamais exécutée."""
@@ -635,6 +712,19 @@ class PiecesJointesTests(SupportTicketsBase):
                 self.assertEqual(self.client.get(url).status_code, attendu)
         self.client.force_authenticate(user=None)
         self.assertEqual(self.client.get(url).status_code, 401)
+
+    def test_type_de_contenu_reel_documente_dans_le_schema(self):
+        from config.schema import FICHIER_DOCUMENT
+
+        (cle,) = FICHIER_DOCUMENT
+        pdf = SimpleUploadedFile("facture.pdf", b"%PDF-1.4\nfacture", content_type="application/pdf")
+        for attendu, fichier in (("image/png", png()), ("application/pdf", pdf)):
+            with self.subTest(attendu=attendu):
+                r = self.upload(self.client_user, fichier=fichier)
+                self.assertEqual(r.status_code, 201, r.data)
+                reponse = self.client.get(r.data["file"])
+                self.assertEqual(reponse["Content-Type"], attendu)
+                self.assertIn(reponse["Content-Type"], cle[1:])
 
     def test_piece_d_une_note_interne_jamais_telechargee_par_le_client(self):
         piece = TicketAttachment.objects.create(message=self.note, file=png(), original_filename="n.png", file_size=10)

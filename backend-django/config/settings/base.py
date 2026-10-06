@@ -61,6 +61,16 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
+# CORS (origines autorisées : dev.py, prod.py). En-têtes de réponse lisibles
+# par un portail servi depuis une autre origine : le délai d'un 429
+# (Retry-After) et le nom d'un fichier téléchargé (Content-Disposition).
+# Ces en-têtes sont déjà envoyés : rien de plus n'est exposé.
+CORS_EXPOSE_HEADERS = ['Retry-After', 'Content-Disposition']
+# Durée de cache d'une requête préalable (OPTIONS), en secondes : la valeur
+# par défaut de django-cors-headers, rendue explicite. Les navigateurs la
+# plafonnent à leur propre maximum (2 h pour Chromium).
+CORS_PREFLIGHT_MAX_AGE = 86400
+
 ROOT_URLCONF = 'config.urls'
 
 TEMPLATES = [
@@ -197,6 +207,10 @@ REST_FRAMEWORK = {
         # visiteur : même raison CGNAT, et une navigation normale enchaîne
         # beaucoup plus de requêtes qu'un scan (20/min en moyenne).
         'catalogue_public': '1200/hour',
+        # Panier (lecture et écriture), par IP pour un visiteur : même raison
+        # CGNAT. Moins large que le catalogue, car un ajout sans panier
+        # existant crée une ligne en base. Taux à confirmer par la mesure.
+        'panier': '600/hour',
         # Paiements, par utilisateur : initiation et annulation d'un
         # paiement en attente (un checkout normal en consomme 1 à 3).
         'paiements': '20/hour',
@@ -258,6 +272,12 @@ REST_FRAMEWORK = {
 # schéma versionné (backend-django/schema.yaml) reste la référence du
 # frontend, vérifié par la CI.
 DOCUMENTATION_API_ACTIVE = False
+
+# Aide de développement POST /api/paiements/simulation/<reference>/ : le
+# payeur confirme ou fait échouer son paiement simulé (page de simulation du
+# portail, tests E2E). Montée seulement si ce réglage est vrai (dev.py,
+# test.py) ; prod.py le force à False.
+PAIEMENT_SIMULATION_API_ACTIVE = False
 
 SPECTACULAR_SETTINGS = {
     'TITLE': 'API ANITCHE',

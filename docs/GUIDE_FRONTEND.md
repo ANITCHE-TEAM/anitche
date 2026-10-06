@@ -70,6 +70,7 @@ Tout passe par l'API réelle (mêmes vues, permissions et services que le fronte
 4. Déconnexion : `POST /api/utilisateurs/deconnexion/` avec `{"refresh"}` (révoque le jeton).
 5. Un changement de mot de passe invalide tous les jetons existants.
 6. **Email non vérifié** : certaines actions (commander, devenir vendeur, changer de contact) répondent **403** avec `errors.code = ["email_non_verifie"]`. Afficher alors l'écran de saisie du code (voir [`MODULE_UTILISATEURS.md`](./MODULE_UTILISATEURS.md) § 11).
+7. **Routes publiques** : catégories (liste, détail), produits (liste, fiche), boutiques publiques (liste, fiche), grille des tarifs de livraison (`GET /api/livraison/tarifs/`) et vérification de passeport (`GET /api/passeports/verifier/{code}/`). L'en-tête `Authorization` y est facultatif. Un jeton valide identifie le compte (la limite de débit est alors comptée par compte, pas par IP) ; un jeton refusé (expiré, révoqué, malformé) est **ignoré** : la réponse est celle d'un visiteur, jamais 401. Le client peut donc garder son intercepteur sur ces routes. Le **panier** n'en fait pas partie : son contenu dépend du compte, un jeton expiré y donne 401 (rafraîchir puis rejouer).
 
 Un intercepteur axios qui rafraîchit sur 401 puis rejoue la requête une seule fois suffit ; sérialiser les rafraîchissements concurrents (un seul appel à la fois), sinon deux onglets consomment le même `refresh`.
 
@@ -106,9 +107,21 @@ Les listes sont paginées par défaut :
 
 ## 7. Limites de débit (429)
 
-Au-delà d'une limite, l'API répond **429** au format commun ; l'en-tête **`Retry-After`** donne le nombre de secondes à attendre. Afficher un message (« Trop de tentatives, réessayez dans N minutes ») et désactiver le bouton, sans relancer automatiquement.
+Au-delà d'une limite, l'API répond **429** au format commun ; l'en-tête **`Retry-After`** donne le nombre de secondes à attendre. Il est **lisible depuis un portail d'une autre origine** : l'API l'expose en CORS (`Access-Control-Expose-Headers: Retry-After, Content-Disposition`, § 15.5). Afficher un message (« Trop de tentatives, réessayez dans N minutes ») et désactiver le bouton, sans relancer automatiquement.
 
-Limites les plus visibles côté interface (production) : connexion 10/h, envoi de code OTP 5/h, inscription 10/h par IP, validation du panier 20/h, paiements 20/h, conversion de points 20/h, vérification de coupon 30/h. La liste complète est dans `REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']` (`config/settings/base.py`). En dev, certaines sont relevées pour Postman (`config/settings/dev.py`) : ne pas en déduire le comportement de production.
+Limites les plus visibles côté interface (production) : connexion 10/h, envoi de code OTP 5/h, inscription 10/h par IP, validation du panier 20/h, paiements 20/h, conversion de points 20/h, vérification de coupon 30/h.
+
+Navigation et panier (par IP pour un visiteur, par compte pour un client connecté ; la limite générique `anon` de 50/h par IP ne s'y applique pas, pour ne pas bloquer les visiteurs qui partagent une IP derrière le CGNAT d'un opérateur mobile) :
+
+| Seau | Taux | Routes |
+|---|---|---|
+| `catalogue_public` | 1 200/h, **un seul seau** pour toutes ces routes | catégories, produits, boutiques publiques (liste, fiche), grille des tarifs de livraison |
+| `panier` | 600/h, un seul seau pour lecture et écriture | `/api/panier/panier/`, `/api/panier/panier/items/` et `/api/panier/panier/items/<id>/`, toutes méthodes |
+| `passeport_verification` | 600/h | `GET /api/passeports/verifier/{code}/` |
+
+Côté client : lire le panier une fois par page au plus (cache de requête), pas à chaque rendu.
+
+La liste complète est dans `REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']` (`config/settings/base.py`). En dev, certaines sont relevées pour Postman (`config/settings/dev.py`) : ne pas en déduire le comportement de production.
 
 ## 8. Conventions de données
 
@@ -154,14 +167,14 @@ Chaque module documente les changements de contrat à intégrer côté interface
 |---|---|
 | Utilisateurs | [`MODULE_UTILISATEURS.md` § 11](./MODULE_UTILISATEURS.md#11-impact-frontend) |
 | Commandes | [`MODULE_COMMANDES.md` § 9](./MODULE_COMMANDES.md#9-impact-frontend) |
-| Paiements | [`MODULE_PAIEMENTS.md` § 10](./MODULE_PAIEMENTS.md#10-impact-frontend) |
+| Paiements | [`MODULE_PAIEMENTS.md` § 10](./MODULE_PAIEMENTS.md#10-impact-frontend) et § 14 ci-dessous (page de retour, simulation) |
 | Livraison | [`MODULE_LIVRAISON.md` § 10](./MODULE_LIVRAISON.md#10-impact-frontend) |
 | Suivi GPS (FastAPI) | § 12 ci-dessous et [`MODULE_SUIVI_GPS.md`](./MODULE_SUIVI_GPS.md) |
 | Recherche (FastAPI) | § 12 ci-dessous et [`MODULE_RECHERCHE.md`](./MODULE_RECHERCHE.md) |
 | Scan QR (FastAPI) | § 12 ci-dessous et [`MODULE_SCAN_QR.md`](./MODULE_SCAN_QR.md) |
 | Retours | [`MODULE_RETOURS.md` § 8](./MODULE_RETOURS.md#8-impact-frontend) |
 | Fidélité | [`MODULE_FIDELITE.md` § 6](./MODULE_FIDELITE.md#6-impact-frontend) |
-| Notifications | [`MODULE_NOTIFICATIONS.md` § 5](./MODULE_NOTIFICATIONS.md#5-impact-frontend) |
+| Notifications | [`MODULE_NOTIFICATIONS.md` § 5](./MODULE_NOTIFICATIONS.md#5-impact-frontend) et § 15.1 ci-dessous (routes logiques) |
 | Support | [`MODULE_SUPPORT.md` § 6](./MODULE_SUPPORT.md#6-impact-frontend) |
 | Vendeurs, catalogue, panier, passeports QR | pas de section dédiée : le contrat de chaque endpoint est dans le `MODULE_*.md` correspondant |
 
@@ -378,7 +391,7 @@ Le QR imprimé sur l'étiquette contient `url_verification_publique` (donnée pa
 | Appareil photo du téléphone (hors application) | Le navigateur ouvre directement la page `/qr/verifier/:code` |
 | Scanner intégré (caméra) ou saisie du code imprimé sous le QR | `POST /fast/qr/scan` avec `{"qr_data": <contenu brut>}` → 200 : ouvrir `url_verification_publique` (la page `/qr/verifier/:code`) |
 
-La page `/qr/verifier/:code` appelle **Django** `GET /api/passeports/verifier/{code}/`, **sans en-tête `Authorization`** (route publique ; un jeton expiré donnerait 401). C'est cet appel qui certifie, compte et journalise le scan : **un seul appel par affichage**. Affichage selon `statut_passeport` (`valide`, `revoque`) et `disponible_a_la_vente` ([`MODULE_PASSEPORT_QR.md`](./MODULE_PASSEPORT_QR.md) § 4) ; 404 : « Ce code ne correspond à aucun passeport ANITCHE » ; 429 : attendre `Retry-After`.
+La page `/qr/verifier/:code` appelle **Django** `GET /api/passeports/verifier/{code}/`, sans jeton nécessaire (route publique ; un jeton expiré ou révoqué est ignoré, jamais 401, § 4). C'est cet appel qui certifie, compte et journalise le scan : **un seul appel par affichage**. Affichage selon `statut_passeport` (`valide`, `revoque`) et `disponible_a_la_vente` ([`MODULE_PASSEPORT_QR.md`](./MODULE_PASSEPORT_QR.md) § 4) ; 404 : « Ce code ne correspond à aucun passeport ANITCHE » ; 429 : attendre `Retry-After`.
 
 **La page `/qr/verifier/:code` doit exister avant toute impression de QR**, et le domaine (`anitche.com` ou `anitche.ci`) doit être fixé avant : l'URL est figée dès l'impression.
 
@@ -412,7 +425,7 @@ async function ouvrirPasseport(contenuBrut, naviguer) {
   return { refus: corps.errors?.code?.[0] ?? (reponse.status === 400 ? 'saisie_invalide' : reponse.status) };
 }
 
-// Page /qr/verifier/:code : un seul appel par affichage, sans Authorization.
+// Page /qr/verifier/:code : un seul appel par affichage, aucun jeton nécessaire.
 async function verifierPasseport(code) {
   const reponse = await fetch(`${DJANGO_API_URL}/passeports/verifier/${encodeURIComponent(code)}/`);
   return { statut: reponse.status, corps: await reponse.json() };
@@ -493,3 +506,80 @@ Ce que voit le vendeur (`GET /api/paiements/vendeur/reversements/`) : les frais 
 - **Ne jamais recalculer les frais côté interface** : afficher ceux de l'API. Une commande passée avant le 28/09/2026 garde `"12.00"` et `200` ; une boutique peut avoir une offre propre (autre taux, autre frais fixe), prioritaire sur la règle de la plateforme.
 - La commission est arrondie au franc sur le total de la ligne (un demi-franc au franc supérieur) : 2 999 FCFA → 420 FCFA de commission, pas 419,86.
 - Le texte de la règle (page d'aide, inscription vendeur) : « Frais ANITCHE : 14 % du prix de l'article + 100 FCFA par article jusqu'à 3 000 FCFA (200 FCFA au-delà), TVA incluse. »
+
+## 14. Paiement : page de retour et page de simulation (dev)
+
+Contrat complet : [`MODULE_PAIEMENTS.md`](./MODULE_PAIEMENTS.md) § 4 et § 8.
+
+**Page `/paiement/retour?reference=PAY-…`** (URL de retour du fournisseur). Le fournisseur peut rouvrir un autre onglet : ne pas compter sur le `sessionStorage`.
+
+```ts
+const { results } = await api.get('/api/paiements/', { params: { reference, perimetre: 'achats' } });
+if (results.length === 0) { /* référence inconnue ou d'un autre compte : message neutre */ }
+// puis interroger GET /api/paiements/<id>/ jusqu'à statut « valide » ou « echoue »
+```
+
+La liste filtrée ne contient que les paiements du compte connecté (0 ou 1 résultat) : une référence d'un autre compte donne une liste vide, jamais une erreur. Ne jamais conclure du seul retour navigateur.
+
+**Page `/paiement/simulation/<reference>`** (développement seulement : c'est l'`url_paiement` du fournisseur simulé). Deux boutons « Payer » et « Refuser » :
+
+```ts
+await api.post(`/api/paiements/simulation/${reference}/`, { statut: 'succes' }); // ou 'echec'
+// 200 : le paiement (« valide » ou « echoue ») ; 409 : déjà réglé ; 404 : route absente ou paiement d'un autre compte
+```
+
+- Appel écrit à la main (route **hors** de `schema.yaml`), avec le jeton du payeur ; aucun secret dans le bundle.
+- La route n'existe pas en production (404) : la page de simulation ne doit être construite que pour le dev et les tests E2E.
+
+## 15. Contrats pour les portails (liens, miniatures, périmètres, administration, CORS)
+
+### 15.1 Liens de notification
+
+`lien_redirection` est une **route logique** : un chemin sans hôte ni requête, ou `""` (aucun lien). La liste est fermée (`apps/notifications/liens.py`, détail et destinataires dans [`MODULE_NOTIFICATIONS.md`](./MODULE_NOTIFICATIONS.md) § 4) :
+
+| Portail | Routes |
+|---|---|
+| Client | `/commandes`, `/commandes/{uuid}`, `/livraisons/{uuid}`, `/retours/{uuid}`, `/paiements/{uuid}`, `/fidelite/mon-compte`, `/support/tickets/{uuid}` |
+| Vendeur | `/vendeur/commandes/{uuid}`, `/vendeur/produits/{id}`, `/vendeur/retours/{uuid}`, `/vendeur/reversements`, `/support/tickets/{uuid}` |
+| Administration | `/administration/retours/{uuid}`, `/administration/remboursements`, `/administration/livraisons/{uuid}` |
+
+- Chaque portail associe ces chemins à ses pages ; **tout préfixe inconnu mène au centre de notifications**. Ne jamais naviguer vers une valeur reçue sans la résoudre, et ne jamais lire `metadata` pour naviguer (ses clés varient).
+- Le préfixe d'administration est `/administration/`, jamais `/admin/` (admin Django). Les anciennes notifications `/admin/retours/…` ont été réécrites.
+
+### 15.2 Miniatures des images produit
+
+- **Liste** (`GET /api/catalogue/produits/`) : afficher `miniature_principale` (WebP, 480 px de large au plus, quelques dizaines de Ko), avec **repli sur `image_principale`** quand elle est `null`. **Fiche et galerie** : chaque image a `miniature` (`null` si absente) à côté de `image` ; l'original sert au zoom.
+- Dimensionner la vignette d'après sa largeur d'affichage (jamais plus de 480 px utiles) ; réserver sa hauteur (rapport 4/3 ou carré) pour éviter les sauts de mise en page.
+- La liste **FastAPI** `/recherche/produits` ne renvoie pas encore `miniature_principale` : tant que la branche FastAPI ne l'a pas ajoutée, repli sur `image_principale` pour ces écrans.
+- Espace vendeur : `POST …/images/` renvoie `miniature` dans la réponse (générée pendant l'envoi). Une miniature `null` n'est pas une erreur : l'image est bien enregistrée.
+
+### 15.3 Périmètres « mes achats » et « mes tickets »
+
+Un compte n'a qu'un rôle, mais il peut acheter. Le **portail client envoie toujours** ces paramètres, quel que soit le rôle du compte :
+
+| Appel | Paramètre | Effet |
+|---|---|---|
+| `GET /api/livraison/` et `GET /api/livraison/<id>/` | `perimetre=achats` | seulement les livraisons de ses propres commandes, représentation client (un livreur ou un administrateur qui achète) |
+| `GET /api/paiements/` et `GET /api/paiements/<id>/` | `perimetre=achats` | seulement ses propres paiements, représentation client |
+| `GET /api/support/tickets/` et `GET /api/support/tickets/<id>/` | `perimetre=mes_tickets` | seulement les tickets qu'il a créés (sans les litiges de sa boutique pour un vendeur) |
+
+Le paramètre **restreint** toujours, il n'élargit jamais ; une valeur inconnue est ignorée ; un objet hors périmètre répond **404**. Les espaces vendeur, livreur et administration **n'envoient pas** ces paramètres.
+
+### 15.4 Routes d'administration (lecture seule, rôles `admin` et `super_admin`)
+
+Autres rôles et `is_staff` seul : **403** ; anonyme : **401**. Listes paginées (20) ; un filtre invalide est ignoré ; le `count` d'une liste filtrée sert de compteur de tableau de bord (il n'y a pas de route d'agrégats).
+
+| Écran | Appel | Filtres |
+|---|---|---|
+| Commandes | `GET /api/commandes/administration/` et `…/<uuid>/` | `status`, `boutique`, `client`, `numero` (début, 20 caractères), `date_min`, `date_max` (ISO 8601 ; une date seule couvre la journée) |
+| Comptes (sélecteur de livreur ou d'agent) | `GET /api/utilisateurs/administration/` | `recherche` (email, nom, prénom, téléphone), `role`, `est_actif` |
+| Produits (modération) | `GET /api/catalogue/administration/produits/` | `recherche`, `est_actif`, `boutique`, `categorie` (inactifs compris) |
+| File du support | `GET /api/support/tickets/` | `non_assigne=1`, `status` |
+| Compteurs existants | `admin/remboursements/?statut=a_traiter`, `admin/reversements/?statut=disponible`, `livraison/?contestation=ouverte`, demandes vendeur en attente | — |
+
+Représentations : la commande ajoute `client` (`id`, `email`, `nom`, `prenom`) et `boutique` (`id`, `nom`, `slug`), jamais le point GPS ; le compte ne contient que `id`, `email`, `prenom`, `nom`, `telephone`, `role`, `is_active`, `email_verifie`, `statut_kyc`, `date_creation`. Une pièce KYC s'affiche d'après le `Content-Type` de sa réponse (§ 15.5).
+
+### 15.5 En-têtes CORS et téléchargements
+
+- **En-têtes lisibles** depuis une autre origine (portails sur sous-domaines) : `Retry-After` (délai d'un 429, § 7) et `Content-Disposition` (nom d'un fichier téléchargé). Le préalable `OPTIONS` est mis en cache **un jour** (`Access-Control-Max-Age: 86400`) ; les navigateurs plafonnent cette durée à leur propre maximum.
+- **Téléchargements protégés** (pièce KYC, photo de retour, pièce jointe de support) : appel avec le jeton, réponse binaire servie avec son **vrai `Content-Type`** (`image/jpeg`, `image/png`, `image/webp`, et `application/pdf` pour les pièces KYC et les pièces jointes) et `Content-Disposition: inline; filename="<uuid>.<ext>"`. Le schéma OpenAPI décrit ces types (jamais `application/json`) : un client généré ne doit pas parser la réponse en JSON. Afficher un PDF dans un lecteur, une image dans une balise image, d'après le `Content-Type` reçu.

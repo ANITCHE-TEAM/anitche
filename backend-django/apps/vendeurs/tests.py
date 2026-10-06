@@ -2,6 +2,7 @@ import io
 import os
 import shutil
 import tempfile
+from datetime import timedelta
 from unittest import skipUnless
 from unittest.mock import patch
 
@@ -13,7 +14,8 @@ from django.test import TestCase, TransactionTestCase, override_settings
 from PIL import Image
 from rest_framework import status
 from rest_framework.test import APIClient
-from rest_framework.throttling import ScopedRateThrottle
+from rest_framework.throttling import AnonRateThrottle, ScopedRateThrottle, UserRateThrottle
+from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.utilisateurs.models import DocumentKYC, Role, StatutKYC, TypePieceIdentite, Utilisateur
 
@@ -315,6 +317,36 @@ class BoutiquePubliqueAPITests(TestCase):
 
         reponse = self.client.get(URL_BOUTIQUES_PUBLIQUES, {'recherche': 'introuvable'})
         self.assertEqual(len(reponse.data["results"]), 0)
+
+    def test_jeton_expire_ignore(self):
+        """Un vieux jeton gardé par le client ne casse pas la vitrine (pas de 401)."""
+        jeton = AccessToken.for_user(self.boutique.proprietaire)
+        jeton.set_exp(lifetime=timedelta(seconds=-1))
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {jeton}')
+        for url in (URL_BOUTIQUES_PUBLIQUES, f'{URL_BOUTIQUES_PUBLIQUES}{self.boutique.slug}/'):
+            with self.subTest(url=url):
+                self.assertEqual(self.client.get(url).status_code, status.HTTP_200_OK)
+
+    def test_limites_anon_et_user_non_appliquees(self):
+        cache.clear()
+        with patch.object(AnonRateThrottle, 'allow_request', return_value=False), \
+                patch.object(UserRateThrottle, 'allow_request', return_value=False):
+            for url in (URL_BOUTIQUES_PUBLIQUES, f'{URL_BOUTIQUES_PUBLIQUES}{self.boutique.slug}/'):
+                with self.subTest(url=url):
+                    self.assertEqual(self.client.get(url).status_code, status.HTTP_200_OK)
+
+    def test_seau_partage_avec_le_catalogue_et_les_tarifs(self):
+        """Boutiques, catalogue et grille des tarifs : une même navigation,
+        un seul seau 'catalogue_public' par IP."""
+        cache.clear()
+        urls = (
+            URL_BOUTIQUES_PUBLIQUES, f'{URL_BOUTIQUES_PUBLIQUES}{self.boutique.slug}/',
+            '/api/catalogue/produits/', '/api/livraison/tarifs/',
+        )
+        with patch.object(ScopedRateThrottle, 'THROTTLE_RATES', {'catalogue_public': '3/hour'}):
+            codes = [self.client.get(url, REMOTE_ADDR='9.9.9.9').status_code for url in urls]
+            codes.append(self.client.get(URL_BOUTIQUES_PUBLIQUES, REMOTE_ADDR='8.8.8.8').status_code)
+        self.assertEqual(codes, [200, 200, 200, 429, 200])
 
 
 class MaBoutiqueAPITests(TestCase):

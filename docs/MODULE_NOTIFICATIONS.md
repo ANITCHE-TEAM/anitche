@@ -57,13 +57,36 @@ admin.py      consultation seule
 | POST | `toutes-lues/` | `{"message", "nb_modifiees"}` |
 | GET / PATCH | `preferences/` | **`{"id", "email_actif", "date_mise_a_jour"}`** (ni `in_app_actif` ni `sms_actif`) |
 
+### Liens de redirection : routes logiques
+
+`lien_redirection` est une **route logique**, jamais une URL : un chemin sans hôte ni requête (`?…`), ou `""` quand la notification ne mène nulle part. La liste est **fermée** et définie à un seul endroit, `apps/notifications/liens.py` (une fonction par route) ; chaque portail associe ces chemins à ses propres pages. Un préfixe inconnu mène au centre de notifications. Les liens de l'administration commencent par `/administration/`, **jamais** `/admin/` (servi par Django sur la même origine : suivi tel quel, il mènerait à l'admin Django).
+
+| Route logique | Destinataire | Créée par |
+|---|---|---|
+| `/commandes` | client | paiement validé (plusieurs commandes) |
+| `/commandes/{uuid}` | client | paiement validé (une commande), annulation |
+| `/livraisons/{uuid}` | client | étape de livraison, décision sur une contestation |
+| `/retours/{uuid}` | client | statut d'un retour |
+| `/paiements/{uuid}` | client | remboursement effectué |
+| `/fidelite/mon-compte` | client | points crédités |
+| `/support/tickets/{uuid}` | client, vendeur, agent | ticket |
+| `/vendeur/commandes/{uuid}` | vendeur | commande à préparer, annulation d'une commande payée |
+| `/vendeur/produits/{id}` | vendeur | stock bas, rupture |
+| `/vendeur/retours/{uuid}` | vendeur | nouvelle demande de retour, actions du client |
+| `/vendeur/reversements` | vendeur | reversement effectué |
+| `/administration/retours/{uuid}` | administration | retour rejeté par un vendeur |
+| `/administration/remboursements` | administration | remboursement à traiter |
+| `/administration/livraisons/{uuid}` | administration | livraison contestée |
+
+Le texte d'aide du champ (donc le schéma OpenAPI) reprend cette liste. **Ajouter une route** : une fonction et une entrée dans `ROUTES` (`liens.py`), une ligne ci-dessus et la migration `AlterField` que `makemigrations` réclame (texte d'aide, sans SQL). Les clés de `metadata` ne font pas partie du contrat de navigation (elles varient selon la notification : `commande_id` ou `commande`, `remboursement`, `reversement`, `retour_id`…) : ne naviguer que par `lien_redirection`.
+
 Représentation : `id`, `titre`, `message`, `type_notification(_display)`, `canal(_display)`, `est_lu`, `date_lecture`, `lien_redirection`, `metadata`, `date_creation`. Aucune donnée sensible : montants, numéros de commande, de retour ou de ticket ; jamais d'email, de téléphone ni de code (le code de livraison n'est que dans l'email dédié au client et dans le suivi de livraison).
 
 ## 5. Impact frontend
 
 1. **Préférences** : ne proposer que « Recevoir les emails » (`email_actif`). `in_app_actif` et `sms_actif` disparaissent de la réponse (envoyés, ils sont ignorés).
 2. **Nouveaux types à afficher** : `stock` (vendeur : stock bas, rupture ; `metadata.variante_id`, `quantite_disponible`, `seuil_alerte`), annulations de commande (`type: commande`), retours, points crédités (`systeme`), support.
-3. **Paiement de plusieurs commandes** : `lien_redirection` vaut `/commandes` (jamais `/commandes/` avec un identifiant vide).
+3. **Liens** : résoudre `lien_redirection` avec la liste fermée du § 4 (aucun hôte, aucune requête ; vide = pas de lien ; préfixe inconnu = centre de notifications). Paiement de plusieurs commandes : `/commandes` (jamais `/commandes/` avec un identifiant vide). Les liens de l'administration sont `/administration/…` : les anciennes notifications `/admin/retours/{uuid}` ont été réécrites par la migration 0003. Remboursement à traiter, reversement effectué, remboursement effectué, contestation (alerte et décision) portent désormais un lien.
 4. **Délai des emails** : ils arrivent quelques secondes après l'action (worker Celery), plus pendant la requête ; aucun effet sur les temps de réponse.
 5. **Administration** : les alertes n'arrivent pas par email ; prévoir un badge sur le compteur de notifications du back-office.
 
@@ -93,12 +116,13 @@ Chaque risque a son test permanent dans `apps/notifications/tests.py`.
 ## 8. Migrations
 
 - **notifications 0002** : suppression de `in_app_actif` et `sms_actif` ; index `notif_destinataire_date`.
+- **notifications 0003** (données) : `AlterField` du texte d'aide de `lien_redirection` (aucun SQL), puis un seul `UPDATE` : les liens commençant par `/admin/` passent à `/administration/` (le reste du chemin est conservé, valeur bornée à 255 caractères). Rejouable sans effet. Retour arrière : le préfixe `/administration/` redevient `/admin/` (y compris pour les liens créés après la migration, qui n'avaient pas d'équivalent).
 
 En dev : `docker exec anitche-backend python manage.py migrate`, puis **redémarrer le worker Celery** (nouvelle tâche `envoyer_email_notification`).
 
 ## 9. Tests
 
-`apps/notifications/tests.py` (PostgreSQL) : API historique (préférences adaptées), signaux, puis un test par faille (§ 6), dont l'alerte de stock et l'annulation par le vrai checkout (`DonneesCycleDeVie` des tests commandes).
+`apps/notifications/tests.py` (PostgreSQL) : API historique (préférences adaptées), signaux, puis un test par faille (§ 6), dont l'alerte de stock et l'annulation par le vrai checkout (`DonneesCycleDeVie` des tests commandes). Routes logiques : `LiensTests` (chaque fonction de `liens.py` produit un chemin conforme à un gabarit de `ROUTES`, sans `?`, sans `//`, jamais `/admin/` ; chaque gabarit est produit par une fonction ; le texte d'aide les liste toutes) et `MigrationLiensAdministrationTests` (aller, rejeu, retour). Les liens produits par les autres modules sont vérifiés dans leurs tests (`retours`, `paiements`, `livraison`).
 
 Postman : `postman_notifications.json` (hors dépôt, nouvelle). **Aucun compte administrateur nécessaire.** Parcours : commande payée → notification client (sans donnée sensible) et **email lu dans Mailpit** → notification vendeur → compteur, filtres → IDOR (404, absente de la liste d'un autre) → lire, tout lire → préférences (email seul) → commande annulée : notification in-app, **aucun email** (préférence respectée), vendeur non prévenu (impayée) → stock mis à 6 (seuil 5), une vente → **alerte « stock bas »** au vendeur.
 

@@ -33,6 +33,9 @@ Logique métier : `apps/panier/services.py` (`get_panier_existant`, `get_or_crea
 
 Tous en `AllowAny` : le panier courant est déterminé par le JWT (utilisateur connecté) ou, à défaut, par le cookie de session (visiteur anonyme). On n'accède jamais au panier d'un autre : une ligne d'un autre panier renvoie **404**.
 
+- **Authentification stricte** : contrairement aux routes publiques du catalogue (`JWTAuthentificationOptionnelle`), un jeton expiré ou révoqué donne **401** sur le panier. Traité comme anonyme, il ferait voir au client le panier de sa session au lieu du sien ; le 401 déclenche le rafraîchissement côté client.
+- **Limite de débit** : seau `panier` seul (`ScopedRateThrottle`, **600/heure**), commun aux trois vues (lecture et écriture), compté par IP pour un visiteur et par compte pour un client connecté. Les limites génériques `anon` (50/heure par IP, partagée derrière un CGNAT) et `user` ne s'appliquent pas. Au-delà : **429**. Le taux est une hypothèse à confirmer au test de charge ; il est moins large que `catalogue_public` (1 200/heure) parce qu'un ajout sans panier existant crée une ligne en base.
+
 | Méthode | URL | Description |
 |---|---|---|
 | GET | `panier/` | Panier courant avec ses lignes, `total`, `nombre_articles`. Sans panier existant : panier vide avec `id: null` (rien n'est créé en base) |
@@ -85,12 +88,12 @@ Contrôle en modification de quantité : une **baisse** est toujours autorisée,
 
 ## 8. Dette connue
 
-- **Nettoyage des paniers abandonnés** (niveau 2 — production) : les paniers anonymes, et les paniers orphelins d'un compte supprimé (`utilisateur` passe à NULL), ne sont jamais purgés. À traiter par une tâche périodique (Celery beat) quand le volume le justifiera.
+- **Nettoyage des paniers abandonnés** (niveau 2 — production) : les paniers anonymes, et les paniers orphelins d'un compte supprimé (`utilisateur` passe à NULL), ne sont jamais purgés. À traiter par une tâche périodique (Celery beat) quand le volume le justifiera. Avec la limite `panier` (600/heure par IP), un robot peut créer jusqu'à 600 paniers anonymes par heure et par IP : la purge (par `updated_at`) en borne le stock.
 - Le message « Stock insuffisant » indique la quantité disponible exacte (comportement existant, conservé).
 
 ## 9. Tests
 
-- `backend-django/apps/panier/tests.py` — 30 tests : création paresseuse du panier, isolation entre paniers, ajout et incrément, refus d'un article indisponible (4 cas), ligne devenue indisponible (marquage, total, baisse/suppression/hausse, retour à la normale), quantités (0, négative, > stock, baisse toujours permise / hausse contrôlée, contrainte en base), variante figée, `session_key` non exposée, contraintes d'unicité, nombre de requêtes constant (`panier/` et `panier/items/`), panier vide `id: null`, stock non détaillé, concurrence (8 premiers ajouts simultanés → un panier, une ligne, aucun 500).
+- `backend-django/apps/panier/tests.py` — 33 tests : limite `panier` (ni `anon` ni `user`, seau commun aux trois vues, seau propre à chaque compte, taux de production), création paresseuse du panier, isolation entre paniers, ajout et incrément, refus d'un article indisponible (4 cas), ligne devenue indisponible (marquage, total, baisse/suppression/hausse, retour à la normale), quantités (0, négative, > stock, baisse toujours permise / hausse contrôlée, contrainte en base), variante figée, `session_key` non exposée, contraintes d'unicité, nombre de requêtes constant (`panier/` et `panier/items/`), panier vide `id: null`, stock non détaillé, concurrence (8 premiers ajouts simultanés → un panier, une ligne, aucun 500).
 - `backend-django/apps/commandes/tests.py` : `test_articles_indisponibles_tous_listes_et_validation_refusee`.
 
 ⚠️ **Toujours lancer les tests sur PostgreSQL.** Sans `DJANGO_SETTINGS_MODULE`, `manage.py test` bascule sur SQLite et `PanierConcurrenceTestCase` est **sauté silencieusement**.

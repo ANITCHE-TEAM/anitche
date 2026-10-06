@@ -1,5 +1,6 @@
 import importlib
 import threading
+from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest import mock, skipUnless
@@ -13,6 +14,7 @@ from django.urls import reverse
 from rest_framework.test import APIClient, APITestCase
 from rest_framework import status
 from rest_framework.throttling import SimpleRateThrottle
+from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.utilisateurs.models import Utilisateur, Role, StatutKYC
 from apps.vendeurs.models import Boutique
@@ -744,6 +746,22 @@ class PasseportVerificationPubliqueTestCase(BasePasseportTestCase):
         # scan (et leur savepoint) et relecture du compteur.
         with self.assertNumQueries(6):
             self.verifier()
+
+    def test_jeton_refuse_ignore(self):
+        """Un vieux jeton gardé par le client (expiré, ou révoqué par un
+        changement de mot de passe) ne casse pas le scan : 200, comme un
+        visiteur anonyme."""
+        expire = AccessToken.for_user(self.vendeur2)
+        expire.set_exp(lifetime=timedelta(seconds=-1))
+        revoque = AccessToken.for_user(self.vendeur2)
+        self.vendeur2.set_password("NouveauMotDePasse456!")
+        self.vendeur2.save(update_fields=["password"])
+        for libelle, jeton in (("expiré", expire), ("révoqué", revoque)):
+            with self.subTest(libelle):
+                self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {jeton}")
+                response = self.verifier()
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertEqual(response.data["statut_passeport"], "valide")
 
 
 class PasseportScanTestCase(BasePasseportTestCase):

@@ -16,6 +16,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
+from apps.core.authentification import JWTAuthentificationOptionnelle
 from apps.core.exceptions import ErreurMetier
 from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 
@@ -62,7 +63,12 @@ class BoutiquePubliqueListView(generics.ListAPIView):
     """Liste des boutiques ouvertes tenues par un vendeur validé."""
 
     serializer_class = BoutiquePubliqueSerializer
+    # Un jeton refusé (expiré, révoqué) est ignoré : la vitrine reste publique.
+    authentication_classes = [JWTAuthentificationOptionnelle]
     permission_classes = [AllowAny]
+    # Même seau que le catalogue (même navigation), sans la limite 'anon'.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'catalogue_public'
 
     def get_queryset(self):
         queryset = Boutique.objects.publiques().select_related('proprietaire')
@@ -82,7 +88,10 @@ class BoutiquePubliqueDetailView(generics.RetrieveAPIView):
     """Fiche publique d'une boutique, adressée par son slug."""
 
     serializer_class = BoutiquePubliqueSerializer
+    authentication_classes = [JWTAuthentificationOptionnelle]
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'catalogue_public'
     lookup_field = 'slug'
 
     def get_queryset(self):

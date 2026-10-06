@@ -16,6 +16,7 @@ import os
 from django.db import models, transaction
 
 from apps.notifications.models import Notification
+from apps.notifications import liens
 from apps.notifications.services import ServiceNotification
 from apps.utilisateurs.models import Role, Utilisateur
 from apps.vendeurs.permissions import ROLES_ADMINISTRATION
@@ -219,7 +220,7 @@ def notify_new_ticket(ticket):
         Notification(destinataire=agent, titre=f"Nouveau ticket {ticket.ticket_number}",
                      message=f"{ticket.get_category_display()} : {ticket.subject[:150]}",
                      type_notification=Notification.TypeNotification.SUPPORT,
-                     lien_redirection=f"/support/tickets/{ticket.pk}", metadata={"ticket_id": str(ticket.pk)})
+                     lien_redirection=liens.lien_ticket(ticket), metadata={"ticket_id": str(ticket.pk)})
         for agent in agents
     ])
 
@@ -228,7 +229,7 @@ def _notify_customer(ticket, message):
     ServiceNotification.notifier_utilisateur(
         ticket.created_by, titre=f"Ticket {ticket.ticket_number}", message=message,
         type_notification=Notification.TypeNotification.SUPPORT,
-        lien_redirection=f"/support/tickets/{ticket.pk}", metadata={"ticket_id": str(ticket.pk)},
+        lien_redirection=liens.lien_ticket(ticket), metadata={"ticket_id": str(ticket.pk)},
     )
 
 
@@ -239,5 +240,5 @@ def _notify_staff(ticket, message):
         ServiceNotification.notifier_utilisateur(
             ticket.assigned_to, titre=f"Ticket {ticket.ticket_number}", message=message,
             type_notification=Notification.TypeNotification.SUPPORT, email=False,
-            lien_redirection=f"/support/tickets/{ticket.pk}", metadata={"ticket_id": str(ticket.pk)},
+            lien_redirection=liens.lien_ticket(ticket), metadata={"ticket_id": str(ticket.pk)},
         )

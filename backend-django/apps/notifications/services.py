@@ -10,6 +10,7 @@ import logging
 from django.db import transaction
 from django.utils import timezone
 
+from . import liens
 from .models import Notification, PreferenceNotification
 
 logger = logging.getLogger(__name__)
@@ -106,7 +107,7 @@ def alerter_stock_bas(stock, avant, apres):
                if rupture else f"{apres} unité(s) restante(s) (seuil d'alerte : {seuil}).")
         ),
         type_notification=Type.STOCK,
-        lien_redirection=f"/vendeur/produits/{produit.pk}",
+        lien_redirection=liens.lien_produit_vendeur(produit),
         metadata={"variante_id": str(variante.pk), "quantite_disponible": apres, "seuil_alerte": seuil},
     )
 
@@ -124,7 +125,7 @@ def notifier_annulation_commande(commande, etait_payee):
             + (" Le remboursement de votre paiement est en cours de traitement." if etait_payee else "")
         ),
         type_notification=Type.COMMANDE,
-        lien_redirection=f"/commandes/{commande.pk}",
+        lien_redirection=liens.lien_commande_client(commande),
         metadata={"commande_id": str(commande.pk), "motif": commande.motif_annulation},
     )
     if etait_payee:
@@ -133,6 +134,6 @@ def notifier_annulation_commande(commande, etait_payee):
             titre=f"Commande {commande.numero_commande} annulée",
             message=f"La commande {commande.numero_commande} a été annulée ({motif}) : ne la préparez pas ou plus.",
             type_notification=Type.COMMANDE,
-            lien_redirection=f"/vendeur/commandes/{commande.pk}",
+            lien_redirection=liens.lien_commande_vendeur(commande),
             metadata={"commande_id": str(commande.pk), "motif": commande.motif_annulation},
         )

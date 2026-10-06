@@ -297,6 +297,7 @@ def _liberer_ajustements(reversement):
 
 
 def _notifier_vendeur(reversement):
+    from apps.notifications import liens
     from apps.notifications.models import Notification
     from apps.notifications.services import ServiceNotification
 
@@ -308,6 +309,7 @@ def _notifier_vendeur(reversement):
             f"{reversement.commande.numero_commande} ({reversement.reference})."
         ),
         type_notification=Notification.TypeNotification.PAIEMENT,
+        lien_redirection=liens.lien_reversements_vendeur(),
         metadata={"reversement": str(reversement.pk)},
     )
 

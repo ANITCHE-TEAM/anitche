@@ -197,6 +197,7 @@ def crediter_gains_echus(maintenant=None):
 
 
 def _notifier_credit(gain):
+    from apps.notifications import liens
     from apps.notifications.models import Notification
     from apps.notifications.services import ServiceNotification
 
@@ -206,7 +207,7 @@ def _notifier_credit(gain):
             titre="Points de fidélité crédités",
             message=f"{gain.points} points de la commande {gain.commande.numero_commande} sont maintenant disponibles.",
             type_notification=Notification.TypeNotification.SYSTEME,
-            lien_redirection="/fidelite/mon-compte",
+            lien_redirection=liens.lien_fidelite_client(),
             metadata={"points": gain.points, "commande": str(gain.commande_id)},
         )
     except Exception:

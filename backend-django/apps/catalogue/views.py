@@ -11,7 +11,9 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.throttling import ScopedRateThrottle
 from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 
+from apps.core.authentification import JWTAuthentificationOptionnelle
 from apps.vendeurs.permissions import BoutiqueDuVendeurNonSuspendue, EstAdministrateur, EstVendeurValide
+from .images import generer_miniature
 from .models import MAX_IMAGES_PAR_PRODUIT, Categorie, Produit, VarianteProduit, ImageProduit, Stock
 from .permissions import (
     EstProprietaireDuProduit,
@@ -49,8 +51,11 @@ class VuePubliqueCatalogueMixin:
     """Limite dédiée, par IP pour un visiteur : parcourir le catalogue
     enchaîne beaucoup de requêtes, et derrière le CGNAT des opérateurs
     mobiles de nombreux clients partagent une IP publique. Le taux 'anon'
-    global (partagé avec toute l'API) serait épuisé en quelques minutes."""
+    global (partagé avec toute l'API) serait épuisé en quelques minutes.
 
+    Un jeton refusé (expiré, révoqué) est ignoré : la page reste publique."""
+
+    authentication_classes = [JWTAuthentificationOptionnelle]
     permission_classes = [AllowAny]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'catalogue_public'
@@ -303,7 +308,10 @@ class ImageProduitListCreateView(generics.ListCreateAPIView):
                     'image': f"Un produit ne peut pas avoir plus de {MAX_IMAGES_PAR_PRODUIT} images. "
                              "Supprimez-en une avant d'en ajouter une autre."
                 })
-            serializer.save(produit=produit)
+            image = serializer.save(produit=produit)
+        # Après le verrou : la génération (quelques centaines de ms pour 5 Mo)
+        # ne bloque pas les autres envois. Un échec laisse `miniature` vide.
+        generer_miniature(image)
 
 
 class ImageProduitDeleteView(generics.DestroyAPIView):
@@ -320,6 +328,37 @@ class ImageProduitDeleteView(generics.DestroyAPIView):
 # =====================================================================
 # ADMINISTRATION (MODÉRATION)
 # =====================================================================
+
+@extend_schema(
+    summary="Tous les produits (administration)",
+    description="Produits inactifs compris. Filtres combinables ; une valeur invalide est ignorée.",
+    parameters=[
+        OpenApiParameter("recherche", str, description="Partie du nom du produit ou de la boutique (100 caractères au plus)."),
+        OpenApiParameter("est_actif", bool, description="`true` ou `false`."),
+        OpenApiParameter("boutique", int, description="Identifiant de la boutique."),
+        OpenApiParameter("categorie", int, description="Identifiant de la catégorie."),
+    ],
+)
+class ProduitAdministrationListView(generics.ListAPIView):
+    """Modération : retrouver un produit, actif ou non."""
+    permission_classes = [IsAuthenticated, EstAdministrateur]
+    serializer_class = ProduitAdministrationSerializer
+
+    def get_queryset(self):
+        parametres = self.request.query_params
+        queryset = Produit.objects.select_related('boutique').order_by('-date_creation', '-id')
+        recherche = parametres.get('recherche', '')[:100].strip()
+        if recherche:
+            queryset = queryset.filter(Q(nom__icontains=recherche) | Q(boutique__nom__icontains=recherche))
+        est_actif = parametres.get('est_actif')
+        if est_actif in ('true', 'false'):
+            queryset = queryset.filter(est_actif=est_actif == 'true')
+        for parametre, champ in (('boutique', 'boutique_id'), ('categorie', 'categorie_id')):
+            valeur = parametres.get(parametre, '')
+            if valeur.isdigit():
+                queryset = queryset.filter(**{champ: int(valeur)})
+        return queryset
+
 
 class ProduitAdministrationDetailView(generics.RetrieveUpdateAPIView):
     """Modération d'un produit : désactivation / réactivation uniquement."""

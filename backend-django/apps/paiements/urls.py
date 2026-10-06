@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.urls import path
 
 from . import views
@@ -29,3 +30,10 @@ urlpatterns = [
     path("admin/baremes/", views.BaremeFraisListCreateView.as_view(), name="admin-baremes"),
     path("admin/baremes/<uuid:pk>/", views.BaremeFraisDetailView.as_view(), name="admin-bareme-detail"),
 ]
+
+# Aide de développement (paiement simulé confirmé par le payeur) : jamais
+# montée en production (PAIEMENT_SIMULATION_API_ACTIVE figé à False dans prod.py).
+if settings.PAIEMENT_SIMULATION_API_ACTIVE:
+    urlpatterns.append(
+        path("simulation/<str:reference>/", views.SimulationPaiementView.as_view(), name="paiement-simulation"),
+    )

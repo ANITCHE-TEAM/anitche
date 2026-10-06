@@ -9,6 +9,9 @@ INSTALLED_APPS = [*INSTALLED_APPS, 'apps.demo']
 
 # Documentation d'API (/api/schema/, /api/docs/, /api/redoc/) : libre en dev.
 DOCUMENTATION_API_ACTIVE = True
+
+# POST /api/paiements/simulation/<reference>/ (page de paiement simulé du portail).
+PAIEMENT_SIMULATION_API_ACTIVE = True
 ALLOWED_HOSTS = ['localhost', '127.0.0.1', 'anitche-backend']
 
 # Autorisé uniquement en dev : pas de CORS_ALLOW_CREDENTIALS, donc pas

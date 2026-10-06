@@ -10,10 +10,11 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.core.exceptions import ErreurMetier
-from drf_spectacular.utils import extend_schema, extend_schema_view, inline_serializer
+from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view, inline_serializer
 from rest_framework import serializers
 
-from config.schema import FICHIER, erreurs
+from apps.vendeurs.permissions import ROLES_ADMINISTRATION
+from config.schema import FICHIER_DOCUMENT, erreurs
 
 from . import services
 from .models import SupportTicket, TicketAttachment, TicketMessage
@@ -40,8 +41,43 @@ class ScopedOnPostMixin:
 
 # ---------- SupportTicket ----------
 
+#: ?perimetre=mes_tickets : les tickets créés par le compte, quel que soit son
+#: rôle (portail client d'un vendeur, sans les litiges de sa boutique).
+PERIMETRE_MES_TICKETS = "mes_tickets"
+
+PARAMETRE_PERIMETRE = OpenApiParameter(
+    "perimetre", enum=[PERIMETRE_MES_TICKETS],
+    description=(
+        "`mes_tickets` : seulement les tickets créés par ce compte, quel que soit le rôle (le portail client "
+        "l'envoie toujours). Valeur inconnue : ignorée."
+    ),
+)
+
+
+def tickets_du_perimetre(request):
+    """Tickets visibles, restreints à ceux créés par le compte si
+    `?perimetre=mes_tickets` (ne restreint que l'ensemble déjà autorisé)."""
+    queryset = get_visible_tickets(request.user)
+    if request.query_params.get("perimetre") == PERIMETRE_MES_TICKETS:
+        queryset = queryset.filter(created_by=request.user)
+    return queryset
+
+
 @extend_schema_view(
-    get=extend_schema(summary="Tickets visibles par ce compte"),
+    get=extend_schema(
+        summary="Tickets visibles par ce compte",
+        parameters=[
+            PARAMETRE_PERIMETRE,
+            OpenApiParameter(
+                "non_assigne", bool,
+                description="Administration seulement : `1` ou `true` pour la file des tickets sans agent. Ignoré pour les autres rôles.",
+            ),
+            OpenApiParameter(
+                "status", enum=[valeur for valeur, _ in SupportTicket.Status.choices],
+                description="Administration seulement. Ignoré pour les autres rôles.",
+            ),
+        ],
+    ),
     post=extend_schema(summary="Ouvrir un ticket"),
 )
 class SupportTicketListCreateView(ScopedOnPostMixin, generics.ListCreateAPIView):
@@ -50,7 +86,17 @@ class SupportTicketListCreateView(ScopedOnPostMixin, generics.ListCreateAPIView)
     post_throttle_scope = "support_ticket"
 
     def get_queryset(self):
-        return get_visible_tickets(self.request.user)
+        queryset = tickets_du_perimetre(self.request)
+        if self.request.user.role in ROLES_ADMINISTRATION:
+            # Tableau de bord : file d'attente et tickets par statut (le
+            # `count` de la liste filtrée sert de compteur).
+            parametres = self.request.query_params
+            if parametres.get("non_assigne") in ("1", "true"):
+                queryset = queryset.filter(assigned_to__isnull=True)
+            statut = parametres.get("status")
+            if statut in SupportTicket.Status.values:
+                queryset = queryset.filter(status=statut)
+        return queryset
 
     def perform_create(self, serializer):
         order = serializer.validated_data.get("order")
@@ -68,7 +114,7 @@ class SupportTicketListCreateView(ScopedOnPostMixin, generics.ListCreateAPIView)
 
 
 @extend_schema_view(
-    get=extend_schema(summary="Détail d'un ticket"),
+    get=extend_schema(summary="Détail d'un ticket", parameters=[PARAMETRE_PERIMETRE]),
     put=extend_schema(
         summary="Reclasser un ticket (équipe support)",
         responses={200: SupportTicketSerializer, **erreurs(403)},
@@ -87,7 +133,7 @@ class SupportRetrieveUpdateView(generics.RetrieveUpdateAPIView):
     serializer_class = SupportTicketSerializer
 
     def get_queryset(self):
-        return get_visible_tickets(self.request.user)
+        return tickets_du_perimetre(self.request)
 
     def perform_update(self, serializer):
         """La visibilité autorise à VOIR ce ticket, pas à le MODIFIER."""
@@ -268,7 +314,7 @@ class TicketAttachmentListCreateView(ScopedOnPostMixin, generics.ListCreateAPIVi
 
 @extend_schema(
     summary="Télécharger une pièce jointe",
-    responses={200: FICHIER},
+    responses=FICHIER_DOCUMENT,
 )
 class TicketAttachmentDownloadView(APIView):
     """Fichier servi par Django après contrôle d'accès (mêmes règles que le
