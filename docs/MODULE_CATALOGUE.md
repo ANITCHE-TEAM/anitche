@@ -75,6 +75,7 @@ FastAPI (recherche, listes publiques) ne lit pas les tables du catalogue : il li
 - **Prix affiché, filtré et trié** = plus petit prix effectif (promo comprise) des **variantes actives** (`prix_min` dans la liste). Une variante inactive n'influence ni filtre ni tri.
 - **Stock public** : `variantes[].stock` vaut uniquement `{"est_en_stock": bool}`. Ni `quantite_disponible` ni `seuil_alerte` (données internes du vendeur, exploitables par un concurrent). Même règle que le panier.
 - Liste : `en_stock` = au moins une variante active en stock.
+- **En-tête `Authorization` facultatif** (`JWTAuthentificationOptionnelle`, `apps/core/authentification.py`) : un jeton valide identifie le compte (limite comptée par compte) ; un jeton expiré, révoqué, malformé ou à signature fausse est **ignoré** et la requête est traitée comme celle d'un visiteur (jamais 401). La signature est toujours vérifiée : un jeton forgé n'authentifie personne. La réponse ne dépend pas de l'identité.
 
 ### Espace vendeur (`IsAuthenticated` + `EstVendeurValide` + `BoutiqueDuVendeurNonSuspendue` + propriétaire)
 
@@ -149,6 +150,8 @@ Règle : **DELETE = désactivation** (204). En filet de sécurité pour le Djang
 
 `catalogue_public` : **1200/heure par IP** pour un visiteur (par compte s'il est connecté), sur toutes les routes publiques du catalogue. Avec le taux `anon` (50/heure) partagé avec toute l'API, quelques minutes de navigation suffiraient à l'épuiser, surtout derrière le CGNAT des opérateurs mobiles, où beaucoup de clients partagent une IP publique. L'identifiant du visiteur passe par `REST_FRAMEWORK['NUM_PROXIES']` : changer `X-Forwarded-For` ne contourne pas la limite (testé).
 
+Le seau est **partagé** avec les boutiques publiques (`/api/vendeurs/boutiques/`, liste et fiche) et la grille des tarifs de livraison (`/api/livraison/tarifs/`) : c'est une même navigation. Aucune de ces routes ne consomme `anon` ni `user` (`throttle_classes = [ScopedRateThrottle]`, testé). Deux comptes connectés derrière la même IP ont chacun leur seau ; un jeton refusé compte par IP, comme un visiteur (testé).
+
 ## 9. Dette connue
 
 - **Niveau 2 — ajustement relatif du stock** : ajouter un endpoint de réassort (`+N` / `−N`, UPDATE `F()`), pour qu'un vendeur n'écrase jamais une vente avec une valeur absolue lue avant elle. Le verrou actuel ordonne les écritures mais ne change pas la sémantique « valeur absolue ».
@@ -173,7 +176,8 @@ Règle : **DELETE = désactivation** (204). En filet de sécurité pour le Djang
 | Sous-catégories inactives | Masquées |
 | Filtres et tri de prix | Prix effectif minimum des variantes actives |
 | `categorie=<nombre>` | id **ou** slug |
-| Limite publique | `catalogue_public` 1200/h (pas le taux `anon` partagé) |
+| Limite publique | `catalogue_public` 1200/h (pas le taux `anon` partagé), seau commun avec les boutiques publiques et les tarifs |
+| Jeton expiré ou révoqué | Ignoré sur les routes publiques : 200 comme un visiteur, jamais 401 |
 
 Collections Postman : `postman_paiements.json` et `postman_0_setup_vendeur.json` lisent `v.stock.est_en_stock` sur la fiche publique.
 
@@ -189,7 +193,7 @@ DJANGO_SETTINGS_MODULE=config.settings.ci DB_NAME=anitche_test DB_USER=postgres 
 
 Vérifier dans la sortie `-v 2` que tout est `ok` et rien `skipped`. Les tests d'images écrivent dans un `MEDIA_ROOT` temporaire (supprimé en fin de classe), jamais dans `media/`.
 
-Couverture (`apps/catalogue/tests.py`, classes `Catalogue*Tests`) : suspension (9 écritures), isolation (12 routes, `is_staff`, administration), variante non déplaçable, stock public, visibilité (produit sans variante active, variante inactive, sous-catégories, prix effectif, slug numérique), désactivation au lieu de suppression (commandes, paniers, passeports, tickets, PROTECT en base), modération (12 cas), prix (règles API et contraintes en base), stock (mise à jour concurrente, négatif), images (10 max, contenu falsifié, 5 Mo), N+1 (nombre de requêtes constant), limite de débit.
+Couverture (`apps/catalogue/tests.py`, classes `Catalogue*Tests`) : suspension (9 écritures), isolation (12 routes, `is_staff`, administration), variante non déplaçable, stock public, visibilité (produit sans variante active, variante inactive, sous-catégories, prix effectif, slug numérique), désactivation au lieu de suppression (commandes, paniers, passeports, tickets, PROTECT en base), modération (12 cas), prix (règles API et contraintes en base), stock (mise à jour concurrente, négatif), images (10 max, contenu falsifié, 5 Mo), N+1 (nombre de requêtes constant), limite de débit (par IP, par compte avec un jeton valide), jeton expiré ignoré sur les quatre routes publiques.
 
 Vues SQL (`CatalogueVuesPubliquesTests`) : pour chaque cas de visibilité (produit désactivé par le vendeur ou par l'administration, boutique suspendue ou fermée, vendeur KYC en attente ou refusé, redevenu client ou inactif, variantes toutes inactives, sans variante, rupture de stock, promotion, catégorie inactive ou absente, image principale), les produits de `catalogue_produit_public` = `visibles_publiquement()` et la liste publique Django, avec les mêmes prix affichés, `en_stock`, image et champs de liste ; boutiques et catégories publiques identiques ; colonnes exposées = liste autorisée, aucune colonne sensible. Sous SQLite (`config.settings.test`), les vues ne sont pas créées et ces tests sont ignorés : d'où la règle « toujours PostgreSQL ».
 

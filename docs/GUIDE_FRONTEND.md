@@ -109,7 +109,19 @@ Les listes sont paginées par défaut :
 
 Au-delà d'une limite, l'API répond **429** au format commun ; l'en-tête **`Retry-After`** donne le nombre de secondes à attendre. Afficher un message (« Trop de tentatives, réessayez dans N minutes ») et désactiver le bouton, sans relancer automatiquement.
 
-Limites les plus visibles côté interface (production) : connexion 10/h, envoi de code OTP 5/h, inscription 10/h par IP, validation du panier 20/h, paiements 20/h, conversion de points 20/h, vérification de coupon 30/h. La liste complète est dans `REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']` (`config/settings/base.py`). En dev, certaines sont relevées pour Postman (`config/settings/dev.py`) : ne pas en déduire le comportement de production.
+Limites les plus visibles côté interface (production) : connexion 10/h, envoi de code OTP 5/h, inscription 10/h par IP, validation du panier 20/h, paiements 20/h, conversion de points 20/h, vérification de coupon 30/h.
+
+Navigation et panier (par IP pour un visiteur, par compte pour un client connecté ; la limite générique `anon` de 50/h par IP ne s'y applique pas, pour ne pas bloquer les visiteurs qui partagent une IP derrière le CGNAT d'un opérateur mobile) :
+
+| Seau | Taux | Routes |
+|---|---|---|
+| `catalogue_public` | 1 200/h, **un seul seau** pour toutes ces routes | catégories, produits, boutiques publiques (liste, fiche), grille des tarifs de livraison |
+| `panier` | 600/h, un seul seau pour lecture et écriture | `/api/panier/panier/`, `/api/panier/panier/items/` et `/api/panier/panier/items/<id>/`, toutes méthodes |
+| `passeport_verification` | 600/h | `GET /api/passeports/verifier/{code}/` |
+
+Côté client : lire le panier une fois par page au plus (cache de requête), pas à chaque rendu.
+
+La liste complète est dans `REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']` (`config/settings/base.py`). En dev, certaines sont relevées pour Postman (`config/settings/dev.py`) : ne pas en déduire le comportement de production.
 
 ## 8. Conventions de données
 
@@ -155,7 +167,7 @@ Chaque module documente les changements de contrat à intégrer côté interface
 |---|---|
 | Utilisateurs | [`MODULE_UTILISATEURS.md` § 11](./MODULE_UTILISATEURS.md#11-impact-frontend) |
 | Commandes | [`MODULE_COMMANDES.md` § 9](./MODULE_COMMANDES.md#9-impact-frontend) |
-| Paiements | [`MODULE_PAIEMENTS.md` § 10](./MODULE_PAIEMENTS.md#10-impact-frontend) |
+| Paiements | [`MODULE_PAIEMENTS.md` § 10](./MODULE_PAIEMENTS.md#10-impact-frontend) et § 14 ci-dessous (page de retour, simulation) |
 | Livraison | [`MODULE_LIVRAISON.md` § 10](./MODULE_LIVRAISON.md#10-impact-frontend) |
 | Suivi GPS (FastAPI) | § 12 ci-dessous et [`MODULE_SUIVI_GPS.md`](./MODULE_SUIVI_GPS.md) |
 | Recherche (FastAPI) | § 12 ci-dessous et [`MODULE_RECHERCHE.md`](./MODULE_RECHERCHE.md) |
@@ -494,3 +506,27 @@ Ce que voit le vendeur (`GET /api/paiements/vendeur/reversements/`) : les frais 
 - **Ne jamais recalculer les frais côté interface** : afficher ceux de l'API. Une commande passée avant le 28/09/2026 garde `"12.00"` et `200` ; une boutique peut avoir une offre propre (autre taux, autre frais fixe), prioritaire sur la règle de la plateforme.
 - La commission est arrondie au franc sur le total de la ligne (un demi-franc au franc supérieur) : 2 999 FCFA → 420 FCFA de commission, pas 419,86.
 - Le texte de la règle (page d'aide, inscription vendeur) : « Frais ANITCHE : 14 % du prix de l'article + 100 FCFA par article jusqu'à 3 000 FCFA (200 FCFA au-delà), TVA incluse. »
+
+## 14. Paiement : page de retour et page de simulation (dev)
+
+Contrat complet : [`MODULE_PAIEMENTS.md`](./MODULE_PAIEMENTS.md) § 4 et § 8.
+
+**Page `/paiement/retour?reference=PAY-…`** (URL de retour du fournisseur). Le fournisseur peut rouvrir un autre onglet : ne pas compter sur le `sessionStorage`.
+
+```ts
+const { results } = await api.get('/api/paiements/', { params: { reference } });
+if (results.length === 0) { /* référence inconnue ou d'un autre compte : message neutre */ }
+// puis interroger GET /api/paiements/<id>/ jusqu'à statut « valide » ou « echoue »
+```
+
+La liste filtrée ne contient que les paiements du compte connecté (0 ou 1 résultat) : une référence d'un autre compte donne une liste vide, jamais une erreur. Ne jamais conclure du seul retour navigateur.
+
+**Page `/paiement/simulation/<reference>`** (développement seulement : c'est l'`url_paiement` du fournisseur simulé). Deux boutons « Payer » et « Refuser » :
+
+```ts
+await api.post(`/api/paiements/simulation/${reference}/`, { statut: 'succes' }); // ou 'echec'
+// 200 : le paiement (« valide » ou « echoue ») ; 409 : déjà réglé ; 404 : route absente ou paiement d'un autre compte
+```
+
+- Appel écrit à la main (route **hors** de `schema.yaml`), avec le jeton du payeur ; aucun secret dans le bundle.
+- La route n'existe pas en production (404) : la page de simulation ne doit être construite que pour le dev et les tests E2E.
