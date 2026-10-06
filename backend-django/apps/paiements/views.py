@@ -101,6 +101,15 @@ class InitierPaiementView(APIView):
 @extend_schema(
     summary="Mes paiements (tous pour l'administration)",
     description="Représentation PaiementAdmin pour l'administration, Paiement sinon.",
+    parameters=[
+        OpenApiParameter(
+            "reference", str,
+            description=(
+                "Référence exacte (`PAY-…`), celle de l'URL de retour du fournisseur. Liste vide si la "
+                "référence est inconnue ou appartient à un autre compte."
+            ),
+        ),
+    ],
     responses={200: paiement_selon_role(many=True)},
 )
 class PaiementListView(generics.ListAPIView):
@@ -109,7 +118,14 @@ class PaiementListView(generics.ListAPIView):
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):  # génération du schéma OpenAPI
             return Paiement.objects.none()
-        return paiements_visibles(self.request.user)
+        queryset = paiements_visibles(self.request.user)
+        # Filtre appliqué après paiements_visibles : un client ne retrouve
+        # jamais le paiement d'un autre compte par sa référence.
+        # Longueur bornée à celle du champ.
+        reference = self.request.query_params.get("reference", "")[:30]
+        if reference:
+            queryset = queryset.filter(reference=reference)
+        return queryset
 
     def get_serializer_class(self):
         if getattr(self, "swagger_fake_view", False):  # génération du schéma OpenAPI

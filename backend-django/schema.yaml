@@ -3379,6 +3379,12 @@ paths:
         description: Un numéro de page de l'ensemble des résultats.
         schema:
           type: integer
+      - in: query
+        name: reference
+        schema:
+          type: string
+        description: Référence exacte (`PAY-…`), celle de l'URL de retour du fournisseur.
+          Liste vide si la référence est inconnue ou appartient à un autre compte.
       tags:
       - Paiements
       security:

@@ -257,6 +257,45 @@ class InitiationTests(Donnees, APITestCase):
             self.assertEqual(self.api(self.admin).get("/api/paiements/").data["count"], 3)
 
 
+class RechercheParReferenceTests(Donnees, APITestCase):
+    """GET /api/paiements/?reference= : la page de retour du fournisseur
+    retrouve le paiement par la référence de son URL."""
+
+    def setUp(self):
+        self.creer_donnees()
+        commande_a, commande_b = self.commander((self.variante1, 1), (self.variante2, 1))
+        self.paiement = self.payer(commande_a)
+        self.autre = self.payer(commande_b)
+
+    def lister(self, utilisateur, **params):
+        reponse = self.api(utilisateur).get("/api/paiements/", params)
+        self.assertEqual(reponse.status_code, 200)
+        return [ligne["id"] for ligne in reponse.data["results"]]
+
+    def test_proprietaire_et_administration_le_retrouvent(self):
+        for utilisateur in (self.client1, self.admin):
+            with self.subTest(utilisateur.email):
+                self.assertEqual(self.lister(utilisateur, reference=self.paiement.reference), [str(self.paiement.pk)])
+
+    def test_paiement_d_un_autre_compte_jamais_renvoye(self):
+        self.assertEqual(self.lister(self.client2, reference=self.paiement.reference), [])
+
+    def test_reference_inconnue_ou_trop_longue(self):
+        self.assertEqual(self.lister(self.client1, reference="PAY-INCONNUE"), [])
+        # Tronquée à la longueur du champ : une valeur plus longue ne correspond à rien.
+        self.assertEqual(self.lister(self.client1, reference=self.paiement.reference + "X" * 300), [])
+
+    def test_sans_reference_liste_complete(self):
+        attendus = {str(self.paiement.pk), str(self.autre.pk)}
+        self.assertEqual(set(self.lister(self.client1)), attendus)
+        self.assertEqual(set(self.lister(self.client1, reference="")), attendus)
+
+    def test_nombre_de_requetes_inchange(self):
+        api = self.api(self.client1)
+        with self.assertNumQueries(4):
+            api.get("/api/paiements/", {"reference": self.paiement.reference})
+
+
 # =====================================================================
 # NOTIFICATIONS (WEBHOOKS)
 # =====================================================================
