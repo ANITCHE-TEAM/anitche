@@ -109,7 +109,7 @@ CORS_ALLOWED_ORIGINS = _parse_liste_env(config('CORS_ALLOWED_ORIGINS', default='
 if not ALLOWED_HOSTS:
     raise ImproperlyConfigured(
         "ALLOWED_HOSTS doit être défini explicitement en production "
-        "(ex: 'api.anitche.ci,anitche.ci'). Un wildcard '*' est interdit : "
+        "(ex: 'anitche.com,www.anitche.com,backend-django'). Un wildcard '*' est interdit : "
         "il expose à l'injection de Host header (cache poisoning, liens "
         "de réinitialisation de mot de passe forgés, etc.)."
     )
@@ -141,7 +141,7 @@ if _url_backend.path or _url_backend.query or _url_backend.fragment:
 if not CORS_ALLOWED_ORIGINS:
     raise ImproperlyConfigured(
         "CORS_ALLOWED_ORIGINS doit être défini explicitement en production "
-        "(ex: 'https://anitche.ci,https://admin.anitche.ci')."
+        "(ex: 'https://anitche.com')."
     )
 
 # Emails (codes OTP d'inscription, de mot de passe oublié et de changement de
