@@ -66,19 +66,17 @@ updates:
       prefix: "build(deps)"
       prefix-development: "build(deps-dev)"
     # pydantic exige pydantic-core à une version exacte (pydantic 2.13.5 :
-    # pydantic-core==2.46.5). Montés séparément, ils échouent à la résolution
-    # pip : ce groupe, défini avant les autres (premier groupe qui correspond),
-    # les met à jour dans la même PR. Les majeures restent hors groupe.
-    # Si la PR groupée échoue quand même, remplacer le groupe par un ignore
-    # des deux paquets et monter à la main, ensemble.
+    # pydantic-core==2.46.5) et requirements.txt écrit pydantic_core avec un
+    # tiret bas. Montés séparément, ils échouent à la résolution pip
+    # (ResolutionImpossible) : les deux restent hors Dependabot, à monter à
+    # la main, ensemble, dans une seule PR.
+    # Levée : retirer ces entrées quand pydantic et pydantic_core sont montés
+    # ensemble.
+    ignore:
+      - dependency-name: pydantic
+      - dependency-name: pydantic_core
+      - dependency-name: pydantic-core
     groups:
-      pydantic:
-        patterns:
-          - pydantic
-          - pydantic-core
-        update-types:
-          - patch
-          - minor
       correctifs:
         update-types:
           - patch
