@@ -182,11 +182,13 @@ services:
     volumes:
       - ../frontend:/app
       - /app/node_modules
+      - /app/apps/client/node_modules
+      - /app/packages/config/node_modules
     ports:
       - "5173:5173"
     environment:
-      VITE_API_URL: http://localhost:8000
-      VITE_FASTAPI_URL: http://localhost:8001
+      VITE_PROXY_DJANGO: http://backend-django:8000
+      VITE_PROXY_FASTAPI: http://backend-fastapi:8001
     depends_on:
       - backend-django
       - backend-fastapi

@@ -1,13 +1,17 @@
-FROM node:20-alpine
+FROM node:22-alpine
 
 WORKDIR /app
 
-COPY package*.json ./
-RUN npm install
+RUN corepack enable
+
+# Le cache d'installation ne dépend que du lockfile
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm fetch
 
 COPY . .
+RUN pnpm install --offline --frozen-lockfile
 
 EXPOSE 5173
 
-# Serveur de dev Vite avec hot-reload, accessible depuis l'extérieur du conteneur
-CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+# Un seul portail en conteneur (client, port 5173) ; les autres se lancent sur l'hôte avec `pnpm dev`
+CMD ["pnpm", "--filter", "@anitche/app-client", "dev", "--host", "0.0.0.0"]
