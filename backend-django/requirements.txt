@@ -48,7 +48,7 @@ uritemplate==4.2.0
 gunicorn==26.2.0
 # Dépendances transitives de google-auth, requests et cryptography, épinglées
 # pour que le poste local, la CI et l'image Docker installent les mêmes versions
-cachetools==5.5.2
+cachetools==7.2.0
 certifi==2026.7.22
 cffi==2.1.1
 charset-normalizer==3.5.2
