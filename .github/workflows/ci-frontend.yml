@@ -38,4 +38,6 @@ jobs:
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
+      - name: Types API à jour (schema.yaml, openapi.json)
+        run: pnpm --filter @anitche/api-client verifier:api
       - run: pnpm turbo run lint typecheck test build
