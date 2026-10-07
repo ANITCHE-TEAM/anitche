@@ -144,11 +144,15 @@ print(jeton)
     fi
     conclure
 
-    # Un fichier par dossier média : un public (catalogue/produits), trois privés.
+    # Un fichier par dossier média : quatre publics (ceux de la location
+    # /media/ de nginx.conf), trois privés.
     marquer "Écriture des fichiers de test dans le volume média"
     if ! timeout 60 bash infra/ci/compose.sh exec -T backend-django sh -c '
-        mkdir -p /app/media/catalogue/produits /app/media/kyc /app/media/support/pieces_jointes /app/media/retours/preuves &&
+        mkdir -p /app/media/catalogue/produits /app/media/catalogue/categories /app/media/boutiques/logos /app/media/boutiques/bannieres /app/media/kyc /app/media/support/pieces_jointes /app/media/retours/preuves &&
         echo public > /app/media/catalogue/produits/ci.txt &&
+        echo public > /app/media/catalogue/categories/ci.txt &&
+        echo public > /app/media/boutiques/logos/ci.txt &&
+        echo public > /app/media/boutiques/bannieres/ci.txt &&
         echo prive > /app/media/kyc/ci.txt &&
         echo prive > /app/media/support/pieces_jointes/ci.txt &&
         echo prive > /app/media/retours/preuves/ci.txt'; then
@@ -188,7 +192,7 @@ verifier_routage() {
 }
 
 verifier_statiques_medias() {
-    local prive
+    local prive public
 
     appel "Fichier statique de collectstatic" GET "$URL/static/admin/css/base.css"
     statut_attendu 200; entete_attendu content-type "text/css"
@@ -197,6 +201,12 @@ verifier_statiques_medias() {
     appel "Média public servi" GET "$URL/media/catalogue/produits/ci.txt"
     statut_attendu 200; corps_attendu "^public"
     entete_attendu cache-control "max-age=604800"; entete_attendu x-content-type-options nosniff; conclure
+
+    for public in catalogue/categories boutiques/logos boutiques/bannieres; do
+        appel "Média public servi ($public)" GET "$URL/media/$public/ci.txt"
+        statut_attendu 200; corps_attendu "^public"
+        entete_attendu cache-control "max-age=604800"; conclure
+    done
 
     appel "Média public absent" GET "$URL/media/catalogue/produits/absent.txt"
     statut_attendu 404; conclure

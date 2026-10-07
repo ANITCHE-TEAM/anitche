@@ -1,0 +1,104 @@
+name: Audit des dépendances
+
+# pip-audit sur les dépendances Python. Lancé à chaque changement d'un
+# fichier requirements et chaque semaine : une faille publiée sans changement
+# de code fait échouer l'exécution planifiée (notification GitHub).
+#
+#   - requirements.txt de Django et de FastAPI (installés dans les images de
+#     production) : toute faille connue non ignorée fait échouer le job ;
+#   - requirements-dev.txt de FastAPI (outils de test, absents des images) :
+#     simple avertissement.
+#
+# Liste d'ignorés (faux positif ou faille non exploitable) : variable
+# PIP_AUDIT_IGNORES ci-dessous, un identifiant (GHSA, PYSEC ou CVE) par
+# ligne, vide au départ. Chaque entrée porte, sur la ligne au-dessus, la
+# raison et la date de revue :
+#   # GHSA-xxxx-xxxx-xxxx : <paquet>, <pourquoi non exploitable ici>.
+#   # Aucun correctif publié. Revue avant le AAAA-MM-JJ.
+#   GHSA-xxxx-xxxx-xxxx
+# On n'ignore que si la faille n'est pas exploitable chez nous ET qu'aucun
+# correctif n'existe ; sinon on met à jour.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend-django/requirements.txt"
+      - "backend-fastapi/requirements.txt"
+      - "backend-fastapi/requirements-dev.txt"
+      - ".github/workflows/audit-dependances.yml"
+  pull_request:
+    paths:
+      - "backend-django/requirements.txt"
+      - "backend-fastapi/requirements.txt"
+      - "backend-fastapi/requirements-dev.txt"
+      - ".github/workflows/audit-dependances.yml"
+  schedule:
+    - cron: "0 6 * * 2"
+  workflow_dispatch:
+
+concurrency:
+  group: audit-dependances-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PIP_AUDIT_IGNORES: |
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - fichier: backend-django/requirements.txt
+            bloquant: true
+          - fichier: backend-fastapi/requirements.txt
+            bloquant: true
+          - fichier: backend-fastapi/requirements-dev.txt
+            bloquant: false
+
+    name: audit (${{ matrix.fichier }})
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Installer Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # Environnement à part : l'audit ne dépend pas des versions de
+      # l'application.
+      - name: Installer pip-audit
+        run: |
+          python -m venv "$RUNNER_TEMP/venv-audit"
+          "$RUNNER_TEMP/venv-audit/bin/pip" install pip-audit==2.10.1
+
+      # --strict : un paquet impossible à auditer fait échouer l'audit au lieu
+      # de passer en silence.
+      - name: pip-audit
+        env:
+          FICHIER: ${{ matrix.fichier }}
+          BLOQUANT: ${{ matrix.bloquant }}
+        run: |
+          ignores=()
+          while IFS= read -r ligne; do
+            ligne="${ligne%%#*}"
+            ligne="${ligne//[[:space:]]/}"
+            if [ -n "$ligne" ]; then ignores+=(--ignore-vuln "$ligne"); fi
+          done <<< "$PIP_AUDIT_IGNORES"
+
+          if "$RUNNER_TEMP/venv-audit/bin/pip-audit" -r "$FICHIER" --strict "${ignores[@]}"; then
+            exit 0
+          fi
+          if [ "$BLOQUANT" = "true" ]; then
+            echo "::error file=$FICHIER::pip-audit a trouvé des failles connues (voir le journal). Mettre à jour, ou ignorer avec raison dans PIP_AUDIT_IGNORES."
+            exit 1
+          fi
+          echo "::warning file=$FICHIER::pip-audit a trouvé des failles connues dans les outils de test (voir le journal). Sans effet sur la production."
