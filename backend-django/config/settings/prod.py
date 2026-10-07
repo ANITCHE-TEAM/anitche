@@ -88,6 +88,11 @@ except ValueError as erreur:
 # Paiements : jamais le fournisseur simulé (il accepte des notifications
 # signées avec un secret de développement public), jamais une clé CinetPay
 # de sandbox, jamais sans clés. Transmis par docker-compose.prod.yml.
+if PAIEMENT_FOURNISSEUR == 'simule':
+    raise ImproperlyConfigured(
+        "PAIEMENT_FOURNISSEUR='simule' est interdit en production : définissez "
+        "PAIEMENT_FOURNISSEUR=cinetpay et ses clés (docs/MODULE_PAIEMENTS.md)."
+    )
 if PAIEMENT_FOURNISSEUR == 'cinetpay':
     if not CINETPAY_API_KEY or not CINETPAY_API_PASSWORD:
         raise ImproperlyConfigured(
