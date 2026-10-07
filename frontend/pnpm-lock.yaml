@@ -227,6 +227,9 @@ catalogs:
     vitest:
       specifier: 5.0.3
       version: 5.0.3
+    zod:
+      specifier: 4.6.5
+      version: 4.6.5
 
 importers:
 
@@ -483,6 +486,25 @@ importers:
       vite:
         specifier: 'catalog:'
         version: 8.3.3(@types/node@22.20.5)
+      vitest:
+        specifier: 'catalog:'
+        version: 5.0.3(@types/node@22.20.5)(jsdom@30.1.2)(vite@8.3.3(@types/node@22.20.5))
+
+  packages/utils:
+    dependencies:
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.5
+    devDependencies:
+      '@anitche/config':
+        specifier: workspace:*
+        version: link:../config
+      eslint:
+        specifier: 'catalog:'
+        version: 10.12.0(supports-color@7.2.0)
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
       vitest:
         specifier: 'catalog:'
         version: 5.0.3(@types/node@22.20.5)(jsdom@30.1.2)(vite@8.3.3(@types/node@22.20.5))
