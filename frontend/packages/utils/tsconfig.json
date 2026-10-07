@@ -1,0 +1,4 @@
+{
+  "extends": "@anitche/config/tsconfig/library.json",
+  "include": ["src", "*.config.ts", "eslint.config.js"]
+}
