@@ -94,11 +94,22 @@ jobs:
             if [ -n "$ligne" ]; then ignores+=(--ignore-vuln "$ligne"); fi
           done <<< "$PIP_AUDIT_IGNORES"
 
-          if "$RUNNER_TEMP/venv-audit/bin/pip-audit" -r "$FICHIER" --strict "${ignores[@]}"; then
+          # Sans pipefail, le code de sortie de tee masquerait celui de pip-audit.
+          set -o pipefail
+          journal="$RUNNER_TEMP/pip-audit.log"
+          if "$RUNNER_TEMP/venv-audit/bin/pip-audit" -r "$FICHIER" --strict "${ignores[@]}" 2>&1 | tee "$journal"; then
             exit 0
           fi
+
+          # Deux échecs différents : pip n'a pas pu résoudre les dépendances
+          # (versions incompatibles entre elles), ou l'audit a trouvé des failles.
+          if grep -qE 'ResolutionImpossible|Failed to install packages' "$journal"; then
+            message="résolution des dépendances impossible : des versions de $FICHIER sont incompatibles entre elles (voir le journal). Ce n'est pas une faille : corriger les versions épinglées."
+          else
+            message="pip-audit a trouvé des failles connues (voir le journal). Mettre à jour, ou ignorer avec raison dans PIP_AUDIT_IGNORES."
+          fi
           if [ "$BLOQUANT" = "true" ]; then
-            echo "::error file=$FICHIER::pip-audit a trouvé des failles connues (voir le journal). Mettre à jour, ou ignorer avec raison dans PIP_AUDIT_IGNORES."
+            echo "::error file=$FICHIER::$message"
             exit 1
           fi
-          echo "::warning file=$FICHIER::pip-audit a trouvé des failles connues dans les outils de test (voir le journal). Sans effet sur la production."
+          echo "::warning file=$FICHIER::$message (outils de test, sans effet sur la production)"
