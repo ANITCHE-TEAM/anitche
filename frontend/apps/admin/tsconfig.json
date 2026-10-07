@@ -1,0 +1,4 @@
+{
+  "extends": "@anitche/config/tsconfig/react-app.json",
+  "include": ["src", "vite.config.ts"]
+}
