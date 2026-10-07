@@ -1,0 +1,131 @@
+name: CI Pile prod
+
+# Démarre la vraie pile de production (infra/docker-compose.prod.yml) sur le
+# runner et vérifie, par des requêtes à travers nginx, le routage, les
+# statiques et médias, la route interne, les webhooks, la documentation
+# fermée et le refus de démarrer de prod.py (infra/ci/smoke_prod.sh).
+#
+# Ce que ce job ne teste pas :
+#   - frontend/Dockerfile.prod : le frontend est remplacé par une page statique
+#     (infra/ci/docker-compose.ci.yml) ; le bundle est construit par
+#     ci-frontend.yml ;
+#   - Let's Encrypt, Cloudflare, SMTP, CinetPay, S3 et les sauvegardes : le
+#     certificat est autosigné, les fournisseurs sont factices.
+# Aucun fichier de production n'est modifié : tout vit dans infra/ci/.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - "backend-django/**"
+      - "backend-fastapi/**"
+      - ".github/workflows/ci-pile-prod.yml"
+  pull_request:
+    paths:
+      - "infra/**"
+      - "backend-django/**"
+      - "backend-fastapi/**"
+      - ".github/workflows/ci-pile-prod.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-pile-prod-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Nom commun à tous les appels docker compose du job.
+  COMPOSE_PROJECT_NAME: anitche-ci
+
+jobs:
+  pile-prod:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Résumé du job
+        run: |
+          {
+            echo "### Pile de production : durée des étapes"
+            echo
+            echo "| Étape | Durée | Résultat |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "JOB_DEBUT=$(date +%s)" >> "$GITHUB_ENV"
+
+      # Valeurs secrètes aléatoires (masquées dans les journaux), le reste en
+      # constantes factices ; certificat autosigné pour anitche.com.
+      - name: Générer l'environnement et le certificat de CI
+        run: |
+          echo "ENV_CI=$RUNNER_TEMP/anitche-ci.env" >> "$GITHUB_ENV"
+          echo "CI_CERT_DIR=$RUNNER_TEMP/certificat-ci" >> "$GITHUB_ENV"
+          bash infra/ci/generer_env_ci.sh "$RUNNER_TEMP/anitche-ci.env"
+          bash infra/ci/generer_certificat_ci.sh "$RUNNER_TEMP/certificat-ci"
+
+      - name: check_prod_env.sh (valide accepté, variantes invalides refusées)
+        timeout-minutes: 2
+        run: bash infra/ci/etape.sh "check_prod_env.sh" bash infra/ci/verifier_environnement.sh "$ENV_CI"
+
+      - name: Configuration compose (production et surcharge de CI)
+        timeout-minutes: 2
+        run: bash infra/ci/etape.sh "docker compose config" bash infra/ci/compose.sh config -q
+
+      - name: Construire les images
+        timeout-minutes: 15
+        run: bash infra/ci/etape.sh "Construction des images" timeout 840 bash infra/ci/compose.sh build
+
+      - name: prod.py refuse un environnement dangereux
+        timeout-minutes: 5
+        run: bash infra/ci/etape.sh "Refus de démarrer de prod.py" bash infra/ci/smoke_prod.sh refus_demarrage
+
+      - name: Démarrer PostgreSQL et Redis
+        timeout-minutes: 5
+        run: bash infra/ci/etape.sh "db et redis" timeout 240 bash infra/ci/compose.sh up -d --wait --wait-timeout 120 db redis
+
+      - name: Migrations (conteneur ponctuel)
+        timeout-minutes: 8
+        run: bash infra/ci/etape.sh "Migrations" timeout 420 bash infra/ci/compose.sh run --rm -T backend-django python manage.py migrate --noinput
+
+      # Le script réel de déploiement, sur le compose de production seul :
+      # il ne s'adresse qu'au conteneur db déjà démarré.
+      - name: Rôle PostgreSQL en lecture seule de FastAPI
+        timeout-minutes: 3
+        run: |
+          set -a
+          # shellcheck source=/dev/null
+          . "$ENV_CI"
+          set +a
+          export COMPOSE_FILE=infra/docker-compose.prod.yml
+          bash infra/ci/etape.sh "Rôle FastAPI en lecture seule" timeout 120 bash infra/scripts/create_fastapi_readonly_role.sh
+
+      - name: Démarrer la pile (nginx, Django, FastAPI, worker, beat)
+        timeout-minutes: 8
+        run: bash infra/ci/etape.sh "Démarrage de la pile" timeout 300 bash infra/ci/compose.sh up -d --wait --wait-timeout 180 nginx celery-worker celery-beat
+
+      - name: Attendre Django à travers nginx
+        timeout-minutes: 3
+        run: bash infra/ci/etape.sh "Attente de Django" bash infra/ci/smoke_prod.sh attendre
+
+      - name: Requêtes à travers nginx
+        timeout-minutes: 8
+        run: bash infra/ci/etape.sh "Requêtes à travers nginx" bash infra/ci/smoke_prod.sh verifier
+
+      # État et journaux de chaque conteneur : aucun secret n'y est écrit par
+      # les applications, et le fichier d'environnement n'est jamais affiché.
+      - name: Journaux des conteneurs (en cas d'échec)
+        if: failure()
+        timeout-minutes: 3
+        run: |
+          bash infra/ci/compose.sh ps -a || true
+          bash infra/ci/compose.sh logs --no-color --tail=200 || true
+
+      - name: Durée totale
+        if: always()
+        run: |
+          total=$(( $(date +%s) - JOB_DEBUT ))
+          printf '| **Total (hors checkout)** | **%s s** | |\n' "$total" >> "$GITHUB_STEP_SUMMARY"
