@@ -201,9 +201,11 @@ verifier_statiques_medias() {
     appel "Média public absent" GET "$URL/media/catalogue/produits/absent.txt"
     statut_attendu 404; conclure
 
+    # 404 produit par nginx (location /media/) : son corps contient « nginx »,
+    # celui de Django non, qui répondrait aussi 404 si le bloc disparaissait.
     for prive in kyc support/pieces_jointes retours/preuves; do
         appel "Média privé refusé ($prive)" GET "$URL/media/$prive/ci.txt"
-        statut_attendu 404; conclure
+        statut_attendu 404; corps_attendu nginx; conclure
     done
     appel "Média privé refusé (remontée par ..)" GET "$URL/media/catalogue/produits/../../kyc/ci.txt" --path-as-is
     statut_attendu 404; conclure
