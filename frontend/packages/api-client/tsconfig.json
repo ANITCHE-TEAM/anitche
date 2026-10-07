@@ -1,0 +1,4 @@
+{
+  "extends": "@anitche/config/tsconfig/react-library.json",
+  "include": ["src", "*.config.ts", "eslint.config.js"]
+}
