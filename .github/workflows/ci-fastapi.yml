@@ -34,7 +34,7 @@ env:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
 
@@ -67,7 +67,7 @@ jobs:
   # Vrais services (rapport module 1 §g) : schéma créé par les migrations
   # Django, rôle en lecture seule créé par le vrai script SQL, pub/sub Redis.
   integration:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     services:
