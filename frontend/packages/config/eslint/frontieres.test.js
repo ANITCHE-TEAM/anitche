@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import { ESLint } from "eslint";
 import tseslint from "typescript-eslint";
 import { describe, expect, it } from "vitest";
-import { frontieres } from "./frontieres.js";
+import { frontieres, frontieresPaquet } from "./frontieres.js";
 
 const RACINE_CLIENT = fileURLToPath(new URL("../../../apps/client", import.meta.url));
 
@@ -57,6 +57,65 @@ describe("zustand", () => {
   it("est accepté dans fonctionnalites/<module>/store.ts", async () => {
     const liste = await messages('import { create } from "zustand";', "src/fonctionnalites/panier/store.ts");
     expect(restreints(liste)).toEqual([]);
+  });
+});
+
+describe("frontières des paquets", () => {
+  const RACINE_FIXTURES = fileURLToPath(new URL("./fixtures", import.meta.url));
+
+  async function restrictions(paquet, code) {
+    const eslint = new ESLint({
+      cwd: RACINE_FIXTURES,
+      overrideConfigFile: true,
+      overrideConfig: [
+        { files: ["**/*.ts"], languageOptions: { parser: tseslint.parser } },
+        ...frontieresPaquet(paquet),
+      ],
+    });
+    const [resultat] = await eslint.lintText(code, { filePath: `${RACINE_FIXTURES}/src/paquet/x.ts` });
+    return restreints(resultat.messages);
+  }
+
+  it.each([
+    ["utils", 'import { z } from "zod";'],
+    ["utils", 'import { cn } from "./cn";'],
+    ["ui", 'import { cva } from "class-variance-authority";'],
+    ["ui", 'import { cn } from "@anitche/utils";'],
+    ["api-client", 'import { QueryClient } from "@tanstack/react-query";'],
+    ["api-client", 'import { formaterFcfa } from "@anitche/utils";'],
+    ["auth", 'import { create } from "zustand";'],
+    ["auth", 'import { Button } from "@anitche/ui/button";'],
+    ["auth", 'import { creerClients } from "@anitche/api-client";'],
+  ])("%s accepte : %s", async (paquet, code) => {
+    expect(await restrictions(paquet, code)).toEqual([]);
+  });
+
+  it.each([
+    ["utils", 'import { useState } from "react";', "React"],
+    ["utils", 'import { createRoot } from "react-dom/client";', "React DOM"],
+    ["utils", 'import { creerClients } from "@anitche/api-client";', "un autre paquet"],
+    ["utils", 'import { create } from "zustand";', "zustand"],
+    ["utils", 'import { useQuery } from "@tanstack/react-query";', "TanStack Query"],
+    ["ui", 'import { useSession } from "@anitche/auth";', "auth"],
+    ["ui", 'import { creerClients } from "@anitche/api-client";', "api-client"],
+    ["ui", 'import { creerClients } from "@anitche/api-client/testing";', "un sous-chemin d'api-client"],
+    ["ui", 'import { create } from "zustand";', "zustand"],
+    ["ui", 'import { useNavigate } from "react-router";', "react-router"],
+    ["ui", 'import { useQuery } from "@tanstack/react-query";', "TanStack Query"],
+    ["ui", 'import createClient from "openapi-fetch";', "openapi-fetch"],
+    ["api-client", 'import { Button } from "@anitche/ui/button";', "ui"],
+    ["api-client", 'import { useSession } from "@anitche/auth";', "auth"],
+    ["api-client", 'import { useState } from "react";', "React"],
+    ["api-client", 'import { create } from "zustand";', "zustand"],
+    ["auth", 'import { App } from "@anitche/app-client";', "un portail par son nom"],
+    ["auth", 'import { App } from "../../../apps/client/src/app/App";', "un portail par chemin"],
+    ["auth", 'import { cn } from "../../ui/src/lib/cn";', "un autre paquet par chemin"],
+  ])("%s refuse : %s (%s)", async (paquet, code) => {
+    expect(await restrictions(paquet, code)).toHaveLength(1);
+  });
+
+  it("refuse un paquet inconnu plutôt que de ne rien vérifier", () => {
+    expect(() => frontieresPaquet("inconnu")).toThrow(/paquet inconnu/);
   });
 });
 

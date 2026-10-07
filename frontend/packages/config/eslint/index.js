@@ -4,7 +4,30 @@ import reactHooks from "eslint-plugin-react-hooks";
 import reactRefresh from "eslint-plugin-react-refresh";
 import globals from "globals";
 import tseslint from "typescript-eslint";
-import { frontieres } from "./frontieres.js";
+import { frontieres, frontieresPaquet } from "./frontieres.js";
+
+/**
+ * Config ESLint d'un paquet de packages/.
+ * @param {{ nom: "utils" | "ui" | "api-client" | "auth", racine: string, react?: boolean }} options
+ *   `racine` : dossier du paquet (`import.meta.dirname` dans son eslint.config.js) ;
+ *   `react` : règles des hooks et globales du navigateur (faux pour `utils`, qui n'a ni React ni DOM).
+ */
+export function configPaquet({ nom, racine, react = true }) {
+  return defineConfig([
+    globalIgnores(["dist", "src/generes"]),
+    js.configs.recommended,
+    tseslint.configs.recommendedTypeChecked,
+    ...(react ? [reactHooks.configs.flat.recommended] : []),
+    {
+      languageOptions: {
+        globals: react ? globals.browser : {},
+        parserOptions: { projectService: true, tsconfigRootDir: racine },
+      },
+    },
+    { files: ["**/*.js"], extends: [tseslint.configs.disableTypeChecked] },
+    ...frontieresPaquet(nom),
+  ]);
+}
 
 /**
  * Config ESLint d'un portail.

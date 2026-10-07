@@ -51,6 +51,78 @@ function motifsApps(nom) {
   ];
 }
 
+const MESSAGE_PAQUET_ORDRE =
+  "Sens des dépendances : utils ← api-client ← auth, et ui ← auth ; ui ne connaît ni api-client ni auth.";
+const MESSAGE_PAQUET_APP =
+  "Un paquet n'importe jamais un portail : la chose partagée descend dans le paquet, pas l'inverse.";
+const MESSAGE_PAQUET_FICHIER =
+  "Un paquet n'importe un autre paquet que par son nom (@anitche/<paquet>), jamais par un chemin vers ses fichiers.";
+
+const PAQUETS = ["utils", "ui", "api-client", "auth"];
+
+/** Imports interdits à tout paquet : un portail, ou les fichiers d'un autre paquet. */
+function horsPerimetre(nom) {
+  const voisins = PAQUETS.filter((paquet) => paquet !== nom);
+  return [
+    { group: ["@anitche/app-*", "**/apps/**"], message: MESSAGE_PAQUET_APP },
+    { group: ["**/packages/**", ...voisins.map((paquet) => `**/${paquet}/src/**`)], message: MESSAGE_PAQUET_FICHIER },
+  ];
+}
+
+const REACT = ["react", "react/*", "react-dom", "react-dom/*"];
+const DONNEES_SERVEUR = ["@tanstack/*", "openapi-fetch", "openapi-typescript", "openapi-typescript-helpers"];
+
+/** Imports interdits à chaque paquet (arch § 9.1 : « Ne peut jamais importer »). */
+const RESTRICTIONS_PAQUETS = {
+  utils: [
+    {
+      group: [...REACT, "@anitche/*", "zustand", "zustand/*", ...DONNEES_SERVEUR],
+      message: "utils reste pur : ni React, ni autre paquet, ni état, ni client HTTP.",
+    },
+  ],
+  ui: [
+    {
+      group: ["@anitche/api-client", "@anitche/api-client/*", "@anitche/auth", "@anitche/auth/*"],
+      message: MESSAGE_PAQUET_ORDRE,
+    },
+    {
+      group: ["zustand", "zustand/*", "react-router", "react-router/*", ...DONNEES_SERVEUR],
+      message: "ui ne contient aucune donnée serveur, aucun état global, aucune navigation.",
+    },
+  ],
+  "api-client": [
+    {
+      group: ["@anitche/ui", "@anitche/ui/*", "@anitche/auth", "@anitche/auth/*"],
+      message: MESSAGE_PAQUET_ORDRE,
+    },
+    {
+      group: [...REACT, "zustand", "zustand/*"],
+      message: "api-client n'importe pas React (hors @tanstack/react-query) ni l'état global.",
+    },
+  ],
+  auth: [],
+};
+
+/**
+ * Frontières d'un paquet de `packages/` (`nom` : "utils", "ui", "api-client" ou "auth"),
+ * à placer dans la config ESLint de ce paquet.
+ */
+export function frontieresPaquet(nom) {
+  if (!PAQUETS.includes(nom)) {
+    throw new Error(`frontieresPaquet : paquet inconnu « ${nom} » (attendu : ${PAQUETS.join(", ")}).`);
+  }
+  const specifiques = RESTRICTIONS_PAQUETS[nom];
+  return [
+    {
+      name: `anitche/frontieres-paquet-${nom}`,
+      files: ["src/**/*.{ts,tsx}"],
+      rules: {
+        "no-restricted-imports": ["error", { patterns: [...horsPerimetre(nom), ...specifiques] }],
+      },
+    },
+  ];
+}
+
 /**
  * Frontières d'un portail (`nom`), à placer dans la config ESLint de ce portail.
  * `racine` : dossier du portail ; les chemins `files` et les éléments en sont relatifs.
