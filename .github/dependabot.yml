@@ -1,0 +1,118 @@
+# Mises à jour de dépendances. Les PR sont relues et fusionnées à la main.
+#
+# pip : tous les paquets sont épinglés (transitifs compris), donc Dependabot
+# les voit tous. Deux groupes par dossier (correctifs, mineures) bornent le
+# nombre de PR et donc les passes de CI (tests et pile de production) ; une
+# mise à jour majeure reste une PR à part. requirements-dev.txt est lu avec
+# requirements.txt du même dossier.
+#
+# cooldown : attend 3 jours après la publication d'une version. Ne retarde
+# pas les mises à jour de sécurité.
+
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /backend-django
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: UTC
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 3
+    labels:
+      - dependencies
+      - python
+    commit-message:
+      prefix: "build(deps)"
+      prefix-development: "build(deps-dev)"
+    # django-celery-beat 2.9.0 exige Django<6.1 et cron-descriptor<2.0.0
+    # (requirements.txt, ligne 13) : une PR sur ces montées échoue à la
+    # résolution pip (ResolutionImpossible). Les correctifs de Django restent
+    # autorisés.
+    # Levée : quand une version de django-celery-beat accepte Django 6.1 et
+    # cron-descriptor 2.x, retirer l'entrée concernée et monter à la main.
+    ignore:
+      - dependency-name: django
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-major
+      - dependency-name: cron-descriptor
+        update-types:
+          - version-update:semver-major
+    groups:
+      correctifs:
+        update-types:
+          - patch
+      mineures:
+        update-types:
+          - minor
+
+  - package-ecosystem: pip
+    directory: /backend-fastapi
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: UTC
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 3
+    labels:
+      - dependencies
+      - python
+    commit-message:
+      prefix: "build(deps)"
+      prefix-development: "build(deps-dev)"
+    # pydantic exige pydantic-core à une version exacte (pydantic 2.13.5 :
+    # pydantic-core==2.46.5) et requirements.txt écrit pydantic_core avec un
+    # tiret bas. Montés séparément, ils échouent à la résolution pip
+    # (ResolutionImpossible) : les deux restent hors Dependabot, à monter à
+    # la main, ensemble, dans une seule PR.
+    # Levée : retirer ces entrées quand pydantic et pydantic_core sont montés
+    # ensemble.
+    ignore:
+      - dependency-name: pydantic
+      - dependency-name: pydantic_core
+      - dependency-name: pydantic-core
+    groups:
+      correctifs:
+        update-types:
+          - patch
+      mineures:
+        update-types:
+          - minor
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  # Correctifs de sécurité seulement : une limite à 0 désactive les mises à
+  # jour de version, pas les PR de sécurité. Les mises à jour de version
+  # s'activent avec le monorepo pnpm.
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: UTC
+    open-pull-requests-limit: 0
+    labels:
+      - dependencies
+      - javascript
+    commit-message:
+      prefix: "build(deps)"
+      prefix-development: "build(deps-dev)"

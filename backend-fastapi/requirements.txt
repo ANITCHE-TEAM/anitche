@@ -1,6 +1,6 @@
 # Dépendances de l'application uniquement (image Docker de prod).
 # Outils de test : requirements-dev.txt.
-fastapi==0.141.1
+fastapi==0.142.2
 # Dépendance de fastapi, épinglée pour des builds reproductibles.
 starlette==1.7.0
 uvicorn[standard]==0.54.0
@@ -22,11 +22,11 @@ httpcore==1.0.9
 httptools==0.8.0
 idna==3.20
 pydantic_core==2.46.5
-python-dotenv==1.2.3
+python-dotenv==1.2.4
 PyYAML==6.0.3
 typing-inspection==0.4.4
 typing_extensions==4.16.0
 # Même condition que uvicorn[standard] : uvloop n'existe pas sous Windows.
-uvloop==0.22.1; sys_platform != "win32" and sys_platform != "cygwin" and platform_python_implementation != "PyPy"
+uvloop==0.23.0; sys_platform != "win32" and sys_platform != "cygwin" and platform_python_implementation != "PyPy"
 watchfiles==1.3.0
-websockets==17.1
+websockets==17.2
