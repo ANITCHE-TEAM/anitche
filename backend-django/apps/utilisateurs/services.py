@@ -71,7 +71,8 @@ def resoudre_utilisateur_google(infos):
     du compte. L'émission du JWT reste de la responsabilité de la vue.
     """
     google_id = infos.get('sub')
-    email = infos.get('email')
+    # Même forme qu'à l'inscription classique : minuscules.
+    email = Utilisateur.objects.normalize_email(infos.get('email'))
     email_verifie_google = infos.get('email_verified', False)
 
     if not google_id or not email or not email_verifie_google:
@@ -85,9 +86,7 @@ def resoudre_utilisateur_google(infos):
     if not utilisateur:
         # 2. Sinon, un compte existe peut-être déjà avec cet email
         #    (inscription classique) -> on le lie à Google.
-        utilisateur_existant = Utilisateur.objects.filter(
-            email__iexact=email
-        ).first()
+        utilisateur_existant = Utilisateur.objects.avec_email(email).first()
 
         # Un compte désactivé doit être bloqué en priorité absolue,
         # avant toute autre logique de liaison — y compris la
@@ -113,8 +112,7 @@ def resoudre_utilisateur_google(infos):
             )
             raise LiaisonGoogleRefusee()
 
-        utilisateur, cree = Utilisateur.objects.get_or_create(
-            email__iexact=email,
+        utilisateur, cree = Utilisateur.objects.avec_email(email).get_or_create(
             defaults={
                 'email': email,
                 'nom': infos.get('family_name', ''),

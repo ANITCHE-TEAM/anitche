@@ -1,6 +1,7 @@
 import secrets
 import logging
 from django.db import models, transaction
+from django.db.models.functions import Lower
 from datetime import timedelta
 from django.utils import timezone
 
@@ -115,12 +116,32 @@ class Utilisateur(AbstractBaseUser, PermissionsMixin):
         self.statut_kyc = StatutKYC.EN_ATTENTE
         self.save(update_fields=['statut_kyc'])
 
+    def clean(self):
+        """Email en minuscules avant la validation des formulaires (admin Django)."""
+        super().clean()
+        self.email = type(self).objects.normalize_email(self.email)
+
+    def save(self, *args, **kwargs):
+        """L'email est toujours enregistré en minuscules, quel que soit le
+        chemin d'écriture (API, admin, code interne)."""
+        self.email = type(self).objects.normalize_email(self.email)
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.email} ({self.get_role_display()})"
 
     class Meta:
         verbose_name = "Utilisateur"
         verbose_name_plural = "Utilisateurs"
+        constraints = [
+            # unique=True compare la casse : sans cette contrainte, la base
+            # accepterait « Awa@x.ci » à côté de « awa@x.ci ».
+            models.UniqueConstraint(
+                Lower('email'),
+                name='utilisateur_email_unique_sans_casse',
+                violation_error_message="Un compte existe déjà avec cet email.",
+            ),
+        ]
 
 
 # ============================

@@ -62,9 +62,11 @@ class InscriptionSerializer(serializers.ModelSerializer):
     def validate_email(self, value):
         """
         Empêche la création de plusieurs comptes
-        avec la même adresse email.
+        avec la même adresse email, quelle que soit la casse saisie.
+        L'email est enregistré en minuscules.
         """
-        if Utilisateur.objects.filter(email__iexact=value).exists():
+        value = Utilisateur.objects.normalize_email(value)
+        if Utilisateur.objects.avec_email(value).exists():
             raise serializers.ValidationError(
                 "Un compte existe déjà avec cet email."
             )
@@ -184,11 +186,13 @@ class DemandeChangementContactSerializer(serializers.Serializer):
         Sans ce contrôle, la confirmation OTP échoue plus tard avec une
         IntegrityError (contrainte unique en base), ce qui sert
         d'oracle pour deviner les emails déjà inscrits.
+        Le nouvel email est enregistré en minuscules.
         """
+        value = Utilisateur.objects.normalize_email(value)
         utilisateur_courant = self.context['request'].user
 
-        if Utilisateur.objects.exclude(pk=utilisateur_courant.pk).filter(
-            email__iexact=value
+        if Utilisateur.objects.avec_email(value).exclude(
+            pk=utilisateur_courant.pk
         ).exists():
             raise serializers.ValidationError(
                 "Cet email est déjà utilisé par un autre compte."

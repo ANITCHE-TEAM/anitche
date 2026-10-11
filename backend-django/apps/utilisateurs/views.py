@@ -113,7 +113,7 @@ class LoginThrottleView(TokenObtainPairView):
 
         if response.status_code == status.HTTP_200_OK:
             email = request.data.get('email')
-            utilisateur = Utilisateur.objects.filter(email__iexact=email).first()
+            utilisateur = Utilisateur.objects.avec_email(email).first()
             if utilisateur:
                 envoyer_notification_connexion.delay(
                     utilisateur.email,
@@ -540,9 +540,7 @@ class DemandeMotDePasseOublieView(APIView):
 
         email = serializer.validated_data['email']
 
-        utilisateur = Utilisateur.objects.filter(
-            email__iexact=email
-        ).first()
+        utilisateur = Utilisateur.objects.avec_email(email).first()
 
         if utilisateur:
             _, code = CodeOTP.generer(utilisateur, 'mdp_oublie')
@@ -601,9 +599,7 @@ class ConfirmationMotDePasseOublieView(APIView):
         # sans jamais passer par l'étape 1.
         message_generique = "Code invalide ou expiré."
 
-        utilisateur = Utilisateur.objects.filter(
-            email__iexact=data['email']
-        ).first()
+        utilisateur = Utilisateur.objects.avec_email(data['email']).first()
 
         if not utilisateur:
             raise ErreurMetier(message_generique)

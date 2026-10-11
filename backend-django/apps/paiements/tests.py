@@ -37,7 +37,7 @@ from apps.utilisateurs.models import DocumentKYC, Role, StatutKYC, TypePieceIden
 from apps.vendeurs.models import Boutique
 
 from . import reversements
-from .fournisseurs.base import EN_ATTENTE, ErreurFournisseur, EtatTransaction, hacher_jeton
+from .fournisseurs.base import EN_ATTENTE, SUCCES, ErreurFournisseur, EtatTransaction, hacher_jeton
 from .fournisseurs.cinetpay import FournisseurCinetPay
 from .fournisseurs.simule import EN_TETE_SIGNATURE, FournisseurSimule, definir_etat_distant, signer
 from .frais import bareme_en_vigueur, calculer_frais_ligne
@@ -749,6 +749,71 @@ class DonneesReconciliation(Donnees):
 
     def stock(self):
         return Stock.objects.get(variante=self.variante1).quantite_disponible
+
+
+class MontantEtDeviseConfirmesTests(DonneesReconciliation, APITestCase):
+    """Contrat commun à tous les fournisseurs (fournisseurs/base.py) : un
+    succès n'est appliqué que s'il porte un montant entier égal au montant
+    dû et la devise du paiement. Information absente, illisible ou
+    différente : rien n'est validé, par la notification comme par la
+    réconciliation."""
+
+    def setUp(self):
+        self.preparer()
+        self.du = int(self.paiement.montant)
+
+    def confirmations_refusees(self):
+        """libellé → (montant, devise) confirmés par le fournisseur."""
+        return {
+            "montant absent": (None, "XOF"),
+            "devise absente": (self.du, None),
+            "devise vide": (self.du, ""),
+            "montant et devise absents": (None, None),
+            "montant fractionnaire": (self.du + 0.5, "XOF"),
+            "montant fractionnaire décimal": (Decimal(f"{self.du}.50"), "XOF"),
+            "montant invalide": ("abc", "XOF"),
+            "montant en texte": (str(self.du), "XOF"),
+            "montant flottant": (float(self.du), "XOF"),
+            "montant booléen": (True, "XOF"),
+            "devise différente": (self.du, "EUR"),
+            "montant inférieur": (self.du - 1, "XOF"),
+            "montant supérieur": (self.du + 1, "XOF"),
+        }
+
+    def verifier_rien_valide(self):
+        self.assertEqual(self.statuts(), ("en_attente", "creee"))
+        self.assertFalse(Livraison.objects.filter(commande=self.commande).exists())
+        self.assertFalse(Reversement.objects.filter(commande=self.commande).exists())
+
+    def test_notification_refusee_sans_montant_et_devise_conformes(self):
+        # La lecture d'une notification simulée refuse déjà un succès sans
+        # montant entier : l'état vérifié est fourni ici directement, pour
+        # exercer le contrôle commun à tous les fournisseurs.
+        for numero, (libelle, (montant, devise)) in enumerate(self.confirmations_refusees().items()):
+            with self.subTest(libelle):
+                etat = EtatTransaction(statut=SUCCES, identifiant_externe="SIM-TX", montant=montant, devise=devise)
+                with mock.patch.object(FournisseurSimule, "verifier_transaction", return_value=etat):
+                    r = self.notifier_succes(self.paiement, evenement_id=f"evt-refus-{numero}")
+                self.assertEqual(r.status_code, 400)
+                self.verifier_rien_valide()
+                self.assertEqual(JournalWebhook.objects.get(evenement_id=f"evt-refus-{numero}").statut_traitement,
+                                 "erreur")
+
+    def test_reconciliation_refusee_sans_montant_et_devise_conformes(self):
+        for libelle, (montant, devise) in self.confirmations_refusees().items():
+            with self.subTest(libelle):
+                definir_etat_distant(self.paiement.reference, "succes", montant, devise)
+                self.assertEqual(reconcilier_paiement(self.paiement), ("refuse", False))
+                self.verifier_rien_valide()
+
+    def test_notification_avec_montant_et_devise_conformes_valide(self):
+        self.assertEqual(self.notifier_succes(self.paiement).status_code, 200)
+        self.assertEqual(self.statuts(), ("valide", "confirmee"))
+
+    def test_reconciliation_avec_montant_et_devise_conformes_valide(self):
+        self.etat_distant("succes")
+        self.assertEqual(reconcilier_paiement(self.paiement), ("succes", True))
+        self.assertEqual(self.statuts(), ("valide", "confirmee"))
 
 
 class ReconciliationAvantExpirationTests(DonneesReconciliation, APITestCase):
@@ -1811,6 +1876,47 @@ class ReversementTests(Donnees, APITestCase):
         self.reversement.refresh_from_db()
         self.assertEqual(self.reversement.statut, Reversement.Statut.VERSE)
 
+    def test_transfert_confirme_sans_montant_et_devise_conformes_refuse(self):
+        from .fournisseurs.base import ResultatTransfert
+
+        self.livrer(il_y_a_jours=8)
+        with mock.patch.object(FournisseurSimule, "transferer",
+                               return_value=ResultatTransfert(statut=EN_ATTENTE, identifiant_externe="T1")):
+            self.api(self.admin).post(f"/api/paiements/admin/reversements/{self.reversement.pk}/transferer/",
+                                      {"operateur": "wave"})
+        du = 8200
+        confirmations = {
+            "montant absent": (None, "XOF"),
+            "devise absente": (du, None),
+            "devise vide": (du, ""),
+            "montant et devise absents": (None, None),
+            "montant fractionnaire": (du + 0.5, "XOF"),
+            "montant fractionnaire décimal": (Decimal(f"{du}.50"), "XOF"),
+            "montant invalide": ("abc", "XOF"),
+            "montant en texte": (str(du), "XOF"),
+            "montant flottant": (float(du), "XOF"),
+            "montant booléen": (True, "XOF"),
+            "devise différente": (du, "EUR"),
+            "montant inférieur": (du - 1, "XOF"),
+            "montant supérieur": (du + 1, "XOF"),
+        }
+        # La lecture d'une notification simulée refuse déjà un succès sans
+        # montant entier : l'état vérifié est fourni ici directement, pour
+        # exercer le contrôle commun à tous les fournisseurs.
+        for numero, (libelle, (montant, devise)) in enumerate(confirmations.items()):
+            with self.subTest(libelle):
+                etat = EtatTransaction(statut=SUCCES, identifiant_externe="T1", montant=montant, devise=devise)
+                with mock.patch.object(FournisseurSimule, "verifier_transfert", return_value=etat):
+                    r = self.notifier(self.reversement.reference, montant=du, transfert=True,
+                                      evenement_id=f"evt-transfert-{numero}")
+                self.assertEqual(r.status_code, 400)
+                self.reversement.refresh_from_db()
+                self.assertEqual((self.reversement.statut, self.reversement.date_versement), ("en_cours", None))
+                self.assertEqual(
+                    JournalWebhook.objects.get(evenement_id=f"evt-transfert-{numero}").statut_traitement, "erreur")
+                self.assertFalse(Notification.objects.filter(
+                    destinataire=self.vendeur1, titre="Reversement effectué").exists())
+
     def test_vue_vendeur(self):
         self.livrer()
         (autre,) = self.commander((self.variante2, 1))
@@ -1924,6 +2030,7 @@ class CinetPayTests(ReponsesCinetPay, Donnees, APITestCase):
         paiement = self.initier_cinetpay()
         self.reponses[("GET", f"/v1/payment/{paiement.reference}")] = ReponseHTTP({
             "code": 100, "status": "SUCCESS", "merchant_transaction_id": paiement.reference, "transaction_id": "CP-TX-1",
+            "amount": int(paiement.montant), "currency": "XOF",
         })
         with mock.patch("requests.request", side_effect=self.repondre):
             self.assertEqual(self.notification(paiement, jeton="mauvais").status_code, 401)
@@ -1959,7 +2066,8 @@ class CinetPayTests(ReponsesCinetPay, Donnees, APITestCase):
         paiement = self.initier_cinetpay()
         reponses = iter([ReponseHTTP({"code": 1003, "status": "EXPIRED_TOKEN"}, 401),
                          ReponseHTTP({"status": "SUCCESS", "merchant_transaction_id": paiement.reference,
-                                      "transaction_id": "CP-TX-1"})])
+                                      "transaction_id": "CP-TX-1", "amount": int(paiement.montant),
+                                      "currency": "XOF"})])
         self.reponses[("GET", f"/v1/payment/{paiement.reference}")] = lambda: next(reponses)
         with mock.patch("requests.request", side_effect=self.repondre):
             self.assertEqual(self.notification(paiement).status_code, 200)
@@ -2081,7 +2189,8 @@ class ReconciliationReponsesCinetPayTests(ReponsesCinetPay, DonneesReconciliatio
         vieillir_paiement(self.p2, 16)
         self.repondre_a(self.p1, ReponseHTTP({"code": 404, "status": "TRANSACTION_NOT_FOUND"}, 404))
         self.repondre_a(self.p2, ReponseHTTP({"code": 100, "status": "SUCCESS", "transaction_id": "CP-TX-2",
-                                              "merchant_transaction_id": self.p2.reference}))
+                                              "merchant_transaction_id": self.p2.reference,
+                                              "amount": int(self.p2.montant), "currency": "XOF"}))
         self.appels.clear()
 
     def repondre_a(self, paiement, reponse):
