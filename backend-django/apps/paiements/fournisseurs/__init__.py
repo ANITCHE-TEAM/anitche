@@ -11,6 +11,7 @@ from django.utils.module_loading import import_string
 FOURNISSEURS = {
     "simule": "apps.paiements.fournisseurs.simule.FournisseurSimule",
     "cinetpay": "apps.paiements.fournisseurs.cinetpay.FournisseurCinetPay",
+    "geniuspay": "apps.paiements.fournisseurs.geniuspay.FournisseurGeniusPay",
 }
 
 
