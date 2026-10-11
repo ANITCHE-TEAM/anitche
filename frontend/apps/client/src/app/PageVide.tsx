@@ -1,3 +1,5 @@
+import { Button } from "@anitche/ui/button";
+
 export function PageVide() {
-  return <p>Page vide</p>;
+  return <Button>Page vide</Button>;
 }
