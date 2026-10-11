@@ -2,7 +2,7 @@ from datetime import timedelta
 from unittest import skipUnless
 from unittest.mock import patch
 
-from django.db import connection
+from django.db import IntegrityError, connection, transaction
 from django.test import TestCase, TransactionTestCase
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
@@ -1791,6 +1791,221 @@ class UtilisateurManagerTestCase(TestCase):
         self.assertEqual(client.role, Role.CLIENT)
         self.assertFalse(client.is_staff)
         self.assertFalse(client.is_superuser)
+
+
+# =====================================================
+# EMAIL : UNICITÉ INSENSIBLE À LA CASSE
+# =====================================================
+
+class EmailInsensibleALaCasseTests(TestCase):
+    """Deux adresses qui ne diffèrent que par la casse désignent le même
+    compte : la base refuse le doublon, chaque écriture enregistre l'email
+    en minuscules et la connexion ne dépend pas de la casse saisie."""
+
+    MOT_DE_PASSE = 'MotDePasseSolide123!'
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def creer(self, email, **champs):
+        return Utilisateur.objects.create_user(
+            email=email, password=self.MOT_DE_PASSE, nom='A', prenom='B', **champs,
+        )
+
+    def connecter(self, email):
+        return self.client.post('/api/utilisateurs/connexion/', {'email': email, 'password': self.MOT_DE_PASSE})
+
+    def test_la_base_refuse_deux_comptes_ne_differant_que_par_la_casse(self):
+        # bulk_create et update() écrivent sans passer par le manager ni les
+        # serializers : seule la contrainte en base peut refuser.
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Utilisateur.objects.bulk_create([
+                Utilisateur(email='awa@anitche.ci', nom='A', prenom='B'),
+                Utilisateur(email='Awa@Anitche.CI', nom='C', prenom='D'),
+            ])
+        self.assertFalse(Utilisateur.objects.exists())
+
+        self.creer('awa@anitche.ci')
+        autre = self.creer('autre@anitche.ci')
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Utilisateur.objects.filter(pk=autre.pk).update(email='AWA@anitche.ci')
+
+    def test_create_user_enregistre_l_email_en_minuscules(self):
+        self.assertEqual(self.creer('Awa.Kouassi@Anitche.CI').email, 'awa.kouassi@anitche.ci')
+
+    def test_inscription_enregistre_en_minuscules_et_refuse_une_variante_de_casse(self):
+        corps = {'email': 'Nouveau@Anitche.CI', 'password': self.MOT_DE_PASSE, 'nom': 'Kouassi', 'prenom': 'Awa'}
+        reponse = self.client.post('/api/utilisateurs/inscription/', corps)
+        self.assertEqual(reponse.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Utilisateur.objects.get().email, 'nouveau@anitche.ci')
+
+        reponse = self.client.post('/api/utilisateurs/inscription/', {**corps, 'email': 'NOUVEAU@anitche.ci'})
+        self.assertEqual(reponse.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Utilisateur.objects.count(), 1)
+
+    def test_connexion_quelle_que_soit_la_casse_saisie(self):
+        self.creer('awa@anitche.ci')
+        for email in ('awa@anitche.ci', 'Awa@Anitche.CI'):
+            with self.subTest(email=email):
+                self.assertEqual(self.connecter(email).status_code, status.HTTP_200_OK)
+
+    def test_connexion_d_un_compte_enregistre_avec_des_majuscules(self):
+        utilisateur = self.creer('awa@anitche.ci')
+        Utilisateur.objects.filter(pk=utilisateur.pk).update(email='Awa@Anitche.ci')
+        for email in ('Awa@Anitche.ci', 'awa@anitche.ci'):
+            with self.subTest(email=email):
+                self.assertEqual(self.connecter(email).status_code, status.HTTP_200_OK)
+
+    @patch('apps.utilisateurs.views.envoyer_code_otp_email.delay')
+    def test_changement_email_enregistre_en_minuscules(self, mock_envoi):
+        utilisateur = self.creer('moi@anitche.ci', email_verifie=True)
+        self.client.force_authenticate(user=utilisateur)
+        reponse = self.client.post('/api/utilisateurs/changement-contact/', {'nouvel_email': 'Nouvelle@Anitche.CI'})
+        self.assertEqual(reponse.status_code, status.HTTP_200_OK)
+        destinataire, code = mock_envoi.call_args[0][:2]
+        self.assertEqual(destinataire, 'nouvelle@anitche.ci')
+
+        reponse = self.client.post('/api/utilisateurs/verification-otp/', {
+            'code': code, 'type_usage': 'changement_email',
+        })
+        self.assertEqual(reponse.status_code, status.HTTP_200_OK)
+        utilisateur.refresh_from_db()
+        self.assertEqual(utilisateur.email, 'nouvelle@anitche.ci')
+
+    @patch('apps.utilisateurs.views.google_id_token.verify_oauth2_token')
+    def test_google_cree_le_compte_en_minuscules(self, mock_verify):
+        mock_verify.return_value = {
+            'sub': 'google-id-456', 'email': 'Awa@Anitche.CI', 'email_verified': True,
+            'family_name': 'A', 'given_name': 'B',
+        }
+        reponse = self.client.post('/api/utilisateurs/connexion-google/', {'id_token': 'fake-token'})
+        self.assertEqual(reponse.status_code, status.HTTP_200_OK)
+        self.assertEqual(Utilisateur.objects.get().email, 'awa@anitche.ci')
+
+    @patch('apps.utilisateurs.views.google_id_token.verify_oauth2_token')
+    def test_google_lie_le_compte_existant_malgre_la_casse(self, mock_verify):
+        utilisateur = self.creer('awa@anitche.ci', email_verifie=True)
+        mock_verify.return_value = {
+            'sub': 'google-id-456', 'email': 'AWA@Anitche.ci', 'email_verified': True,
+            'family_name': 'A', 'given_name': 'B',
+        }
+        reponse = self.client.post('/api/utilisateurs/connexion-google/', {'id_token': 'fake-token'})
+        self.assertEqual(reponse.status_code, status.HTTP_200_OK)
+        self.assertEqual(Utilisateur.objects.count(), 1)
+        utilisateur.refresh_from_db()
+        self.assertEqual((utilisateur.email, utilisateur.google_id), ('awa@anitche.ci', 'google-id-456'))
+
+    def test_le_modele_enregistre_l_email_en_minuscules(self):
+        # save() et clean() : chemins de l'admin Django et de tout code qui
+        # n'utilise ni le manager ni les serializers.
+        utilisateur = Utilisateur(email='Awa@Anitche.CI', nom='A', prenom='B', password='x')
+        utilisateur.save()
+        utilisateur.refresh_from_db()
+        self.assertEqual(utilisateur.email, 'awa@anitche.ci')
+
+        utilisateur.email = 'Nouvelle@Anitche.CI'
+        utilisateur.save(update_fields=['email'])
+        utilisateur.refresh_from_db()
+        self.assertEqual(utilisateur.email, 'nouvelle@anitche.ci')
+
+        formulaire = Utilisateur(email='Autre@Anitche.CI', nom='A', prenom='B', password='x')
+        formulaire.full_clean()
+        self.assertEqual(formulaire.email, 'autre@anitche.ci')
+
+    def test_le_formulaire_de_l_admin_enregistre_en_minuscules_et_refuse_la_variante_de_casse(self):
+        from django.contrib.admin.sites import AdminSite
+        from django.forms import modelform_factory
+
+        from apps.utilisateurs.admin import UtilisateurAdmin
+
+        utilisateur = self.creer('awa@anitche.ci')
+        self.creer('prise@anitche.ci')
+        Formulaire = modelform_factory(Utilisateur, fields=['email', 'nom', 'prenom'])
+        self.assertIn('email', UtilisateurAdmin(Utilisateur, AdminSite()).fieldsets[0][1]['fields'])
+
+        formulaire = Formulaire({'email': 'Modifie@Anitche.CI', 'nom': 'A', 'prenom': 'B'}, instance=utilisateur)
+        self.assertTrue(formulaire.is_valid(), formulaire.errors)
+        formulaire.save()
+        utilisateur.refresh_from_db()
+        self.assertEqual(utilisateur.email, 'modifie@anitche.ci')
+
+        formulaire = Formulaire({'email': 'PRISE@anitche.ci', 'nom': 'A', 'prenom': 'B'}, instance=utilisateur)
+        self.assertFalse(formulaire.is_valid())
+
+    def test_mot_de_passe_oublie_quelle_que_soit_la_casse(self):
+        utilisateur = self.creer('awa@anitche.ci')
+        with patch('apps.utilisateurs.views.envoyer_code_otp_email.delay') as envoi:
+            reponse = self.client.post('/api/utilisateurs/mot-de-passe-oublie/', {'email': 'AWA@Anitche.ci'})
+        self.assertEqual(reponse.status_code, status.HTTP_200_OK)
+        self.assertEqual(envoi.call_args[0][0], 'awa@anitche.ci')
+        self.assertTrue(CodeOTP.objects.filter(utilisateur=utilisateur, type_usage='mdp_oublie').exists())
+
+    def test_recherches_par_email_par_egalite_sur_l_email_en_minuscules(self):
+        self.creer('awa@anitche.ci', email_verifie=True)
+        autre = self.creer('autre@anitche.ci', email_verifie=True)
+        infos_google = {'sub': 'g-1', 'email': 'AWA@Anitche.ci', 'email_verified': True}
+        with CaptureQueriesContext(connection) as requetes, \
+                patch('apps.utilisateurs.views.envoyer_code_otp_email.delay'), \
+                patch('apps.utilisateurs.views.google_id_token.verify_oauth2_token', return_value=infos_google):
+            self.assertEqual(self.connecter('Awa@Anitche.CI').status_code, status.HTTP_200_OK)
+            self.client.post('/api/utilisateurs/mot-de-passe-oublie/', {'email': 'AWA@Anitche.ci'})
+            self.client.post('/api/utilisateurs/mot-de-passe-oublie/confirmer/', {
+                'email': 'AWA@Anitche.ci', 'code': '000000', 'nouveau_password': self.MOT_DE_PASSE,
+            })
+            self.client.post('/api/utilisateurs/inscription/', {
+                'email': 'AWA@Anitche.ci', 'password': self.MOT_DE_PASSE, 'nom': 'A', 'prenom': 'B',
+            })
+            self.client.post('/api/utilisateurs/connexion-google/', {'id_token': 'fake-token'})
+            self.client.force_authenticate(user=autre)
+            self.client.post('/api/utilisateurs/changement-contact/', {'nouvel_email': 'AWA@Anitche.ci'})
+        par_email = [r['sql'] for r in requetes.captured_queries if 'awa@anitche.ci' in r['sql'].lower()]
+        self.assertGreaterEqual(len(par_email), 6)
+        for sql in par_email:
+            self.assertNotIn('UPPER(', sql)
+            self.assertNotIn(' LIKE ', sql)
+        self.assertGreaterEqual(sum('LOWER(' in sql for sql in par_email), 6)
+
+
+class MigrationEmailsEnMinusculesTests(TransactionTestCase):
+    """Migration 0010 : les emails existants passent en minuscules ; si deux
+    comptes ne diffèrent que par la casse, elle échoue sans rien modifier."""
+
+    AVANT = [('utilisateurs', '0009_retrait_compte_bancaire')]
+    APRES = [('utilisateurs', '0011_utilisateur_email_unique_sans_casse')]
+
+    def tearDown(self):
+        executeur = MigrationExecutor(connection)
+        executeur.migrate(executeur.loader.graph.leaf_nodes())
+
+    def comptes_avant_migration(self, *emails):
+        executeur = MigrationExecutor(connection)
+        executeur.migrate(self.AVANT)
+        AncienUtilisateur = executeur.loader.project_state(self.AVANT).apps.get_model('utilisateurs', 'Utilisateur')
+        for email in emails:
+            AncienUtilisateur.objects.create(email=email, nom='M', prenom='G', password='x')
+        return AncienUtilisateur
+
+    def emails(self, modele):
+        return sorted(modele.objects.values_list('email', flat=True))
+
+    def test_emails_existants_mis_en_minuscules(self):
+        AncienUtilisateur = self.comptes_avant_migration('Awa@Anitche.CI', 'deja@anitche.ci')
+        MigrationExecutor(connection).migrate(self.APRES)
+        self.assertEqual(self.emails(AncienUtilisateur), ['awa@anitche.ci', 'deja@anitche.ci'])
+
+    def test_collision_de_casse_echec_sans_rien_modifier(self):
+        avant = ['Autre@Anitche.CI', 'Awa@Anitche.CI', 'awa@anitche.ci']
+        AncienUtilisateur = self.comptes_avant_migration(*avant)
+        try:
+            with self.assertRaises(RuntimeError):
+                MigrationExecutor(connection).migrate(self.APRES)
+            self.assertEqual(self.emails(AncienUtilisateur), sorted(avant))
+            appliquees = MigrationExecutor(connection).loader.applied_migrations
+            self.assertNotIn(('utilisateurs', '0010_emails_en_minuscules'), appliquees)
+        finally:
+            # tearDown remonte toutes les migrations : sans doublon.
+            AncienUtilisateur.objects.all().delete()
+
 
 # =====================================================
 # Chiffrement, IP, OTP, email vérifié, limites

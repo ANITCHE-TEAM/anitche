@@ -254,12 +254,27 @@ def valider_paiement(paiement, etat=None):
 
 def _controler_etat(paiement, etat):
     """Montant et devise confirmés par le fournisseur = ceux calculés par le serveur."""
-    if etat.montant is not None and etat.montant != int(paiement.montant):
+    controler_montant_et_devise(etat, paiement.montant, paiement.devise)
+
+
+def controler_montant_et_devise(etat, montant_attendu, devise_attendue):
+    """Contrôle d'un succès confirmé par un fournisseur, pour un paiement
+    comme pour un transfert (reversements). Fermé par défaut : un montant
+    absent, illisible ou non entier, ou une devise absente, vaut refus — un
+    succès ne s'applique jamais sur une information que le fournisseur n'a
+    pas confirmée. Lève IncoherenceTransaction."""
+    if type(etat.montant) is not int:
         raise IncoherenceTransaction(
-            f"Montant confirmé ({etat.montant}) différent du montant dû ({int(paiement.montant)})."
+            f"Montant confirmé absent ou invalide (montant attendu : {montant_attendu} {devise_attendue})."
         )
-    if etat.devise is not None and etat.devise != paiement.devise:
-        raise IncoherenceTransaction(f"Devise confirmée ({etat.devise}) différente de {paiement.devise}.")
+    if etat.montant != montant_attendu:
+        raise IncoherenceTransaction(
+            f"Montant confirmé ({etat.montant}) différent du montant attendu ({montant_attendu})."
+        )
+    if not etat.devise:
+        raise IncoherenceTransaction(f"Devise confirmée absente (devise attendue : {devise_attendue}).")
+    if etat.devise != devise_attendue:
+        raise IncoherenceTransaction(f"Devise confirmée ({etat.devise}) différente de {devise_attendue}.")
 
 
 def marquer_echoue(paiement, motif="échec confirmé par le fournisseur"):

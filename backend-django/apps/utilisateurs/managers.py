@@ -1,4 +1,5 @@
 from django.contrib.auth.models import BaseUserManager
+from django.db.models.functions import Lower
 
 
 class UtilisateurManager(BaseUserManager):
@@ -8,6 +9,32 @@ class UtilisateurManager(BaseUserManager):
     Il centralise la logique de création des utilisateurs
     standards et des superutilisateurs.
     """
+
+    @classmethod
+    def normalize_email(cls, email):
+        """
+        Email tel qu'il est enregistré : entièrement en minuscules.
+
+        Deux adresses qui ne diffèrent que par la casse désignent le même
+        compte ; toute écriture de l'email passe par cette méthode.
+        """
+        return super().normalize_email(email).lower()
+
+    def avec_email(self, email):
+        """
+        Comptes (un au plus) dont l'email est celui-ci, quelle que soit
+        la casse saisie.
+
+        Égalité exacte sur LOWER(email) : la recherche s'appuie sur
+        l'index de la contrainte d'unicité insensible à la casse.
+        """
+        return self.alias(email_minuscules=Lower('email')).filter(
+            email_minuscules=self.normalize_email(email)
+        )
+
+    def get_by_natural_key(self, email):
+        """Compte correspondant à l'email saisi à la connexion."""
+        return self.avec_email(email).get()
 
     def create_user(self, email, password=None, **extra_fields):
         """
