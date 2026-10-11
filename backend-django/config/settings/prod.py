@@ -85,12 +85,17 @@ except ValueError as erreur:
         f"32 octets encodés en base64 URL) : {erreur}"
     )
 
-# Paiements : jamais le fournisseur simulé (il accepte des notifications
-# signées avec un secret de développement public), jamais une clé CinetPay
-# de sandbox, jamais sans clés. Transmis par docker-compose.prod.yml.
-if PAIEMENT_FOURNISSEUR == 'simule':
+# Paiements : liste fermée des fournisseurs autorisés. Jamais le fournisseur
+# simulé (il accepte des notifications signées avec un secret de
+# développement public), jamais une valeur inconnue ou un adaptateur non
+# listé ici (aucun des contrôles de clés ci-dessous ne s'y appliquerait),
+# jamais une clé CinetPay de sandbox, jamais sans clés. Transmis par
+# docker-compose.prod.yml.
+PAIEMENT_FOURNISSEURS_AUTORISES = ('cinetpay',)
+if PAIEMENT_FOURNISSEUR not in PAIEMENT_FOURNISSEURS_AUTORISES:
     raise ImproperlyConfigured(
-        "PAIEMENT_FOURNISSEUR='simule' est interdit en production : définissez "
+        f"PAIEMENT_FOURNISSEUR={PAIEMENT_FOURNISSEUR!r} est interdit en production "
+        f"(valeurs autorisées : {', '.join(PAIEMENT_FOURNISSEURS_AUTORISES)}) : définissez "
         "PAIEMENT_FOURNISSEUR=cinetpay et ses clés (docs/MODULE_PAIEMENTS.md)."
     )
 if PAIEMENT_FOURNISSEUR == 'cinetpay':

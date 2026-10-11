@@ -1917,6 +1917,81 @@ class ReversementTests(Donnees, APITestCase):
                 self.assertFalse(Notification.objects.filter(
                     destinataire=self.vendeur1, titre="Reversement effectué").exists())
 
+    # --- Succès immédiat d'un transfert : même contrôle que la notification ---
+
+    URL_TRANSFERER = "/api/paiements/admin/reversements/{}/transferer/"
+
+    def transferer_avec(self, **resultat):
+        """Transfert dont le fournisseur répond tout de suite SUCCES, avec
+        les montant et devise donnés (absents s'ils ne sont pas passés)."""
+        from .fournisseurs.base import ResultatTransfert
+
+        reponse = ResultatTransfert(statut=SUCCES, identifiant_externe="T1", **resultat)
+        with mock.patch.object(FournisseurSimule, "transferer", return_value=reponse):
+            return self.api(self.admin).post(self.URL_TRANSFERER.format(self.reversement.pk), {"operateur": "wave"})
+
+    def test_succes_immediat_sans_montant_et_devise_conformes_reste_en_cours(self):
+        self.livrer(il_y_a_jours=8)
+        du = 8200
+        confirmations = {
+            "montant et devise absents": {},
+            "montant absent": {"devise": "XOF"},
+            "devise absente": {"montant": du},
+            "devise vide": {"montant": du, "devise": ""},
+            "montant fractionnaire": {"montant": du + 0.5, "devise": "XOF"},
+            "montant fractionnaire décimal": {"montant": Decimal(f"{du}.50"), "devise": "XOF"},
+            "montant en texte": {"montant": str(du), "devise": "XOF"},
+            "montant flottant": {"montant": float(du), "devise": "XOF"},
+            "montant booléen": {"montant": True, "devise": "XOF"},
+            "devise différente": {"montant": du, "devise": "EUR"},
+            "montant inférieur": {"montant": du - 1, "devise": "XOF"},
+            "montant supérieur": {"montant": du + 1, "devise": "XOF"},
+        }
+        for libelle, resultat in confirmations.items():
+            with self.subTest(libelle):
+                Reversement.objects.filter(pk=self.reversement.pk).update(statut=Reversement.Statut.DISPONIBLE)
+                with self.assertLogs("securite", "ERROR") as journaux:
+                    r = self.transferer_avec(**resultat)
+                # L'argent a pu partir : ni versé, ni rendu disponible.
+                self.assertEqual((r.status_code, r.data["statut"]), (200, "en_cours"))
+                self.reversement.refresh_from_db()
+                self.assertEqual(
+                    (self.reversement.statut, self.reversement.date_versement, self.reversement.montant_a_verser,
+                     self.reversement.reference_externe),
+                    ("en_cours", None, Decimal(du), "T1"),
+                )
+                self.assertIn(f"Transfert {self.reversement.reference} : succès immédiat non appliqué",
+                              journaux.output[0])
+                self.assertFalse(Notification.objects.filter(
+                    destinataire=self.vendeur1, titre="Reversement effectué").exists())
+
+    def test_succes_immediat_conforme_applique(self):
+        self.livrer(il_y_a_jours=8)
+        r = self.transferer_avec(montant=8200, devise="XOF")
+        self.assertEqual((r.status_code, r.data["statut"]), (200, "verse"))
+        self.reversement.refresh_from_db()
+        self.assertIsNotNone(self.reversement.date_versement)
+        self.assertEqual(Notification.objects.filter(
+            destinataire=self.vendeur1, titre="Reversement effectué").count(), 1)
+
+    def test_succes_immediat_refuse_puis_finalise_par_la_notification(self):
+        self.livrer(il_y_a_jours=8)
+        with self.assertLogs("securite", "ERROR"):
+            self.transferer_avec(montant=8199, devise="XOF")
+        r = self.notifier(self.reversement.reference, montant=8200, transfert=True)
+        self.assertEqual(r.status_code, 200)
+        self.reversement.refresh_from_db()
+        self.assertEqual(self.reversement.statut, Reversement.Statut.VERSE)
+        self.assertEqual(Notification.objects.filter(
+            destinataire=self.vendeur1, titre="Reversement effectué").count(), 1)
+
+    def test_fournisseur_simule_confirme_montant_et_devise_du_transfert(self):
+        self.livrer(il_y_a_jours=8)
+        Reversement.objects.filter(pk=self.reversement.pk).update(montant_a_verser=Decimal("8200"))
+        self.reversement.refresh_from_db()
+        resultat = FournisseurSimule().transferer(self.reversement, "+2250707070707", "orange_money")
+        self.assertEqual((resultat.statut, resultat.montant, resultat.devise), (SUCCES, 8200, "XOF"))
+
     def test_vue_vendeur(self):
         self.livrer()
         (autre,) = self.commander((self.variante2, 1))
@@ -2165,6 +2240,48 @@ class CinetPayTests(ReponsesCinetPay, Donnees, APITestCase):
         self.assertEqual((corps["payment_method"], corps["amount"], corps["phone_number"]),
                          ("WAVE_CI", 8400, "+2250707070707"))
 
+    def test_transfert_montant_et_devise_lus_dans_la_reponse(self):
+        """Jamais recopiés du reversement : absents ou illisibles dans la
+        réponse de CinetPay, ils valent None."""
+        adaptateur = FournisseurCinetPay()
+        reversement = Reversement(reference="REV-2026-A", montant_a_verser=Decimal("8400"))
+        base = {"code": 200, "status": "SUCCESS", "transaction_id": "TR-1", "notify_token": "nt"}
+        cas = {
+            "présents": ({"amount": 8400, "currency": "XOF"}, (8400, "XOF")),
+            "montant en texte": ({"amount": "8400", "currency": "XOF"}, (8400, "XOF")),
+            "autres valeurs": ({"amount": 8399, "currency": "EUR"}, (8399, "EUR")),
+            "absents": ({}, (None, None)),
+            "fractionnaire, devise vide": ({"amount": "8400.50", "currency": ""}, (None, None)),
+        }
+        with mock.patch("requests.request", side_effect=self.repondre):
+            for libelle, (champs, attendu) in cas.items():
+                with self.subTest(libelle):
+                    self.reponses[("POST", "/v1/transfer")] = ReponseHTTP({**base, **champs})
+                    resultat = adaptateur.transferer(reversement, "+2250707070707", "wave")
+                    self.assertEqual((resultat.statut, resultat.montant, resultat.devise), (SUCCES, *attendu))
+
+    def test_succes_immediat_sans_montant_ni_devise_reste_en_cours(self):
+        valider_paiement(self.initier_cinetpay())
+        reversement = Reversement.objects.get(commande=self.commande)
+        Reversement.objects.filter(pk=reversement.pk).update(statut=Reversement.Statut.DISPONIBLE)
+        url = f"/api/paiements/admin/reversements/{reversement.pk}/transferer/"
+        self.reponses[("POST", "/v1/transfer")] = ReponseHTTP({"code": 200, "status": "SUCCESS",
+                                                                "transaction_id": "TR-1", "notify_token": "nt"})
+        with mock.patch("requests.request", side_effect=self.repondre), self.assertLogs("securite", "ERROR"):
+            r = self.api(self.admin).post(url, {"operateur": "wave"})
+        self.assertEqual((r.status_code, r.data["statut"]), (200, "en_cours"))
+        self.assertFalse(Notification.objects.filter(destinataire=self.vendeur1, titre="Reversement effectué").exists())
+        # Même réponse, montant et devise confirmés : appliqué.
+        Reversement.objects.filter(pk=reversement.pk).update(statut=Reversement.Statut.DISPONIBLE)
+        reversement.refresh_from_db()
+        self.reponses[("POST", "/v1/transfer")] = ReponseHTTP({
+            "code": 200, "status": "SUCCESS", "transaction_id": "TR-2", "notify_token": "nt",
+            "amount": int(reversement.montant_net), "currency": "XOF",
+        })
+        with mock.patch("requests.request", side_effect=self.repondre):
+            r = self.api(self.admin).post(url, {"operateur": "wave"})
+        self.assertEqual((r.status_code, r.data["statut"]), (200, "verse"))
+
 
 class ReconciliationReponsesCinetPayTests(ReponsesCinetPay, DonneesReconciliation, TransactionTestCase):
     """Un 4xx de CinetPay pour UN paiement P1 (transaction inconnue) est un
@@ -2258,7 +2375,8 @@ class ReconciliationReponsesCinetPayTests(ReponsesCinetPay, DonneesReconciliatio
 # =====================================================================
 
 class ConfigurationProductionTests(APITestCase):
-    """prod.py refuse le fournisseur simulé, une clé de sandbox ou l'absence de clés."""
+    """prod.py refuse tout fournisseur hors de sa liste fermée (dont le
+    simulé), une clé de sandbox ou l'absence de clés."""
 
     def importer_prod(self, script="import config.settings.prod", **variables):
         env = {
@@ -2332,6 +2450,37 @@ class ConfigurationProductionTests(APITestCase):
                 resultat = self.importer_prod(**variables)
                 self.assertNotEqual(resultat.returncode, 0)
                 self.assertIn("ImproperlyConfigured", resultat.stderr)
+
+    def test_fournisseur_en_liste_fermee(self):
+        """Seuls les fournisseurs listés dans prod.py démarrent : ni le
+        simulé, ni un adaptateur pas encore ouvert à la production, ni une
+        valeur inconnue (qui passerait sinon tous les contrôles de clés)."""
+        cas = {
+            "simulé": "simule",
+            "geniuspay (pas encore autorisé)": "geniuspay",
+            "inconnu": "paydunya",
+            "vide": "",
+            "casse différente": "CinetPay",
+            "espace": "cinetpay ",
+        }
+        for libelle, valeur in cas.items():
+            with self.subTest(libelle):
+                resultat = self.importer_prod(PAIEMENT_FOURNISSEUR=valeur)
+                self.assertNotEqual(resultat.returncode, 0)
+                self.assertIn("ImproperlyConfigured", resultat.stderr)
+                self.assertIn("PAIEMENT_FOURNISSEUR", resultat.stderr)
+
+    def test_fournisseur_absent_de_l_environnement_refuse(self):
+        # base.py : « simule » par défaut. Sans fichier .env, comme dans le conteneur.
+        script = (
+            "import os, decouple\n"
+            "decouple.config = decouple.Config(decouple.RepositoryEmpty())\n"
+            "os.environ.pop('PAIEMENT_FOURNISSEUR')\n"
+            "import config.settings.prod\n"
+        )
+        resultat = self.importer_prod(script=script)
+        self.assertNotEqual(resultat.returncode, 0)
+        self.assertIn("PAIEMENT_FOURNISSEUR", resultat.stderr)
 
     def test_refus_url_de_notification_injoignable(self):
         cas = {
