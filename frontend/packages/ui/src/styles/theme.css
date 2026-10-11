@@ -1,0 +1,65 @@
+/*
+ * THÈME PROVISOIRE : valeurs neutres, en attendant la maquette.
+ * Pour changer l'identité visuelle, ne modifier que les valeurs de `:root` (et les polices) ;
+ * les composants ne lisent que les noms ci-dessous.
+ */
+@import "tailwindcss";
+@import "tw-animate-css";
+
+:root {
+  --anitche-background: oklch(1 0 0);
+  --anitche-foreground: oklch(0.145 0 0);
+  --anitche-primary: oklch(0.205 0 0);
+  --anitche-primary-foreground: oklch(0.985 0 0);
+  --anitche-secondary: oklch(0.97 0 0);
+  --anitche-secondary-foreground: oklch(0.205 0 0);
+  --anitche-muted: oklch(0.97 0 0);
+  --anitche-muted-foreground: oklch(0.556 0 0);
+  --anitche-destructive: oklch(0.577 0.245 27.325);
+  --anitche-popover: oklch(1 0 0);
+  --anitche-popover-foreground: oklch(0.145 0 0);
+  --anitche-border: oklch(0.922 0 0);
+  --anitche-input: oklch(0.922 0 0);
+  --anitche-ring: oklch(0.708 0 0);
+
+  --anitche-radius: 0.625rem;
+  --anitche-radius-sm: calc(var(--anitche-radius) * 0.6);
+  --anitche-radius-md: calc(var(--anitche-radius) * 0.8);
+  --anitche-radius-lg: var(--anitche-radius);
+  --anitche-radius-xl: calc(var(--anitche-radius) * 1.4);
+
+  --anitche-font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@theme inline {
+  --color-background: var(--anitche-background);
+  --color-foreground: var(--anitche-foreground);
+  --color-primary: var(--anitche-primary);
+  --color-primary-foreground: var(--anitche-primary-foreground);
+  --color-secondary: var(--anitche-secondary);
+  --color-secondary-foreground: var(--anitche-secondary-foreground);
+  --color-muted: var(--anitche-muted);
+  --color-muted-foreground: var(--anitche-muted-foreground);
+  --color-destructive: var(--anitche-destructive);
+  --color-popover: var(--anitche-popover);
+  --color-popover-foreground: var(--anitche-popover-foreground);
+  --color-border: var(--anitche-border);
+  --color-input: var(--anitche-input);
+  --color-ring: var(--anitche-ring);
+
+  --radius-sm: var(--anitche-radius-sm);
+  --radius-md: var(--anitche-radius-md);
+  --radius-lg: var(--anitche-radius-lg);
+  --radius-xl: var(--anitche-radius-xl);
+
+  --font-sans: var(--anitche-font-sans);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground font-sans;
+  }
+}

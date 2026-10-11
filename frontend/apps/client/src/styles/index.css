@@ -1,0 +1,5 @@
+/* theme.css de @anitche/ui importe déjà tailwindcss ; l'importer ici aussi le dupliquerait. */
+@import "@anitche/ui/theme.css";
+
+/* Sans cette ligne, les classes des composants de ui ne sont jamais générées (lien pnpm via node_modules). */
+@source "../../../../packages/ui/src";
