@@ -16,7 +16,8 @@ la devise (code ISO, « XOF »), tous deux lus dans la réponse du fournisseur
 et jamais recopiés du paiement. services._controler_etat les compare au
 montant dû et à la devise du paiement ; montant absent, non entier ou
 différent, devise absente ou différente : le succès est refusé
-(IncoherenceTransaction), quel que soit le fournisseur.
+(IncoherenceTransaction), quel que soit le fournisseur. Même contrat pour
+un ResultatTransfert de statut SUCCES (reversements.transferer_reversement).
 """
 
 import hashlib
@@ -97,6 +98,12 @@ class ResultatTransfert:
     statut: str  # SUCCES, ECHEC ou EN_ATTENTE (état final par notification)
     identifiant_externe: str = ""
     jeton_notification: str = ""
+    # Obligatoires pour qu'un SUCCES immédiat soit appliqué, comme pour un
+    # EtatTransaction : lus dans la réponse du fournisseur, jamais recopiés
+    # du reversement. None : absents ou illisibles — le reversement reste
+    # alors « en cours », son état final vient de la notification.
+    montant: int | None = None
+    devise: str | None = None
 
 
 def hacher_jeton(jeton):

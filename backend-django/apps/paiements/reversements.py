@@ -355,7 +355,14 @@ def _revenir_disponible(reversement_id, motif):
 
 
 def transferer_reversement(reversement, administrateur, operateur=None):
-    """Versement par l'API de transfert du fournisseur actif."""
+    """Versement par l'API de transfert du fournisseur actif.
+
+    Un SUCCES immédiat n'est appliqué que s'il confirme le montant à verser
+    et la devise, comme une notification de transfert. Sinon le reversement
+    reste « en cours » (l'argent a pu partir : il ne redevient pas
+    disponible) et son état final vient de la notification."""
+    from .services import IncoherenceTransaction, controler_montant_et_devise
+
     fournisseur = fournisseur_actif()
     with transaction.atomic():
         verrouille = Reversement.objects.select_for_update().select_related("boutique__proprietaire").get(pk=reversement.pk)
@@ -386,9 +393,18 @@ def transferer_reversement(reversement, administrateur, operateur=None):
         verrouille = Reversement.objects.select_for_update().select_related("boutique__proprietaire").get(pk=verrouille.pk)
         verrouille.reference_externe = resultat.identifiant_externe
         verrouille.hash_jeton_notification = hacher_jeton(resultat.jeton_notification)
+        incoherence = None
         if resultat.statut == SUCCES and verrouille.statut == Statut.EN_COURS:
-            _finaliser(verrouille)
+            try:
+                controler_montant_et_devise(resultat, verrouille.montant_a_verser, DEVISE_TRANSFERT)
+            except IncoherenceTransaction as erreur:
+                incoherence = erreur
+            else:
+                _finaliser(verrouille)
         verrouille.save()
+    if incoherence is not None:
+        logger_securite.error("Transfert %s : succès immédiat non appliqué, reversement laissé en cours (%s).",
+                              verrouille.reference, incoherence)
     if resultat.statut == ECHEC:
         verrouille = _revenir_disponible(verrouille.pk, "refus immédiat du fournisseur")
     elif verrouille.statut == Statut.VERSE:
