@@ -26,7 +26,7 @@ Django gère le classique : un ORM puissant, un admin prêt à l'emploi, idéal 
 
 | Outil | Usage |
 |---|---|
-| Node.js (v18+) | Frontend React |
+| Node.js (22 ou plus, `frontend/.nvmrc`) + pnpm (via Corepack) | Frontend React |
 | Python (3.11+) | Django et FastAPI |
 | PostgreSQL | Base de données |
 | Redis | Cache + tâches en arrière-plan (Celery) |
@@ -37,18 +37,23 @@ Django gère le classique : un ORM puissant, un admin prêt à l'emploi, idéal 
 
 ```
 anitche/
-├── frontend/                    # Application React
-│   ├── src/
-│   │   ├── composants/
-│   │   │   ├── ui/              # boutons, cartes, champs réutilisables
-│   │   │   └── mise-en-page/    # header, footer, structure des pages
-│   │   ├── fonctionnalites/     # un dossier par epic du backlog
-│   │   ├── hooks/
-│   │   ├── services/            # appels API (axios)
-│   │   ├── store/                # état global (Zustand)
-│   │   ├── routes/
-│   │   └── App.jsx
-│   └── package.json
+├── frontend/                    # Monorepo pnpm + Turborepo (voir frontend/README.md)
+│   ├── apps/
+│   │   ├── client/              # portail client (5173)
+│   │   ├── vendeur/             # portail vendeur (5174)
+│   │   ├── livreur/             # portail livreur (5175)
+│   │   └── admin/               # portail admin (5176)
+│   │   # chaque portail : src/app, src/mises-en-page ; composants/, lib/ et
+│   │   # fonctionnalites/<module>/ s'ajoutent avec le premier usage (règles : packages/config)
+│   ├── packages/
+│   │   ├── config/              # tsconfig, ESLint (frontières d'import), Vite, Vitest
+│   │   ├── utils/               # montants FCFA, dates, téléphone, validations
+│   │   ├── api-client/          # types générés, clients HTTP, ErreurApi, QueryClient
+│   │   ├── auth/                # session, jetons, gardes (sans écran)
+│   │   └── ui/                  # primitives et thème partagés
+│   ├── package.json             # scripts racine (turbo)
+│   ├── pnpm-workspace.yaml      # workspaces et catalogue de versions
+│   └── turbo.json
 │
 ├── backend-django/               # Coeur métier
 │   ├── config/settings/{base,dev,prod,test,ci}.py
@@ -76,7 +81,7 @@ anitche/
 └── docs/                              # Backlog, specs, ce guide
 ```
 
-**Règle de nommage à retenir** : les dossiers métier sont en français, pour que toute l'équipe s'y retrouve — y compris design. Les fichiers de code (`models.py`, `views.py`, `ProductCard.jsx`) restent en anglais : c'est la convention universelle attendue par Django et React.
+**Règle de nommage à retenir** : les dossiers métier sont en français, pour que toute l'équipe s'y retrouve — y compris design. Les fichiers de code des frameworks (`models.py`, `views.py`) restent en anglais : c'est la convention attendue par Django. Côté frontend, les noms métier sont en français (`fonctionnalites/`, `mises-en-page/`, `montant.ts`).
 
 ## 4. Démarrer après le clone
 
@@ -86,7 +91,7 @@ anitche/
 docker compose -f infra/docker-compose.yml up
 ```
 
-- Frontend  → http://localhost:5173
+- Frontend  → http://localhost:5173 (portail client seulement ; vendeur, livreur et admin se lancent sur l'hôte avec `pnpm dev`)
 - Django    → http://localhost:8000
 - Swagger   → http://localhost:8000/api/docs/ (documentation de l'API Django, dev uniquement)
 - FastAPI   → http://localhost:8001/docs
@@ -104,7 +109,7 @@ Comptes, contenu et conventions de l'API (JWT, erreurs, pagination) : [`GUIDE_FR
 
 | Équipe | Commandes |
 |---|---|
-| Frontend | `cd frontend && npm install && npm run dev` |
+| Frontend | `cd frontend && corepack enable && pnpm install && pnpm dev` (détail et commandes : [`frontend/README.md`](../frontend/README.md)) |
 | Backend Django | `cd backend-django` → venv → `pip install -r requirements.txt` → `migrate` → `runserver` |
 | Backend FastAPI | `cd backend-fastapi` → venv → `pip install -r requirements.txt` → `uvicorn app.main:app --reload` |
 
@@ -185,9 +190,12 @@ Variables de `infra/.env` (modèle commenté : `infra/.env.example`), transmises
 
 | Je veux ajouter... | Je vais dans... |
 |---|---|
-| Un composant réutilisable | `frontend/src/composants/ui/` |
-| Une fonctionnalité liée à un epic | `frontend/src/fonctionnalites/<nom-epic>/` |
-| Un appel API | `frontend/src/services/` |
+| Un composant réutilisable entre portails | `frontend/packages/ui/` (seulement quand une page l'exige) |
+| Un composant propre à un portail | `frontend/apps/<portail>/src/composants/` |
+| Une fonctionnalité liée à un epic | `frontend/apps/<portail>/src/fonctionnalites/<module>/` |
+| Un appel API | `frontend/apps/<portail>/src/fonctionnalites/<module>/api.ts`, via `@anitche/api-client` |
+| Un format, une validation locale (FCFA, date, téléphone) | `frontend/packages/utils/` |
+| Une règle de frontière d'import | `frontend/packages/config/eslint/frontieres.js` |
 | Une table liée aux commandes | `backend-django/apps/commandes/models.py` |
 | Une route de recherche rapide | `backend-fastapi/app/routeurs/recherche.py` |
 | Un script de déploiement | `infra/scripts/` |
