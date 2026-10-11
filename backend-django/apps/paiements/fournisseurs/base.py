@@ -50,6 +50,12 @@ class NotificationInvalide(Exception):
     """Notification non authentique, incomplète ou incohérente."""
 
 
+class NotificationIgnoree(Exception):
+    """Notification authentique mais sans effet ici (essai du fournisseur,
+    événement d'un autre périmètre) : acquittée (200), rien n'est lu ni
+    modifié en base. Le message, journalisé, ne contient aucun secret."""
+
+
 class OperationNonSupportee(Exception):
     """Le fournisseur ne propose pas cette opération par API."""
 
@@ -125,6 +131,13 @@ class FournisseurPaiement:
     chez lui."""
 
     code = ""
+    #: False : la notification porte la référence ANITCHE du paiement
+    #: (Notification.reference), qui sert à le retrouver. True : elle ne
+    #: porte que la référence du fournisseur (Notification.identifiant_externe),
+    #: comparée à Paiement.transaction_id_externe stockée à l'initiation ;
+    #: Notification.reference, si elle est renseignée, sert de recoupement
+    #: (services._paiement_notifie).
+    notification_par_identifiant_externe = False
 
     # --- Encaissement -----------------------------------------------------
 
@@ -133,7 +146,8 @@ class FournisseurPaiement:
         raise NotImplementedError
 
     def lire_notification(self, request):
-        """Lit la notification reçue → Notification (sans la faire confiance)."""
+        """Lit la notification reçue → Notification (sans la faire confiance).
+        Lève NotificationIgnoree pour un événement authentique sans effet."""
         raise NotImplementedError
 
     def authentifier_notification(self, notification, objet):

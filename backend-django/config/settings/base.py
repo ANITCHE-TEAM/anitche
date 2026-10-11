@@ -448,6 +448,17 @@ CINETPAY_API_KEY = config('CINETPAY_API_KEY', default='')
 CINETPAY_API_PASSWORD = config('CINETPAY_API_PASSWORD', default='')
 CINETPAY_API_URL = config('CINETPAY_API_URL', default='')
 CINETPAY_TIMEOUT = config('CINETPAY_TIMEOUT', default=10, cast=int)
+# GeniusPay (API marchand v1, encaissement) : clés du compte, secret de
+# signature des webhooks (whsec_…) et environnement attendu, 'sandbox' ou
+# 'live', comparé à celui de chaque notification et de chaque réponse.
+# Vides : l'adaptateur n'ouvre, ne vérifie et n'accepte rien. L'URL de l'API
+# n'est à définir que pour remplacer celle de la documentation.
+GENIUSPAY_API_KEY = config('GENIUSPAY_API_KEY', default='')
+GENIUSPAY_API_SECRET = config('GENIUSPAY_API_SECRET', default='')
+GENIUSPAY_WEBHOOK_SECRET = config('GENIUSPAY_WEBHOOK_SECRET', default='')
+GENIUSPAY_ENVIRONNEMENT = config('GENIUSPAY_ENVIRONNEMENT', default='')
+GENIUSPAY_API_URL = config('GENIUSPAY_API_URL', default='')
+GENIUSPAY_TIMEOUT = config('GENIUSPAY_TIMEOUT', default=10, cast=int)
 # Adresse publique de l'API, pour les URL de notification envoyées au
 # fournisseur (120 caractères au plus chez CinetPay).
 BACKEND_BASE_URL = config('BACKEND_BASE_URL', default='http://localhost:8000')
