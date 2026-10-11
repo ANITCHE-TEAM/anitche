@@ -40,4 +40,6 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Types API à jour (schema.yaml, openapi.json)
         run: pnpm --filter @anitche/api-client verifier:api
+      - name: Frontières entre paquets (experimental)
+        run: pnpm turbo boundaries
       - run: pnpm turbo run lint typecheck test build
