@@ -156,8 +156,12 @@ LECTURE_PAIEMENT = (
     "import config.settings.prod as p\n"
     "print(json.dumps({'fournisseur': p.PAIEMENT_FOURNISSEUR, 'environnement': p.GENIUSPAY_ENVIRONNEMENT}))\n"
 )
-CLE_PUBLIQUE_LIVE = "pk_live_factice"
-CLE_SECRETE_LIVE = "sk_live_factice"
+# Préfixes relevés sur le tableau de bord GeniusPay (ceux de « live » restent
+# à confirmer) : sk_ pour la clé publique, ss_ pour la clé secrète.
+CLE_PUBLIQUE_LIVE = "sk_live_factice"
+CLE_SECRETE_LIVE = "ss_live_factice"
+CLE_PUBLIQUE_SANDBOX = "sk_sandbox_factice"
+CLE_SECRETE_SANDBOX = "ss_sandbox_factice"
 SECRET_WEBHOOK_FACTICE = "whsec_factice"
 GENIUSPAY_LIVE = {
     "PAIEMENT_FOURNISSEUR": "geniuspay",
@@ -168,8 +172,8 @@ GENIUSPAY_LIVE = {
 }
 GENIUSPAY_SANDBOX = {
     **GENIUSPAY_LIVE,
-    "GENIUSPAY_API_KEY": "pk_sandbox_factice",
-    "GENIUSPAY_API_SECRET": "sk_sandbox_factice",
+    "GENIUSPAY_API_KEY": CLE_PUBLIQUE_SANDBOX,
+    "GENIUSPAY_API_SECRET": CLE_SECRETE_SANDBOX,
     "GENIUSPAY_ENVIRONNEMENT": "sandbox",
     "ANITCHE_STAGING_SANDBOX_PAIEMENT": "true",
 }
@@ -184,7 +188,7 @@ class PaiementProductionTests(ImportProdMixin, SimpleTestCase):
         for libelle, variables in cas.items():
             with self.subTest(f"{libelle} : aucun secret dans l'erreur"):
                 stderr = self.importer_prod(**variables).stderr
-                for secret in (SECRET_WEBHOOK_FACTICE, CLE_SECRETE_LIVE, "sk_sandbox_factice"):
+                for secret in (SECRET_WEBHOOK_FACTICE, CLE_SECRETE_LIVE, CLE_SECRETE_SANDBOX):
                     self.assertNotIn(secret, stderr)
 
     def test_configurations_valides(self):
@@ -234,12 +238,27 @@ class PaiementProductionTests(ImportProdMixin, SimpleTestCase):
     def test_refus_cles_de_sandbox_en_production(self):
         # Environnement live, variable staging absente : toute autre clé est refusée.
         self.verifier_refus({
-            "clé publique de sandbox": {**GENIUSPAY_LIVE, "GENIUSPAY_API_KEY": "pk_sandbox_factice"},
-            "clé secrète de sandbox": {**GENIUSPAY_LIVE, "GENIUSPAY_API_SECRET": "sk_sandbox_factice"},
-            "préfixe inconnu (clé publique)": {**GENIUSPAY_LIVE, "GENIUSPAY_API_KEY": "pk_test_factice"},
+            "clé publique de sandbox": {**GENIUSPAY_LIVE, "GENIUSPAY_API_KEY": CLE_PUBLIQUE_SANDBOX},
+            "clé secrète de sandbox": {**GENIUSPAY_LIVE, "GENIUSPAY_API_SECRET": CLE_SECRETE_SANDBOX},
+            "préfixe inconnu (clé publique)": {**GENIUSPAY_LIVE, "GENIUSPAY_API_KEY": "sk_test_factice"},
             "préfixe inconnu (clé secrète)": {**GENIUSPAY_LIVE, "GENIUSPAY_API_SECRET": "factice"},
             "clés inversées": {**GENIUSPAY_LIVE, "GENIUSPAY_API_KEY": CLE_SECRETE_LIVE,
                                "GENIUSPAY_API_SECRET": CLE_PUBLIQUE_LIVE},
+        }, "doit commencer par")
+
+    def test_refus_prefixes_de_la_documentation(self):
+        # La documentation GeniusPay annonce pk_ (clé publique) et sk_ (clé
+        # secrète) ; le tableau de bord délivre sk_ et ss_.
+        self.verifier_refus({
+            "live, clé publique pk_live_": {**GENIUSPAY_LIVE, "GENIUSPAY_API_KEY": "pk_live_factice"},
+            "live, clé secrète sk_live_": {**GENIUSPAY_LIVE, "GENIUSPAY_API_SECRET": "sk_live_autre"},
+            "live, paire pk_live_ / sk_live_": {**GENIUSPAY_LIVE, "GENIUSPAY_API_KEY": "pk_live_factice",
+                                               "GENIUSPAY_API_SECRET": "sk_live_autre"},
+            "sandbox, clé publique pk_sandbox_": {**GENIUSPAY_SANDBOX, "GENIUSPAY_API_KEY": "pk_sandbox_factice"},
+            "sandbox, clé secrète sk_sandbox_": {**GENIUSPAY_SANDBOX, "GENIUSPAY_API_SECRET": "sk_sandbox_autre"},
+            "sandbox, paire pk_sandbox_ / sk_sandbox_": {
+                **GENIUSPAY_SANDBOX, "GENIUSPAY_API_KEY": "pk_sandbox_factice",
+                "GENIUSPAY_API_SECRET": "sk_sandbox_autre"},
         }, "doit commencer par")
 
     def test_refus_environnement_sandbox_sans_variable_staging(self):

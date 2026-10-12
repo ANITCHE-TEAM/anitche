@@ -153,11 +153,13 @@ if PAIEMENT_FOURNISSEUR == 'geniuspay':
             "ANITCHE_STAGING_SANDBOX_PAIEMENT=true est incompatible avec l'environnement live "
             "de GeniusPay : le mode staging ne peut jamais être combiné à des clés live."
         )
-    # Clés et environnement cohérents : pk_live_/sk_live_ pour « live »,
-    # pk_sandbox_/sk_sandbox_ pour « sandbox ».
+    # Clés et environnement cohérents : sk_live_/ss_live_ pour « live »,
+    # sk_sandbox_/ss_sandbox_ pour « sandbox ». Préfixes relevés sur le
+    # tableau de bord GeniusPay (sa documentation annonce pk_/sk_) ; ceux de
+    # « live » restent à confirmer.
     for _nom, _valeur, _type in (
-        ('GENIUSPAY_API_KEY', GENIUSPAY_API_KEY, 'pk'),
-        ('GENIUSPAY_API_SECRET', GENIUSPAY_API_SECRET, 'sk'),
+        ('GENIUSPAY_API_KEY', GENIUSPAY_API_KEY, 'sk'),
+        ('GENIUSPAY_API_SECRET', GENIUSPAY_API_SECRET, 'ss'),
     ):
         _prefixe = f'{_type}_{GENIUSPAY_ENVIRONNEMENT}_'
         if not _valeur.startswith(_prefixe):

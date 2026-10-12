@@ -270,7 +270,7 @@ Authorization: Bearer <access du client>
 |---|---|
 | `PAIEMENT_FOURNISSEURS_AUTORISES = ('cinetpay', 'geniuspay')` | `simule`, valeur inconnue ou absente (le défaut de `base.py` est `simule`), casse différente |
 | `cinetpay` | `CINETPAY_API_KEY` ou `CINETPAY_API_PASSWORD` manquant ; clé `sk_test_…` |
-| `geniuspay` | `GENIUSPAY_API_KEY`, `GENIUSPAY_API_SECRET` ou `GENIUSPAY_WEBHOOK_SECRET` manquant ou vide ; `GENIUSPAY_ENVIRONNEMENT` autre que `live` ou `sandbox` ; clés non cohérentes avec l'environnement (`live` ⇒ `pk_live_…` et `sk_live_…`, `sandbox` ⇒ `pk_sandbox_…` et `sk_sandbox_…`) |
+| `geniuspay` | `GENIUSPAY_API_KEY`, `GENIUSPAY_API_SECRET` ou `GENIUSPAY_WEBHOOK_SECRET` manquant ou vide ; `GENIUSPAY_ENVIRONNEMENT` autre que `live` ou `sandbox` ; clés non cohérentes avec l'environnement (`live` ⇒ `GENIUSPAY_API_KEY` en `sk_live_…` et `GENIUSPAY_API_SECRET` en `ss_live_…`, `sandbox` ⇒ `sk_sandbox_…` et `ss_sandbox_…`) |
 | `ANITCHE_STAGING_SANDBOX_PAIEMENT` | toute valeur autre que exactement `true` ou `false` (ou absente), vide comprise (`True`, `1`, `yes`… refusés) ; ne concerne que GeniusPay |
 
 `infra/scripts/check_prod_env.sh` applique les mêmes règles avant le déploiement, et la CI de la pile de production les rejoue (`infra/ci/verifier_environnement.sh`, `config/tests_settings_prod.py`). Le mode staging de GeniusPay est décrit au § 9.
@@ -324,8 +324,8 @@ Rien d'autre ne change : commandes, remboursements, reversements et frais ignore
 | `PAIEMENT_FOURNISSEUR` | `cinetpay` ou `geniuspay` en production (`simule` interdit) ; `cinetpay` tant que la bascule n'est pas faite |
 | `CINETPAY_API_KEY` | Clé du compte marchand Côte d'Ivoire (`sk_live_…` en production, `sk_test_…` interdite) |
 | `CINETPAY_API_PASSWORD` | Mot de passe API associé |
-| `GENIUSPAY_API_KEY`, `GENIUSPAY_API_SECRET` | Clés du compte marchand GeniusPay (`pk_live_…` et `sk_live_…` en production) ; exigées seulement si `PAIEMENT_FOURNISSEUR=geniuspay` |
-| `GENIUSPAY_WEBHOOK_SECRET` | Secret de signature des webhooks (`whsec_…`) ; exigé avec `geniuspay` |
+| `GENIUSPAY_API_KEY`, `GENIUSPAY_API_SECRET` | Clés du compte marchand GeniusPay (clé publique `sk_live_…` et clé secrète `ss_live_…` en production ; préfixes relevés sur le tableau de bord GeniusPay, dont la documentation annonce `pk_…` / `sk_…` ; ceux de `live` restent à confirmer) ; exigées seulement si `PAIEMENT_FOURNISSEUR=geniuspay` |
+| `GENIUSPAY_WEBHOOK_SECRET` | Secret de signature des webhooks (`whsec_live_…` ou `whsec_sandbox_…` d'après la documentation ; préfixe non contrôlé) ; exigé avec `geniuspay` |
 | `GENIUSPAY_ENVIRONNEMENT` | `live` en production, `sandbox` en staging ; exigé avec `geniuspay` |
 | `ANITCHE_STAGING_SANDBOX_PAIEMENT` | Staging seulement : exactement `true` ou `false`, ou absente (= `false`) |
 | `GENIUSPAY_API_URL`, `GENIUSPAY_TIMEOUT` | Facultatifs (URL de la documentation ; 10 s) ; non transmis par `docker-compose.prod.yml` |
@@ -344,12 +344,12 @@ En production réelle, GeniusPay n'accepte ni clé ni environnement de sandbox. 
 
 | `ANITCHE_STAGING_SANDBOX_PAIEMENT` | `GENIUSPAY_ENVIRONNEMENT` | Clés | Résultat |
 |---|---|---|---|
-| absente ou `false` | `live` | `pk_live_…` / `sk_live_…` | accepté (production) |
+| absente ou `false` | `live` | `sk_live_…` / `ss_live_…` | accepté (production) |
 | absente ou `false` | `sandbox` | quelles qu'elles soient | refusé (sandbox réservé au staging) |
 | absente ou `false` | `live` | une clé de sandbox ou sans préfixe attendu | refusé |
-| `true` | `sandbox` | `pk_sandbox_…` / `sk_sandbox_…` | accepté (staging) |
+| `true` | `sandbox` | `sk_sandbox_…` / `ss_sandbox_…` | accepté (staging) |
 | `true` | `live` | quelles qu'elles soient | refusé (jamais combiné à des clés live) |
-| `true` | `sandbox` | une clé `pk_live_…` ou `sk_live_…` | refusé |
+| `true` | `sandbox` | une clé publique `sk_live_…` ou une clé secrète `ss_live_…` | refusé |
 | `True`, `1`, `yes`, vide… | | | refusé : valeur exacte `true` ou `false` seulement |
 
 - **Absente** : `docker-compose.prod.yml` transmet `false` (`${ANITCHE_STAGING_SANDBOX_PAIEMENT-false}`) ; **présente mais vide** : la valeur vide est transmise telle quelle et `prod.py` refuse de démarrer, jamais de conversion tolérante. Dans `infra/.env.example` elle est commentée.
