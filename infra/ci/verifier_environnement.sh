@@ -68,9 +68,9 @@ variante BACKUP_REPOSITORY /var/backups/anitche
 # GeniusPay retire donc les clés CinetPay pour prouver qu'elles ne sont plus
 # exigées.
 SANS_CINETPAY=(-CINETPAY_API_KEY -CINETPAY_API_PASSWORD)
-GP_LIVE=(PAIEMENT_FOURNISSEUR=geniuspay GENIUSPAY_API_KEY=pk_live_factice GENIUSPAY_API_SECRET=sk_live_factice
+GP_LIVE=(PAIEMENT_FOURNISSEUR=geniuspay GENIUSPAY_API_KEY=sk_live_factice GENIUSPAY_API_SECRET=ss_live_factice
          GENIUSPAY_WEBHOOK_SECRET=whsec_factice GENIUSPAY_ENVIRONNEMENT=live)
-GP_SANDBOX=(PAIEMENT_FOURNISSEUR=geniuspay GENIUSPAY_API_KEY=pk_sandbox_factice GENIUSPAY_API_SECRET=sk_sandbox_factice
+GP_SANDBOX=(PAIEMENT_FOURNISSEUR=geniuspay GENIUSPAY_API_KEY=sk_sandbox_factice GENIUSPAY_API_SECRET=ss_sandbox_factice
             GENIUSPAY_WEBHOOK_SECRET=whsec_factice GENIUSPAY_ENVIRONNEMENT=sandbox
             ANITCHE_STAGING_SANDBOX_PAIEMENT=true)
 STAGING=ANITCHE_STAGING_SANDBOX_PAIEMENT
@@ -105,7 +105,7 @@ scenario_refuse() {
         echo "❌ $libelle : refusé, mais sans erreur citant $nom." >&2
         sed 's/^/   | /' "$SORTIE" >&2
         ECHECS=$((ECHECS + 1))
-    elif grep -q -E "whsec_factice|sk_live_factice|sk_sandbox_factice" "$SORTIE"; then
+    elif grep -q -E "whsec_factice|ss_live_factice|ss_sandbox_factice" "$SORTIE"; then
         echo "❌ $libelle : refusé, mais l'erreur affiche un secret." >&2
         ECHECS=$((ECHECS + 1))
     else
@@ -138,18 +138,23 @@ scenario_refuse GENIUSPAY_ENVIRONNEMENT "geniuspay, environnement absent" "${GP_
 scenario_refuse GENIUSPAY_ENVIRONNEMENT "geniuspay, environnement vide" "${GP_LIVE[@]}" GENIUSPAY_ENVIRONNEMENT=
 scenario_refuse GENIUSPAY_ENVIRONNEMENT "geniuspay, environnement « production »" "${GP_LIVE[@]}" GENIUSPAY_ENVIRONNEMENT=production
 scenario_refuse GENIUSPAY_ENVIRONNEMENT "geniuspay, environnement « LIVE »" "${GP_LIVE[@]}" GENIUSPAY_ENVIRONNEMENT=LIVE
-scenario_refuse GENIUSPAY_API_KEY "geniuspay live, clé publique de sandbox" "${GP_LIVE[@]}" GENIUSPAY_API_KEY=pk_sandbox_factice
-scenario_refuse GENIUSPAY_API_SECRET "geniuspay live, clé secrète de sandbox" "${GP_LIVE[@]}" GENIUSPAY_API_SECRET=sk_sandbox_factice
-scenario_refuse GENIUSPAY_API_KEY "geniuspay live, préfixe pk_test_" "${GP_LIVE[@]}" GENIUSPAY_API_KEY=pk_test_factice
+scenario_refuse GENIUSPAY_API_KEY "geniuspay live, clé publique de sandbox" "${GP_LIVE[@]}" GENIUSPAY_API_KEY=sk_sandbox_factice
+scenario_refuse GENIUSPAY_API_SECRET "geniuspay live, clé secrète de sandbox" "${GP_LIVE[@]}" GENIUSPAY_API_SECRET=ss_sandbox_factice
+scenario_refuse GENIUSPAY_API_KEY "geniuspay live, préfixe sk_test_" "${GP_LIVE[@]}" GENIUSPAY_API_KEY=sk_test_factice
 scenario_refuse GENIUSPAY_API_SECRET "geniuspay live, clé secrète sans préfixe" "${GP_LIVE[@]}" GENIUSPAY_API_SECRET=factice
-scenario_refuse GENIUSPAY_API_KEY "geniuspay live, clés inversées" "${GP_LIVE[@]}" GENIUSPAY_API_KEY=sk_live_factice GENIUSPAY_API_SECRET=pk_live_factice
+scenario_refuse GENIUSPAY_API_KEY "geniuspay live, clés inversées" "${GP_LIVE[@]}" GENIUSPAY_API_KEY=ss_live_factice GENIUSPAY_API_SECRET=sk_live_factice
+# Préfixes de la documentation GeniusPay (pk_ / sk_), que le tableau de bord ne délivre pas.
+scenario_refuse GENIUSPAY_API_KEY "geniuspay live, clé publique pk_live_" "${GP_LIVE[@]}" GENIUSPAY_API_KEY=pk_live_factice
+scenario_refuse GENIUSPAY_API_SECRET "geniuspay live, clé secrète sk_live_" "${GP_LIVE[@]}" GENIUSPAY_API_SECRET=sk_live_autre
+scenario_refuse GENIUSPAY_API_KEY "geniuspay sandbox, clé publique pk_sandbox_" "${GP_SANDBOX[@]}" GENIUSPAY_API_KEY=pk_sandbox_factice
+scenario_refuse GENIUSPAY_API_SECRET "geniuspay sandbox, clé secrète sk_sandbox_" "${GP_SANDBOX[@]}" GENIUSPAY_API_SECRET=sk_sandbox_autre
 scenario_refuse GENIUSPAY_ENVIRONNEMENT "geniuspay sandbox, variable staging absente" "${GP_SANDBOX[@]}" "-$STAGING"
 scenario_refuse GENIUSPAY_ENVIRONNEMENT "geniuspay sandbox, variable staging à false" "${GP_SANDBOX[@]}" "$STAGING=false"
 scenario_refuse GENIUSPAY_ENVIRONNEMENT "geniuspay sandbox, clés live, variable staging absente" "${GP_LIVE[@]}" GENIUSPAY_ENVIRONNEMENT=sandbox
 scenario_refuse "$STAGING" "geniuspay live, variable staging à true" "${GP_LIVE[@]}" "$STAGING=true"
 scenario_refuse "$STAGING" "geniuspay live avec clés de sandbox, variable staging à true" "${GP_SANDBOX[@]}" GENIUSPAY_ENVIRONNEMENT=live
-scenario_refuse GENIUSPAY_API_KEY "geniuspay sandbox, clé publique live" "${GP_SANDBOX[@]}" GENIUSPAY_API_KEY=pk_live_factice
-scenario_refuse GENIUSPAY_API_SECRET "geniuspay sandbox, clé secrète live" "${GP_SANDBOX[@]}" GENIUSPAY_API_SECRET=sk_live_factice
+scenario_refuse GENIUSPAY_API_KEY "geniuspay sandbox, clé publique live" "${GP_SANDBOX[@]}" GENIUSPAY_API_KEY=sk_live_factice
+scenario_refuse GENIUSPAY_API_SECRET "geniuspay sandbox, clé secrète live" "${GP_SANDBOX[@]}" GENIUSPAY_API_SECRET=ss_live_factice
 for valeur in True TRUE 1 yes on "" " " "true " " true" False 0 oui; do
     scenario_refuse "$STAGING" "geniuspay, variable staging « $valeur »" "${GP_SANDBOX[@]}" "$STAGING=$valeur"
     scenario_refuse "$STAGING" "cinetpay, variable staging « $valeur »" "$STAGING=$valeur"

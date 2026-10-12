@@ -2393,8 +2393,8 @@ class ReconciliationReponsesCinetPayTests(ReponsesCinetPay, DonneesReconciliatio
 # =====================================================================
 
 BASE_GENIUSPAY = "https://geniuspay.test/api/v1/merchant"
-CLE_GENIUSPAY = "pk_sandbox_cle-factice"
-SECRET_GENIUSPAY = "sk_sandbox_secret-factice"
+CLE_GENIUSPAY = "sk_sandbox_cle-factice"
+SECRET_GENIUSPAY = "ss_sandbox_secret-factice"
 SECRET_WEBHOOK_GENIUSPAY = "whsec_secret-factice"
 #: Heure figée de l'adaptateur pendant les tests (tolérance de la signature).
 MAINTENANT_GENIUSPAY = 1_800_000_000

@@ -238,15 +238,17 @@ case "${PAIEMENT_FOURNISSEUR:-}" in
         if [ "${GENIUSPAY_ENVIRONNEMENT:-}" = live ] && [ "$STAGING_SANDBOX" = vrai ]; then
             erreur "ANITCHE_STAGING_SANDBOX_PAIEMENT : « true » est incompatible avec GENIUSPAY_ENVIRONNEMENT=live ; le mode staging ne se combine jamais à des clés live."
         fi
-        # Clés et environnement cohérents : pk_live_/sk_live_ pour « live »,
-        # pk_sandbox_/sk_sandbox_ pour « sandbox ».
+        # Clés et environnement cohérents : sk_live_/ss_live_ pour « live »,
+        # sk_sandbox_/ss_sandbox_ pour « sandbox ». Préfixes relevés sur le
+        # tableau de bord GeniusPay (sa documentation annonce pk_/sk_) ; ceux
+        # de « live » restent à confirmer.
         case "${GENIUSPAY_ENVIRONNEMENT:-}" in
             live|sandbox)
-                if [ -n "$(nettoyer "${GENIUSPAY_API_KEY:-}")" ] && [[ "$GENIUSPAY_API_KEY" != "pk_${GENIUSPAY_ENVIRONNEMENT}_"* ]]; then
-                    erreur "GENIUSPAY_API_KEY : doit commencer par pk_${GENIUSPAY_ENVIRONNEMENT}_ (GENIUSPAY_ENVIRONNEMENT=$GENIUSPAY_ENVIRONNEMENT) ; clés et environnement doivent être cohérents."
+                if [ -n "$(nettoyer "${GENIUSPAY_API_KEY:-}")" ] && [[ "$GENIUSPAY_API_KEY" != "sk_${GENIUSPAY_ENVIRONNEMENT}_"* ]]; then
+                    erreur "GENIUSPAY_API_KEY : doit commencer par sk_${GENIUSPAY_ENVIRONNEMENT}_ (GENIUSPAY_ENVIRONNEMENT=$GENIUSPAY_ENVIRONNEMENT) ; clés et environnement doivent être cohérents."
                 fi
-                if [ -n "$(nettoyer "${GENIUSPAY_API_SECRET:-}")" ] && [[ "$GENIUSPAY_API_SECRET" != "sk_${GENIUSPAY_ENVIRONNEMENT}_"* ]]; then
-                    erreur "GENIUSPAY_API_SECRET : doit commencer par sk_${GENIUSPAY_ENVIRONNEMENT}_ (GENIUSPAY_ENVIRONNEMENT=$GENIUSPAY_ENVIRONNEMENT) ; clés et environnement doivent être cohérents."
+                if [ -n "$(nettoyer "${GENIUSPAY_API_SECRET:-}")" ] && [[ "$GENIUSPAY_API_SECRET" != "ss_${GENIUSPAY_ENVIRONNEMENT}_"* ]]; then
+                    erreur "GENIUSPAY_API_SECRET : doit commencer par ss_${GENIUSPAY_ENVIRONNEMENT}_ (GENIUSPAY_ENVIRONNEMENT=$GENIUSPAY_ENVIRONNEMENT) ; clés et environnement doivent être cohérents."
                 fi
                 ;;
         esac
