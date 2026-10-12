@@ -174,6 +174,12 @@ class Produit(models.Model):
                   "de l'administration (modération) ne peut être levée que par elle.",
     )
 
+    # Agrégats des avis publiés (apps.avis.services.recalculer_agregats),
+    # seule écriture autorisée : jamais saisis par le vendeur ni par
+    # l'administration. Sans avis : note nulle et compteur à 0.
+    note_moyenne = models.DecimalField(max_digits=3, decimal_places=2, null=True, blank=True, editable=False)
+    nombre_avis = models.PositiveIntegerField(default=0, editable=False)
+
     date_creation = models.DateTimeField(auto_now_add=True)
     date_mise_a_jour = models.DateTimeField(auto_now=True)
 
@@ -240,6 +246,14 @@ class Produit(models.Model):
             models.CheckConstraint(
                 condition=Q(est_actif=True, desactive_par='') | (Q(est_actif=False) & ~Q(desactive_par='')),
                 name='produit_desactivation_coherente',
+            ),
+            # Sans avis, pas de note ; avec des avis, une note entre 1 et 5.
+            models.CheckConstraint(
+                condition=(
+                    Q(nombre_avis=0, note_moyenne__isnull=True)
+                    | Q(nombre_avis__gt=0, note_moyenne__isnull=False, note_moyenne__gte=1, note_moyenne__lte=5)
+                ),
+                name='produit_note_coherente',
             ),
         ]
 
