@@ -135,7 +135,7 @@ verifier_url_publique() {
 REQUIS=(
     SECRET_KEY FIELD_ENCRYPTION_KEYS ALLOWED_HOSTS CORS_ALLOWED_ORIGINS
     DB_NAME DB_USER DB_PASSWORD FASTAPI_DB_PASSWORD
-    PAIEMENT_FOURNISSEUR CINETPAY_API_KEY CINETPAY_API_PASSWORD BACKEND_BASE_URL
+    PAIEMENT_FOURNISSEUR BACKEND_BASE_URL
     PUBLIC_BASE_URL MEDIA_BASE_URL
     EMAIL_BACKEND EMAIL_HOST EMAIL_HOST_USER EMAIL_HOST_PASSWORD DEFAULT_FROM_EMAIL
     BACKUP_REPOSITORY BACKUP_PASSWORD BACKUP_S3_ACCESS_KEY_ID BACKUP_S3_SECRET_ACCESS_KEY
@@ -202,12 +202,59 @@ if [ -n "${BACKEND_BASE_URL:-}" ]; then
 fi
 
 # --- Paiements (prod.py) ----------------------------------------------------
-if [ -n "${PAIEMENT_FOURNISSEUR:-}" ] && [ "$PAIEMENT_FOURNISSEUR" != cinetpay ]; then
-    erreur "PAIEMENT_FOURNISSEUR doit valoir cinetpay en production (le fournisseur simulé n'encaisse rien)."
+# ANITCHE_STAGING_SANDBOX_PAIEMENT : exactement « true » ou « false », ou
+# absente. Définie mais vide, ou d'une autre valeur : refusée, comme prod.py.
+# Ne concerne que GeniusPay ; sans effet sur CinetPay.
+STAGING_SANDBOX=faux
+if [ "${ANITCHE_STAGING_SANDBOX_PAIEMENT+defini}" = defini ]; then
+    case "$ANITCHE_STAGING_SANDBOX_PAIEMENT" in
+        true) STAGING_SANDBOX=vrai ;;
+        false) ;;
+        *) erreur "ANITCHE_STAGING_SANDBOX_PAIEMENT : « true » ou « false » exactement (ou absente), toute autre valeur est refusée ; elle ne concerne que GeniusPay en staging." ;;
+    esac
 fi
-if [[ "${CINETPAY_API_KEY:-}" == sk_test_* ]]; then
-    erreur "CINETPAY_API_KEY : clé de sandbox (sk_test_), interdite en production."
-fi
+
+case "${PAIEMENT_FOURNISSEUR:-}" in
+    '') ;; # absente : déjà signalée plus haut
+    cinetpay)
+        for var in CINETPAY_API_KEY CINETPAY_API_PASSWORD; do
+            [ -n "$(nettoyer "${!var:-}")" ] || erreur "$var : absente ou vide (PAIEMENT_FOURNISSEUR=cinetpay)."
+        done
+        if [[ "${CINETPAY_API_KEY:-}" == sk_test_* ]]; then
+            erreur "CINETPAY_API_KEY : clé de sandbox (sk_test_), interdite en production, staging compris (ANITCHE_STAGING_SANDBOX_PAIEMENT ne concerne que GeniusPay)."
+        fi
+        ;;
+    geniuspay)
+        for var in GENIUSPAY_API_KEY GENIUSPAY_API_SECRET GENIUSPAY_WEBHOOK_SECRET; do
+            [ -n "$(nettoyer "${!var:-}")" ] || erreur "$var : absente ou vide (PAIEMENT_FOURNISSEUR=geniuspay)."
+        done
+        case "${GENIUSPAY_ENVIRONNEMENT:-}" in
+            live|sandbox) ;;
+            *) erreur "GENIUSPAY_ENVIRONNEMENT : « live » ou « sandbox » exactement (PAIEMENT_FOURNISSEUR=geniuspay)." ;;
+        esac
+        if [ "${GENIUSPAY_ENVIRONNEMENT:-}" = sandbox ] && [ "$STAGING_SANDBOX" != vrai ]; then
+            erreur "GENIUSPAY_ENVIRONNEMENT : « sandbox » est réservé au staging et exige ANITCHE_STAGING_SANDBOX_PAIEMENT=true (aucun paiement ne serait réel en production)."
+        fi
+        if [ "${GENIUSPAY_ENVIRONNEMENT:-}" = live ] && [ "$STAGING_SANDBOX" = vrai ]; then
+            erreur "ANITCHE_STAGING_SANDBOX_PAIEMENT : « true » est incompatible avec GENIUSPAY_ENVIRONNEMENT=live ; le mode staging ne se combine jamais à des clés live."
+        fi
+        # Clés et environnement cohérents : pk_live_/sk_live_ pour « live »,
+        # pk_sandbox_/sk_sandbox_ pour « sandbox ».
+        case "${GENIUSPAY_ENVIRONNEMENT:-}" in
+            live|sandbox)
+                if [ -n "$(nettoyer "${GENIUSPAY_API_KEY:-}")" ] && [[ "$GENIUSPAY_API_KEY" != "pk_${GENIUSPAY_ENVIRONNEMENT}_"* ]]; then
+                    erreur "GENIUSPAY_API_KEY : doit commencer par pk_${GENIUSPAY_ENVIRONNEMENT}_ (GENIUSPAY_ENVIRONNEMENT=$GENIUSPAY_ENVIRONNEMENT) ; clés et environnement doivent être cohérents."
+                fi
+                if [ -n "$(nettoyer "${GENIUSPAY_API_SECRET:-}")" ] && [[ "$GENIUSPAY_API_SECRET" != "sk_${GENIUSPAY_ENVIRONNEMENT}_"* ]]; then
+                    erreur "GENIUSPAY_API_SECRET : doit commencer par sk_${GENIUSPAY_ENVIRONNEMENT}_ (GENIUSPAY_ENVIRONNEMENT=$GENIUSPAY_ENVIRONNEMENT) ; clés et environnement doivent être cohérents."
+                fi
+                ;;
+        esac
+        ;;
+    *)
+        erreur "PAIEMENT_FOURNISSEUR : cinetpay ou geniuspay en production (le fournisseur simulé n'encaisse rien)."
+        ;;
+esac
 
 # --- Emails (prod.py) -------------------------------------------------------
 if [ -n "${EMAIL_BACKEND:-}" ] && [ "$EMAIL_BACKEND" != "$BACKEND_EMAIL_SMTP" ]; then

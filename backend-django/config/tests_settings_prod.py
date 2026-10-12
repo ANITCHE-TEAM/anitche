@@ -1,4 +1,5 @@
-"""Emails en production : prod.py refuse de démarrer sans vrai serveur SMTP.
+"""Configuration de production : prod.py refuse de démarrer sans vrai serveur SMTP,
+avec un fournisseur de paiement ou des clés de sandbox non autorisés.
 
 prod.py est chargé dans un sous-processus (il ne s'importe pas sans ses
 secrets), avec des valeurs factices évidentes. Comme dans le conteneur, où
@@ -28,7 +29,7 @@ LECTURE_EMAIL = (
 )
 
 
-class ConfigurationEmailProductionTests(SimpleTestCase):
+class ImportProdMixin:
     def importer_prod(self, script=IMPORT_PROD, **variables):
         """Variables à None : retirées de l'environnement."""
         env = {
@@ -50,6 +51,12 @@ class ConfigurationEmailProductionTests(SimpleTestCase):
             "EMAIL_USE_TLS": "True",
             "EMAIL_USE_SSL": "False",
             "EMAIL_TIMEOUT": None,
+            # Absentes par défaut, quel que soit l'environnement du développeur.
+            "ANITCHE_STAGING_SANDBOX_PAIEMENT": None,
+            "GENIUSPAY_API_KEY": None,
+            "GENIUSPAY_API_SECRET": None,
+            "GENIUSPAY_WEBHOOK_SECRET": None,
+            "GENIUSPAY_ENVIRONNEMENT": None,
             "EMAIL_HOST_USER": "identifiant-factice",
             "EMAIL_HOST_PASSWORD": MOT_DE_PASSE_SMTP,
             "DEFAULT_FROM_EMAIL": "ANITCHE <no-reply@anitche.com>",
@@ -70,6 +77,8 @@ class ConfigurationEmailProductionTests(SimpleTestCase):
                 self.assertIn(message, resultat.stderr)
                 self.assertNotIn(MOT_DE_PASSE_SMTP, resultat.stderr)
 
+
+class ConfigurationEmailProductionTests(ImportProdMixin, SimpleTestCase):
     def test_configuration_valide(self):
         cas = {
             # Brevo : STARTTLS sur le port 587, délai par défaut.
@@ -139,3 +148,133 @@ class ConfigurationEmailProductionTests(SimpleTestCase):
     def test_refus_delai_smtp_hors_bornes(self):
         self.verifier_refus({"zéro": {"EMAIL_TIMEOUT": "0"}, "trop long": {"EMAIL_TIMEOUT": "61"}},
                             "EMAIL_TIMEOUT doit être compris entre 1 et 60")
+
+
+LECTURE_PAIEMENT = (
+    SANS_FICHIER_ENV
+    + "import json\n"
+    "import config.settings.prod as p\n"
+    "print(json.dumps({'fournisseur': p.PAIEMENT_FOURNISSEUR, 'environnement': p.GENIUSPAY_ENVIRONNEMENT}))\n"
+)
+CLE_PUBLIQUE_LIVE = "pk_live_factice"
+CLE_SECRETE_LIVE = "sk_live_factice"
+SECRET_WEBHOOK_FACTICE = "whsec_factice"
+GENIUSPAY_LIVE = {
+    "PAIEMENT_FOURNISSEUR": "geniuspay",
+    "GENIUSPAY_API_KEY": CLE_PUBLIQUE_LIVE,
+    "GENIUSPAY_API_SECRET": CLE_SECRETE_LIVE,
+    "GENIUSPAY_WEBHOOK_SECRET": SECRET_WEBHOOK_FACTICE,
+    "GENIUSPAY_ENVIRONNEMENT": "live",
+}
+GENIUSPAY_SANDBOX = {
+    **GENIUSPAY_LIVE,
+    "GENIUSPAY_API_KEY": "pk_sandbox_factice",
+    "GENIUSPAY_API_SECRET": "sk_sandbox_factice",
+    "GENIUSPAY_ENVIRONNEMENT": "sandbox",
+    "ANITCHE_STAGING_SANDBOX_PAIEMENT": "true",
+}
+STAGING = "ANITCHE_STAGING_SANDBOX_PAIEMENT"
+
+
+class PaiementProductionTests(ImportProdMixin, SimpleTestCase):
+    """Liste fermée des fournisseurs, clés GeniusPay et mode staging."""
+
+    def verifier_refus(self, cas, message):
+        super().verifier_refus(cas, message)
+        for libelle, variables in cas.items():
+            with self.subTest(f"{libelle} : aucun secret dans l'erreur"):
+                stderr = self.importer_prod(**variables).stderr
+                for secret in (SECRET_WEBHOOK_FACTICE, CLE_SECRETE_LIVE, "sk_sandbox_factice"):
+                    self.assertNotIn(secret, stderr)
+
+    def test_configurations_valides(self):
+        cas = {
+            "cinetpay seul": ({}, {"fournisseur": "cinetpay"}),
+            "geniuspay live, variable staging absente": (
+                GENIUSPAY_LIVE, {"fournisseur": "geniuspay", "environnement": "live"}),
+            "geniuspay live, variable staging à false": (
+                {**GENIUSPAY_LIVE, STAGING: "false"}, {"fournisseur": "geniuspay", "environnement": "live"}),
+            "geniuspay sandbox en staging": (
+                GENIUSPAY_SANDBOX, {"fournisseur": "geniuspay", "environnement": "sandbox"}),
+            # La variable ne concerne que geniuspay.
+            "cinetpay avec la variable staging à true": ({STAGING: "true"}, {"fournisseur": "cinetpay"}),
+            "cinetpay avec la variable staging à false": ({STAGING: "false"}, {"fournisseur": "cinetpay"}),
+        }
+        for libelle, (variables, attendu) in cas.items():
+            with self.subTest(libelle):
+                resultat = self.importer_prod(script=LECTURE_PAIEMENT, **variables)
+                self.assertEqual(resultat.returncode, 0, resultat.stderr[-500:])
+                lu = json.loads(resultat.stdout.strip().splitlines()[-1])
+                self.assertEqual({cle: lu[cle] for cle in attendu}, attendu)
+
+    def test_refus_fournisseur_hors_liste(self):
+        self.verifier_refus({
+            "simulé": {"PAIEMENT_FOURNISSEUR": "simule"},
+            "inconnu": {"PAIEMENT_FOURNISSEUR": "stripe"},
+            "absent (simulé par défaut)": {"PAIEMENT_FOURNISSEUR": None},
+            "casse différente": {**GENIUSPAY_LIVE, "PAIEMENT_FOURNISSEUR": "GeniusPay"},
+        }, "est interdit en production")
+
+    def test_refus_cles_geniuspay_absentes(self):
+        cas = {}
+        for nom in ("GENIUSPAY_API_KEY", "GENIUSPAY_API_SECRET", "GENIUSPAY_WEBHOOK_SECRET"):
+            cas[f"{nom} absente"] = {**GENIUSPAY_LIVE, nom: None}
+            cas[f"{nom} vide"] = {**GENIUSPAY_LIVE, nom: ""}
+            cas[f"{nom} en espaces"] = {**GENIUSPAY_LIVE, nom: "  "}
+        self.verifier_refus(cas, "doivent être définis en production")
+
+    def test_refus_environnement_geniuspay_invalide(self):
+        self.verifier_refus({
+            "absent": {**GENIUSPAY_LIVE, "GENIUSPAY_ENVIRONNEMENT": None},
+            "vide": {**GENIUSPAY_LIVE, "GENIUSPAY_ENVIRONNEMENT": ""},
+            "inconnu": {**GENIUSPAY_LIVE, "GENIUSPAY_ENVIRONNEMENT": "production"},
+            "casse différente": {**GENIUSPAY_LIVE, "GENIUSPAY_ENVIRONNEMENT": "LIVE"},
+        }, "GENIUSPAY_ENVIRONNEMENT doit valoir")
+
+    def test_refus_cles_de_sandbox_en_production(self):
+        # Environnement live, variable staging absente : toute autre clé est refusée.
+        self.verifier_refus({
+            "clé publique de sandbox": {**GENIUSPAY_LIVE, "GENIUSPAY_API_KEY": "pk_sandbox_factice"},
+            "clé secrète de sandbox": {**GENIUSPAY_LIVE, "GENIUSPAY_API_SECRET": "sk_sandbox_factice"},
+            "préfixe inconnu (clé publique)": {**GENIUSPAY_LIVE, "GENIUSPAY_API_KEY": "pk_test_factice"},
+            "préfixe inconnu (clé secrète)": {**GENIUSPAY_LIVE, "GENIUSPAY_API_SECRET": "factice"},
+            "clés inversées": {**GENIUSPAY_LIVE, "GENIUSPAY_API_KEY": CLE_SECRETE_LIVE,
+                               "GENIUSPAY_API_SECRET": CLE_PUBLIQUE_LIVE},
+        }, "doit commencer par")
+
+    def test_refus_environnement_sandbox_sans_variable_staging(self):
+        sandbox = {**GENIUSPAY_SANDBOX, STAGING: None}
+        self.verifier_refus({
+            "variable absente": sandbox,
+            "variable à false": {**sandbox, STAGING: "false"},
+            "clés live, environnement sandbox": {**GENIUSPAY_LIVE, "GENIUSPAY_ENVIRONNEMENT": "sandbox"},
+        }, "réservé au staging")
+
+    def test_refus_variable_staging_avec_environnement_live(self):
+        self.verifier_refus({
+            "clés et environnement live": {**GENIUSPAY_LIVE, STAGING: "true"},
+            "environnement live, clés de sandbox": {**GENIUSPAY_SANDBOX, "GENIUSPAY_ENVIRONNEMENT": "live"},
+        }, "incompatible avec l'environnement live")
+
+    def test_refus_variable_staging_avec_cles_live(self):
+        # Environnement sandbox mais une clé live : jamais de clé live en staging.
+        self.verifier_refus({
+            "clé publique live": {**GENIUSPAY_SANDBOX, "GENIUSPAY_API_KEY": CLE_PUBLIQUE_LIVE},
+            "clé secrète live": {**GENIUSPAY_SANDBOX, "GENIUSPAY_API_SECRET": CLE_SECRETE_LIVE},
+            "deux clés live": {**GENIUSPAY_SANDBOX, "GENIUSPAY_API_KEY": CLE_PUBLIQUE_LIVE,
+                               "GENIUSPAY_API_SECRET": CLE_SECRETE_LIVE},
+        }, "doit commencer par")
+
+    def test_refus_valeurs_non_exactes_de_la_variable_staging(self):
+        valeurs = ("True", "TRUE", "1", "yes", "on", "", " ", "true ", " true", "False", "0", "oui")
+        for fournisseur, base in (("geniuspay", GENIUSPAY_SANDBOX), ("cinetpay", {})):
+            self.verifier_refus({
+                f"{fournisseur} : {valeur!r}": {**base, STAGING: valeur} for valeur in valeurs
+            }, f"{STAGING} doit valoir exactement")
+
+    def test_cinetpay_garde_son_refus_des_cles_de_sandbox(self):
+        # La variable staging n'ouvre rien pour CinetPay.
+        self.verifier_refus({
+            "variable absente": {"CINETPAY_API_KEY": "sk_test_cle"},
+            "variable à true": {"CINETPAY_API_KEY": "sk_test_cle", STAGING: "true"},
+        }, "Clé CinetPay de sandbox")
