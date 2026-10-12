@@ -3302,11 +3302,11 @@ class ConfigurationProductionTests(APITestCase):
 
     def test_fournisseur_en_liste_fermee(self):
         """Seuls les fournisseurs listés dans prod.py démarrent : ni le
-        simulé, ni un adaptateur pas encore ouvert à la production, ni une
-        valeur inconnue (qui passerait sinon tous les contrôles de clés)."""
+        simulé, ni une valeur inconnue (qui passerait sinon tous les
+        contrôles de clés). Les refus propres à geniuspay (clés,
+        environnement, staging) : config.tests_settings_prod."""
         cas = {
             "simulé": "simule",
-            "geniuspay (pas encore autorisé)": "geniuspay",
             "inconnu": "paydunya",
             "vide": "",
             "casse différente": "CinetPay",
