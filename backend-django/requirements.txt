@@ -31,7 +31,7 @@ tzdata==2026.5
 tzlocal==5.4.4
 vine==5.1.0
 wcwidth==0.9.1
-google-auth==2.59.1
+google-auth==2.61.0
 requests==2.34.2
 # Documentation d'API (OpenAPI) et ses dépendances
 drf-spectacular==0.30.0
@@ -41,7 +41,7 @@ jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
 PyYAML==6.0.3
 referencing==0.37.0
-rpds-py==2026.6.3
+rpds-py==2026.9.1
 typing_extensions==4.16.0
 uritemplate==4.2.0
 # Serveur WSGI de production (CMD du Dockerfile, docker-compose.prod.yml)
@@ -55,6 +55,6 @@ charset-normalizer==3.5.2
 idna==3.20
 pyasn1==0.6.4
 pyasn1_modules==0.4.2
-pycparser==3.0
+pycparser==3.11
 rsa==4.9.1
 urllib3==2.8.0
