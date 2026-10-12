@@ -34,6 +34,7 @@ from .fournisseurs.base import (
     EN_ATTENTE,
     SUCCES,
     ErreurFournisseur,
+    NotificationIgnoree,
     NotificationInvalide,
     TransactionIntrouvable,
     hacher_jeton,
@@ -254,12 +255,27 @@ def valider_paiement(paiement, etat=None):
 
 def _controler_etat(paiement, etat):
     """Montant et devise confirmés par le fournisseur = ceux calculés par le serveur."""
-    if etat.montant is not None and etat.montant != int(paiement.montant):
+    controler_montant_et_devise(etat, paiement.montant, paiement.devise)
+
+
+def controler_montant_et_devise(etat, montant_attendu, devise_attendue):
+    """Contrôle d'un succès confirmé par un fournisseur, pour un paiement
+    comme pour un transfert (reversements). Fermé par défaut : un montant
+    absent, illisible ou non entier, ou une devise absente, vaut refus — un
+    succès ne s'applique jamais sur une information que le fournisseur n'a
+    pas confirmée. Lève IncoherenceTransaction."""
+    if type(etat.montant) is not int:
         raise IncoherenceTransaction(
-            f"Montant confirmé ({etat.montant}) différent du montant dû ({int(paiement.montant)})."
+            f"Montant confirmé absent ou invalide (montant attendu : {montant_attendu} {devise_attendue})."
         )
-    if etat.devise is not None and etat.devise != paiement.devise:
-        raise IncoherenceTransaction(f"Devise confirmée ({etat.devise}) différente de {paiement.devise}.")
+    if etat.montant != montant_attendu:
+        raise IncoherenceTransaction(
+            f"Montant confirmé ({etat.montant}) différent du montant attendu ({montant_attendu})."
+        )
+    if not etat.devise:
+        raise IncoherenceTransaction(f"Devise confirmée absente (devise attendue : {devise_attendue}).")
+    if etat.devise != devise_attendue:
+        raise IncoherenceTransaction(f"Devise confirmée ({etat.devise}) différente de {devise_attendue}.")
 
 
 def marquer_echoue(paiement, motif="échec confirmé par le fournisseur"):
@@ -294,6 +310,29 @@ def _ouvrir_journal(code, notification):
     return journal, (not cree and journal.statut_traitement == JournalWebhook.StatutTraitement.TRAITE)
 
 
+def _paiement_notifie(fournisseur, notification):
+    """Paiement visé par la notification, ouvert chez CE fournisseur (None
+    s'il est inconnu).
+
+    Par sa référence ANITCHE, ou, pour un fournisseur qui ne renvoie que la
+    sienne (notification_par_identifiant_externe), par la référence stockée
+    à l'initiation dans transaction_id_externe. Dans ce second cas, la
+    référence ANITCHE éventuellement portée par la notification (metadata)
+    doit désigner le même paiement, et une référence du fournisseur portée
+    par plusieurs paiements n'en désigne aucun : NotificationInvalide."""
+    paiements = Paiement.objects.filter(fournisseur=fournisseur.code)
+    if not fournisseur.notification_par_identifiant_externe:
+        return paiements.filter(reference=notification.reference).first()
+    if not notification.identifiant_externe:
+        return None
+    candidats = list(paiements.filter(transaction_id_externe=notification.identifiant_externe)[:2])
+    if len(candidats) > 1:
+        raise NotificationInvalide("Référence du fournisseur portée par plusieurs paiements.")
+    if candidats and notification.reference and notification.reference != candidats[0].reference:
+        raise NotificationInvalide("La référence du fournisseur et la référence du paiement ne concordent pas.")
+    return candidats[0] if candidats else None
+
+
 def traiter_notification_paiement(code, request):
     """Notification d'un fournisseur → authentification → vérification
     serveur à serveur → application sous verrou. Renvoie ResultatNotification."""
@@ -305,11 +344,21 @@ def traiter_notification_paiement(code, request):
     except NotificationInvalide as erreur:
         logger_securite.warning("Notification %s refusée : %s (ip=%s)", code, erreur, request.META.get("REMOTE_ADDR"))
         return ResultatNotification(401, "Notification non authentique.")
+    except NotificationIgnoree as ignoree:
+        # Authentique mais sans effet (essai, événement d'un autre périmètre) :
+        # acquittée pour que le fournisseur ne la rejoue pas.
+        logger.info("Notification %s ignorée : %s.", code, ignoree)
+        return ResultatNotification(200, "Événement ignoré.")
 
-    # Le paiement doit avoir été ouvert chez CE fournisseur.
-    paiement = Paiement.objects.filter(reference=notification.reference, fournisseur=code).first()
+    try:
+        paiement = _paiement_notifie(fournisseur, notification)
+    except NotificationInvalide as erreur:
+        logger_securite.warning("Notification %s incohérente (%s) : %s", code,
+                                notification.identifiant_externe, erreur)
+        return ResultatNotification(400, "Notification incohérente.")
     if paiement is None:
-        logger_securite.warning("Notification %s pour un paiement inconnu : %s", code, notification.reference)
+        logger_securite.warning("Notification %s pour un paiement inconnu : %s", code,
+                                notification.reference or notification.identifiant_externe)
         return ResultatNotification(404, "Paiement inconnu.")
     try:
         fournisseur.authentifier_notification(notification, paiement)

@@ -46,6 +46,9 @@ OPERATEURS = ("wave", "orange_money", "mtn_money", "moov_money")
 #: Préfixes ivoiriens (numérotation à 10 chiffres) → opérateur. Wave
 #: fonctionne sur tout numéro : il se choisit explicitement.
 PREFIXES_OPERATEURS = {"07": "orange_money", "05": "mtn_money", "01": "moov_money"}
+#: Devise des transferts (mobile money ivoirien) : celle que le fournisseur
+#: doit confirmer pour qu'un transfert réussi soit appliqué.
+DEVISE_TRANSFERT = "XOF"
 
 
 class ErreurVersement(Exception):
@@ -352,7 +355,14 @@ def _revenir_disponible(reversement_id, motif):
 
 
 def transferer_reversement(reversement, administrateur, operateur=None):
-    """Versement par l'API de transfert du fournisseur actif."""
+    """Versement par l'API de transfert du fournisseur actif.
+
+    Un SUCCES immédiat n'est appliqué que s'il confirme le montant à verser
+    et la devise, comme une notification de transfert. Sinon le reversement
+    reste « en cours » (l'argent a pu partir : il ne redevient pas
+    disponible) et son état final vient de la notification."""
+    from .services import IncoherenceTransaction, controler_montant_et_devise
+
     fournisseur = fournisseur_actif()
     with transaction.atomic():
         verrouille = Reversement.objects.select_for_update().select_related("boutique__proprietaire").get(pk=reversement.pk)
@@ -383,9 +393,18 @@ def transferer_reversement(reversement, administrateur, operateur=None):
         verrouille = Reversement.objects.select_for_update().select_related("boutique__proprietaire").get(pk=verrouille.pk)
         verrouille.reference_externe = resultat.identifiant_externe
         verrouille.hash_jeton_notification = hacher_jeton(resultat.jeton_notification)
+        incoherence = None
         if resultat.statut == SUCCES and verrouille.statut == Statut.EN_COURS:
-            _finaliser(verrouille)
+            try:
+                controler_montant_et_devise(resultat, verrouille.montant_a_verser, DEVISE_TRANSFERT)
+            except IncoherenceTransaction as erreur:
+                incoherence = erreur
+            else:
+                _finaliser(verrouille)
         verrouille.save()
+    if incoherence is not None:
+        logger_securite.error("Transfert %s : succès immédiat non appliqué, reversement laissé en cours (%s).",
+                              verrouille.reference, incoherence)
     if resultat.statut == ECHEC:
         verrouille = _revenir_disponible(verrouille.pk, "refus immédiat du fournisseur")
     elif verrouille.statut == Statut.VERSE:
@@ -397,7 +416,13 @@ def transferer_reversement(reversement, administrateur, operateur=None):
 
 def traiter_notification_transfert(code, request):
     """Notification de transfert : même chaîne que pour les paiements."""
-    from .services import ResultatNotification, _journaliser, _ouvrir_journal
+    from .services import (
+        IncoherenceTransaction,
+        ResultatNotification,
+        _journaliser,
+        _ouvrir_journal,
+        controler_montant_et_devise,
+    )
 
     try:
         fournisseur = obtenir_fournisseur(code)
@@ -429,12 +454,13 @@ def traiter_notification_transfert(code, request):
         _journaliser(journal, JournalWebhook.StatutTraitement.ERREUR, str(erreur))
         return ResultatNotification(400, "Notification incohérente.")
 
-    if etat.statut == SUCCES and etat.montant is not None and etat.montant != int(reversement.montant_a_verser):
-        _journaliser(journal, JournalWebhook.StatutTraitement.ERREUR, "Montant transféré différent du montant à verser.")
-        logger_securite.error("Transfert %s : montant confirmé %s ≠ %s.", reversement.reference, etat.montant,
-                              int(reversement.montant_a_verser))
-        return ResultatNotification(400, "Transfert incohérent avec le reversement.")
     if etat.statut == SUCCES:
+        try:
+            controler_montant_et_devise(etat, reversement.montant_a_verser, DEVISE_TRANSFERT)
+        except IncoherenceTransaction as erreur:
+            _journaliser(journal, JournalWebhook.StatutTraitement.ERREUR, str(erreur))
+            logger_securite.error("Transfert %s rejeté : %s", reversement.reference, erreur)
+            return ResultatNotification(400, "Transfert incohérent avec le reversement.")
         with transaction.atomic():
             verrouille = Reversement.objects.select_for_update().select_related("boutique__proprietaire").get(pk=reversement.pk)
             vient_d_etre_verse = verrouille.statut == Statut.EN_COURS

@@ -15,6 +15,7 @@ urlpatterns = [
     path("api/paiements/", include("apps.paiements.urls")),
     path("api/notifications/", include("apps.notifications.urls")),
     path("api/retours/", include("apps.retours.urls")),
+    path("api/avis/", include("apps.avis.urls")),
     path("api/fidelite/", include("apps.fidelite.urls")),
     path("api/passeports/", include("apps.passeport_qr.urls")),
 ]

@@ -179,7 +179,11 @@ class FournisseurSimule(FournisseurPaiement):
 
     def transferer(self, reversement, telephone, operateur):
         self._secret()
-        return ResultatTransfert(statut=SUCCES, identifiant_externe=f"SIMT-{uuid.uuid4().hex[:16].upper()}")
+        # Pas de serveur distant : le transfert simulé confirme ce qui est demandé.
+        return ResultatTransfert(
+            statut=SUCCES, identifiant_externe=f"SIMT-{uuid.uuid4().hex[:16].upper()}",
+            montant=int(reversement.montant_a_verser), devise="XOF",
+        )
 
     def verifier_transfert(self, reversement, notification=None):
         return self._etat(notification)

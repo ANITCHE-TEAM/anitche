@@ -85,23 +85,86 @@ except ValueError as erreur:
         f"32 octets encodés en base64 URL) : {erreur}"
     )
 
-# Paiements : jamais le fournisseur simulé (il accepte des notifications
-# signées avec un secret de développement public), jamais une clé CinetPay
-# de sandbox, jamais sans clés. Transmis par docker-compose.prod.yml.
-if PAIEMENT_FOURNISSEUR == 'simule':
+# Paiements : liste fermée des fournisseurs autorisés. Jamais le fournisseur
+# simulé (il accepte des notifications signées avec un secret de
+# développement public), jamais une valeur inconnue ou un adaptateur non
+# listé ici (aucun des contrôles de clés ci-dessous ne s'y appliquerait),
+# jamais une clé de sandbox hors staging, jamais sans clés. Transmis par
+# docker-compose.prod.yml.
+PAIEMENT_FOURNISSEURS_AUTORISES = ('cinetpay', 'geniuspay')
+
+# Staging uniquement, et seulement pour GeniusPay : ANITCHE_STAGING_SANDBOX_PAIEMENT
+# vaut exactement « true » (staging, environnement et clés de sandbox) ou
+# « false » ; absente = « false ». Toute autre valeur est refusée, sans
+# conversion tolérante : un « 1 » ou un « True » mal compris ne doit jamais
+# ouvrir ou fermer le sandbox sans que personne ne le voie.
+ANITCHE_STAGING_SANDBOX_PAIEMENT = config('ANITCHE_STAGING_SANDBOX_PAIEMENT', default=None)
+if ANITCHE_STAGING_SANDBOX_PAIEMENT not in (None, 'true', 'false'):
     raise ImproperlyConfigured(
-        "PAIEMENT_FOURNISSEUR='simule' est interdit en production : définissez "
-        "PAIEMENT_FOURNISSEUR=cinetpay et ses clés (docs/MODULE_PAIEMENTS.md)."
+        "ANITCHE_STAGING_SANDBOX_PAIEMENT doit valoir exactement « true » ou « false » "
+        "(ou être absente) : toute autre valeur, y compris vide, « True » ou « 1 », est refusée. "
+        "Elle ne concerne que GeniusPay en staging ; elle ne change rien pour CinetPay."
+    )
+STAGING_SANDBOX_PAIEMENT = ANITCHE_STAGING_SANDBOX_PAIEMENT == 'true'
+
+if PAIEMENT_FOURNISSEUR not in PAIEMENT_FOURNISSEURS_AUTORISES:
+    raise ImproperlyConfigured(
+        f"PAIEMENT_FOURNISSEUR={PAIEMENT_FOURNISSEUR!r} est interdit en production "
+        f"(valeurs autorisées : {', '.join(PAIEMENT_FOURNISSEURS_AUTORISES)}) : définissez "
+        "PAIEMENT_FOURNISSEUR et ses clés (docs/MODULE_PAIEMENTS.md)."
     )
 if PAIEMENT_FOURNISSEUR == 'cinetpay':
+    # ANITCHE_STAGING_SANDBOX_PAIEMENT n'ouvre rien ici : une clé de sandbox
+    # CinetPay reste refusée, staging compris.
     if not CINETPAY_API_KEY or not CINETPAY_API_PASSWORD:
         raise ImproperlyConfigured(
             "CINETPAY_API_KEY et CINETPAY_API_PASSWORD doivent être définis en production."
         )
     if CINETPAY_API_KEY.startswith('sk_test_'):
         raise ImproperlyConfigured(
-            "Clé CinetPay de sandbox (sk_test_) interdite en production : aucun paiement ne serait réel."
+            "Clé CinetPay de sandbox (sk_test_) interdite en production : aucun paiement ne serait réel. "
+            "ANITCHE_STAGING_SANDBOX_PAIEMENT ne concerne que GeniusPay."
         )
+if PAIEMENT_FOURNISSEUR == 'geniuspay':
+    _geniuspay_manquants = [
+        nom for nom, valeur in (
+            ('GENIUSPAY_API_KEY', GENIUSPAY_API_KEY),
+            ('GENIUSPAY_API_SECRET', GENIUSPAY_API_SECRET),
+            ('GENIUSPAY_WEBHOOK_SECRET', GENIUSPAY_WEBHOOK_SECRET),
+        ) if not valeur.strip()
+    ]
+    if _geniuspay_manquants:
+        raise ImproperlyConfigured(
+            f"{', '.join(_geniuspay_manquants)} doivent être définis en production "
+            "(GENIUSPAY_API_KEY, GENIUSPAY_API_SECRET et GENIUSPAY_WEBHOOK_SECRET)."
+        )
+    if GENIUSPAY_ENVIRONNEMENT not in ('live', 'sandbox'):
+        raise ImproperlyConfigured(
+            "GENIUSPAY_ENVIRONNEMENT doit valoir « live » ou « sandbox » en production "
+            "(« sandbox » seulement en staging, avec ANITCHE_STAGING_SANDBOX_PAIEMENT=true)."
+        )
+    if GENIUSPAY_ENVIRONNEMENT == 'sandbox' and not STAGING_SANDBOX_PAIEMENT:
+        raise ImproperlyConfigured(
+            "L'environnement GeniusPay « sandbox » est réservé au staging : il exige "
+            "ANITCHE_STAGING_SANDBOX_PAIEMENT=true. En production, aucun paiement ne serait réel."
+        )
+    if GENIUSPAY_ENVIRONNEMENT == 'live' and STAGING_SANDBOX_PAIEMENT:
+        raise ImproperlyConfigured(
+            "ANITCHE_STAGING_SANDBOX_PAIEMENT=true est incompatible avec l'environnement live "
+            "de GeniusPay : le mode staging ne peut jamais être combiné à des clés live."
+        )
+    # Clés et environnement cohérents : pk_live_/sk_live_ pour « live »,
+    # pk_sandbox_/sk_sandbox_ pour « sandbox ».
+    for _nom, _valeur, _type in (
+        ('GENIUSPAY_API_KEY', GENIUSPAY_API_KEY, 'pk'),
+        ('GENIUSPAY_API_SECRET', GENIUSPAY_API_SECRET, 'sk'),
+    ):
+        _prefixe = f'{_type}_{GENIUSPAY_ENVIRONNEMENT}_'
+        if not _valeur.startswith(_prefixe):
+            raise ImproperlyConfigured(
+                f"{_nom} doit commencer par {_prefixe} (GENIUSPAY_ENVIRONNEMENT="
+                f"{GENIUSPAY_ENVIRONNEMENT}) : clés et environnement doivent être cohérents."
+            )
 if not BACKEND_BASE_URL.startswith('https://'):
     raise ImproperlyConfigured(
         "BACKEND_BASE_URL doit être l'adresse HTTPS publique de l'API (URL de notification des paiements)."

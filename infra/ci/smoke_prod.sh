@@ -269,7 +269,9 @@ verifier_fastapi() {
 verifier_webhooks_et_documentation() {
     local chemin
 
-    for chemin in /api/paiements/webhook/cinetpay/ /api/paiements/webhook/cinetpay/transfert/; do
+    # GeniusPay n'est pas le fournisseur actif de la pile, mais sa route est
+    # montée : sans signature valide elle doit refuser, à travers nginx.
+    for chemin in /api/paiements/webhook/cinetpay/ /api/paiements/webhook/cinetpay/transfert/ /api/paiements/webhook/geniuspay/; do
         appel "Webhook sans signature refusé" POST "$URL$chemin" \
             -H "Content-Type: application/json" --data '{}'
         statut_attendu 401; corps_attendu "non authentique"; conclure

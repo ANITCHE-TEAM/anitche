@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     'apps.paiements',
     'apps.livraison',
     'apps.retours',
+    'apps.avis',
     'apps.fidelite',
     'apps.vendeurs',
     'apps.notifications',
@@ -228,6 +229,11 @@ REST_FRAMEWORK = {
         # plus d'une par commande) et photos justificatives (5 par demande).
         'retour_creation': '10/hour',
         'retour_photo': '30/hour',
+        # Avis, par utilisateur : publication (un avis par produit acheté,
+        # donc rarement plus de quelques-uns par commande) et écritures
+        # suivantes (modification, suppression).
+        'avis_creation': '10/hour',
+        'avis_ecriture': '30/hour',
         # Support, par utilisateur : tickets, messages d'un fil de discussion
         # et pièces jointes (5 par message au plus).
         'support_ticket': '10/hour',
@@ -309,6 +315,7 @@ SPECTACULAR_SETTINGS = {
         {'name': 'Paiements', 'description': "Paiement en ligne (mobile money, carte), annulation d'un paiement en attente ; reversements vendeur ; remboursements, reversements et barèmes de frais (administration). Les notifications des fournisseurs (webhooks) ne figurent pas ici."},
         {'name': 'Livraison', 'description': "Tarifs par commune, suivi selon le rôle (client, livreur, vendeur, administration), code de livraison, contestation, assignation et gestion des livreurs."},
         {'name': 'Retours', 'description': "Demandes de retour (commande livrée, 7 jours), photos justificatives, traitement par la boutique ou l'administration."},
+        {'name': 'Avis', 'description': "Avis d'un client sur un produit reçu (note de 1 à 5, 60 jours après la livraison, un avis par produit) : articles à noter, mes avis, modification et suppression par l'auteur."},
         {'name': 'Fidélité', 'description': "Compte de points, gains en attente, transactions, conversion de points en coupon, vérification d'un code promo."},
         {'name': 'Notifications', 'description': "Notifications de l'utilisateur connecté, compteur de non lues, préférences d'envoi par email."},
         {'name': 'Support', 'description': "Tickets, messages, pièces jointes et notation ; file et assignation pour l'équipe support."},
@@ -448,6 +455,17 @@ CINETPAY_API_KEY = config('CINETPAY_API_KEY', default='')
 CINETPAY_API_PASSWORD = config('CINETPAY_API_PASSWORD', default='')
 CINETPAY_API_URL = config('CINETPAY_API_URL', default='')
 CINETPAY_TIMEOUT = config('CINETPAY_TIMEOUT', default=10, cast=int)
+# GeniusPay (API marchand v1, encaissement) : clés du compte, secret de
+# signature des webhooks (whsec_…) et environnement attendu, 'sandbox' ou
+# 'live', comparé à celui de chaque notification et de chaque réponse.
+# Vides : l'adaptateur n'ouvre, ne vérifie et n'accepte rien. L'URL de l'API
+# n'est à définir que pour remplacer celle de la documentation.
+GENIUSPAY_API_KEY = config('GENIUSPAY_API_KEY', default='')
+GENIUSPAY_API_SECRET = config('GENIUSPAY_API_SECRET', default='')
+GENIUSPAY_WEBHOOK_SECRET = config('GENIUSPAY_WEBHOOK_SECRET', default='')
+GENIUSPAY_ENVIRONNEMENT = config('GENIUSPAY_ENVIRONNEMENT', default='')
+GENIUSPAY_API_URL = config('GENIUSPAY_API_URL', default='')
+GENIUSPAY_TIMEOUT = config('GENIUSPAY_TIMEOUT', default=10, cast=int)
 # Adresse publique de l'API, pour les URL de notification envoyées au
 # fournisseur (120 caractères au plus chez CinetPay).
 BACKEND_BASE_URL = config('BACKEND_BASE_URL', default='http://localhost:8000')
@@ -456,6 +474,10 @@ REVERSEMENT_DELAI_RETRACTATION_JOURS = config('REVERSEMENT_DELAI_RETRACTATION_JO
 # Retours : une demande est possible jusqu'à N jours après la livraison
 # (apps.retours). Même valeur que le délai de rétractation par défaut.
 RETOUR_DELAI_JOURS = config('RETOUR_DELAI_JOURS', default=7, cast=int)
+# Avis (apps.avis) : un client note un produit livré jusqu'à N jours après la
+# livraison, puis peut modifier son avis pendant N jours après sa publication.
+AVIS_DELAI_JOURS = config('AVIS_DELAI_JOURS', default=60, cast=int)
+AVIS_DELAI_MODIFICATION_JOURS = config('AVIS_DELAI_MODIFICATION_JOURS', default=14, cast=int)
 # Livraison : passages « en cours » possibles (première tentative comprise)
 # avant l'abandon par l'administration (commande annulée, remboursement).
 LIVRAISON_TENTATIVES_MAX = config('LIVRAISON_TENTATIVES_MAX', default=3, cast=int)

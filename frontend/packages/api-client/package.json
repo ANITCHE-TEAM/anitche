@@ -1,0 +1,29 @@
+{
+  "name": "@anitche/api-client",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing/index.ts"
+  },
+  "scripts": {
+    "generer:api": "openapi-typescript ../../../backend-django/schema.yaml -o src/generes/django.ts && openapi-typescript ../../../backend-fastapi/openapi.json -o src/generes/fastapi.ts",
+    "verifier:api": "openapi-typescript ../../../backend-django/schema.yaml -o src/generes/django.ts --check && openapi-typescript ../../../backend-fastapi/openapi.json -o src/generes/fastapi.ts --check",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "catalog:",
+    "openapi-fetch": "catalog:"
+  },
+  "devDependencies": {
+    "@anitche/config": "workspace:*",
+    "eslint": "catalog:",
+    "msw": "catalog:",
+    "openapi-typescript": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

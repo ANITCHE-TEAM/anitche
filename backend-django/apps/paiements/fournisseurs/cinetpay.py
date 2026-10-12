@@ -271,6 +271,10 @@ class FournisseurCinetPay(FournisseurPaiement):
             statut=_statut(donnees.get("status")),
             identifiant_externe=str(donnees.get("transaction_id") or ""),
             jeton_notification=str(donnees.get("notify_token") or ""),
+            # Absents de la réponse : un succès immédiat n'est pas appliqué,
+            # le reversement attend la notification (reversements.py).
+            montant=_montant(donnees.get("amount")),
+            devise=donnees.get("currency") or None,
         )
 
     def lire_notification_transfert(self, request):
