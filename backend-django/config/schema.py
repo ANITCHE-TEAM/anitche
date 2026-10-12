@@ -113,6 +113,7 @@ TAGS_PAR_PREFIXE = {
     "paiements": "Paiements",
     "livraison": "Livraison",
     "retours": "Retours",
+    "avis": "Avis",
     "fidelite": "Fidélité",
     "notifications": "Notifications",
     "support": "Support",

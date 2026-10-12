@@ -13,6 +13,304 @@ info:
 
     Guide complet : docs/GUIDE_FRONTEND.md.
 paths:
+  /api/avis/:
+    post:
+      operationId: avis_create
+      description: 'Réservé à l''acheteur d''un article livré (email vérifié), dans
+        les 60 jours suivant la livraison. Un seul avis par produit. Commande non
+        livrée ou délai écoulé : 400 ; produit de ma propre boutique : 403 ; article
+        d''un autre client : 404 ; produit déjà noté : 409.'
+      summary: Publier un avis
+      tags:
+      - Avis
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreerAvisRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/CreerAvisRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/CreerAvisRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Avis'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Conflit : l''état actuel de la ressource ne permet pas cette
+            action.'
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/avis/{id}/:
+    get:
+      operationId: avis_retrieve
+      description: |-
+        Détail, modification et suppression de son propre avis. L'avis d'un
+        autre client est introuvable (404), jamais interdit.
+      summary: Détail de mon avis
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Avis
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Avis'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+    patch:
+      operationId: avis_partial_update
+      description: 'Note et/ou commentaire, pendant 14 jours après la publication.
+        L''avis est alors marqué `est_modifie`. Avis masqué par la modération : 403
+        ; délai écoulé : 400.'
+      summary: Modifier mon avis
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Avis
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedModifierAvisRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedModifierAvisRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedModifierAvisRequest'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Avis'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+    delete:
+      operationId: avis_destroy
+      description: 'Suppression douce : l''avis sort de la note du produit, et le
+        produit ne peut plus être noté.'
+      summary: Supprimer mon avis
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Avis
+      security:
+      - jwtAuth: []
+      responses:
+        '204':
+          description: No response body
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/avis/a-noter/:
+    get:
+      operationId: avis_a_noter_list
+      description: Lignes de mes commandes livrées, dans le délai pour noter, dont
+        le produit n'a pas encore reçu mon avis. Les produits de ma propre boutique
+        n'y figurent pas.
+      summary: Articles que je peux noter
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - Avis
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedArticleANoterList'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/avis/mes-avis/:
+    get:
+      operationId: avis_mes_avis_list
+      summary: Mes avis
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - Avis
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedAvisList'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
   /api/catalogue/administration/produits/:
     get:
       operationId: catalogue_administration_produits_list
@@ -7950,6 +8248,38 @@ components:
       - point_de_repere
       - quartier
       - telephone
+    ArticleANoter:
+      type: object
+      description: Une ligne de commande livrée que le client peut encore noter.
+      properties:
+        commande_item_id:
+          type: string
+          format: uuid
+        numero_commande:
+          type: string
+        produit_id:
+          type: integer
+        produit_nom:
+          type: string
+        produit_slug:
+          type: string
+        boutique_nom:
+          type: string
+        date_livraison:
+          type: string
+          format: date-time
+        avis_possible_jusqu_au:
+          type: string
+          readOnly: true
+      required:
+      - avis_possible_jusqu_au
+      - boutique_nom
+      - commande_item_id
+      - date_livraison
+      - numero_commande
+      - produit_id
+      - produit_nom
+      - produit_slug
     ArticleRetourInputRequest:
       type: object
       properties:
@@ -8016,6 +8346,79 @@ components:
         * `client` - Client
         * `vendor` - Vendeur
         * `support` - Support ANITCHE
+    Avis:
+      type: object
+      description: Un avis tel que son auteur le voit.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        produit_id:
+          type: integer
+          readOnly: true
+        produit_nom:
+          type: string
+          readOnly: true
+        produit_slug:
+          type: string
+          readOnly: true
+        boutique_nom:
+          type: string
+          readOnly: true
+        commande_item_id:
+          type: string
+          format: uuid
+          readOnly: true
+        note:
+          type: integer
+          readOnly: true
+        commentaire:
+          type: string
+          readOnly: true
+        statut:
+          allOf:
+          - $ref: '#/components/schemas/AvisStatutEnum'
+          readOnly: true
+        est_modifie:
+          type: boolean
+          readOnly: true
+        date_creation:
+          type: string
+          format: date-time
+          readOnly: true
+        date_modification:
+          type: string
+          format: date-time
+          readOnly: true
+        modifiable_jusqu_au:
+          type: string
+          readOnly: true
+          description: Fin du délai de modification par l'auteur (ISO 8601).
+      required:
+      - boutique_nom
+      - commande_item_id
+      - commentaire
+      - date_creation
+      - date_modification
+      - est_modifie
+      - id
+      - modifiable_jusqu_au
+      - note
+      - produit_id
+      - produit_nom
+      - produit_slug
+      - statut
+    AvisStatutEnum:
+      enum:
+      - publie
+      - masque
+      - supprime
+      type: string
+      description: |-
+        * `publie` - Publié
+        * `masque` - Masqué par la modération
+        * `supprime` - Supprimé par son auteur
     BaremeFrais:
       type: object
       description: |-
@@ -9202,6 +9605,26 @@ components:
       - type_reduction
       - type_reduction_display
       - valeur
+    CreerAvisRequest:
+      type: object
+      description: Corps de la publication d'un avis.
+      properties:
+        commande_item_id:
+          type: string
+          format: uuid
+          description: Ligne de la commande livrée (article acheté) à noter.
+        note:
+          type: integer
+          maximum: 5
+          minimum: 1
+        commentaire:
+          type: string
+          default: ''
+          description: 'Facultatif : la note seule suffit.'
+          maxLength: 2000
+      required:
+      - commande_item_id
+      - note
     CreerDemandeRetourRequest:
       type: object
       properties:
@@ -10621,6 +11044,52 @@ components:
         * `100_PTS_10PCT` - 100_PTS_10PCT
         * `250_PTS_2500FCFA` - 250_PTS_2500FCFA
         * `500_PTS_6000FCFA` - 500_PTS_6000FCFA
+    PaginatedArticleANoterList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/ArticleANoter'
+    PaginatedAvisList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/Avis'
     PaginatedBaremeFraisList:
       type: object
       required:
@@ -12162,6 +12631,17 @@ components:
           type: string
           default: ''
           maxLength: 10
+    PatchedModifierAvisRequest:
+      type: object
+      description: 'Corps de la modification : au moins un des deux champs.'
+      properties:
+        note:
+          type: integer
+          maximum: 5
+          minimum: 1
+        commentaire:
+          type: string
+          maxLength: 2000
     PatchedNoteTicketRequestRequest:
       type: object
       properties:
@@ -14799,6 +15279,10 @@ tags:
 - name: Retours
   description: Demandes de retour (commande livrée, 7 jours), photos justificatives,
     traitement par la boutique ou l'administration.
+- name: Avis
+  description: 'Avis d''un client sur un produit reçu (note de 1 à 5, 60 jours après
+    la livraison, un avis par produit) : articles à noter, mes avis, modification
+    et suppression par l''auteur.'
 - name: Fidélité
   description: Compte de points, gains en attente, transactions, conversion de points
     en coupon, vérification d'un code promo.
