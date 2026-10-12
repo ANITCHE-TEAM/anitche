@@ -4,6 +4,92 @@
  */
 
 export interface paths {
+    "/api/avis/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Publier un avis
+         * @description Réservé à l'acheteur d'un article livré (email vérifié), dans les 60 jours suivant la livraison. Un seul avis par produit. Commande non livrée ou délai écoulé : 400 ; produit de ma propre boutique : 403 ; article d'un autre client : 404 ; produit déjà noté : 409.
+         */
+        post: operations["avis_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/avis/{id}/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Détail de mon avis
+         * @description Détail, modification et suppression de son propre avis. L'avis d'un
+         *     autre client est introuvable (404), jamais interdit.
+         */
+        get: operations["avis_retrieve"];
+        put?: never;
+        post?: never;
+        /**
+         * Supprimer mon avis
+         * @description Suppression douce : l'avis sort de la note du produit, et le produit ne peut plus être noté.
+         */
+        delete: operations["avis_destroy"];
+        options?: never;
+        head?: never;
+        /**
+         * Modifier mon avis
+         * @description Note et/ou commentaire, pendant 14 jours après la publication. L'avis est alors marqué `est_modifie`. Avis masqué par la modération : 403 ; délai écoulé : 400.
+         */
+        patch: operations["avis_partial_update"];
+        trace?: never;
+    };
+    "/api/avis/a-noter/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Articles que je peux noter
+         * @description Lignes de mes commandes livrées, dans le délai pour noter, dont le produit n'a pas encore reçu mon avis. Les produits de ma propre boutique n'y figurent pas.
+         */
+        get: operations["avis_a_noter_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/avis/mes-avis/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Mes avis */
+        get: operations["avis_mes_avis_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/catalogue/administration/produits/": {
         parameters: {
             query?: never;
@@ -2241,6 +2327,19 @@ export interface components {
              */
             longitude?: number | null;
         };
+        /** @description Une ligne de commande livrée que le client peut encore noter. */
+        ArticleANoter: {
+            /** Format: uuid */
+            commande_item_id: string;
+            numero_commande: string;
+            produit_id: number;
+            produit_nom: string;
+            produit_slug: string;
+            boutique_nom: string;
+            /** Format: date-time */
+            date_livraison: string;
+            readonly avis_possible_jusqu_au: string;
+        };
         ArticleRetourInputRequest: {
             /** Format: uuid */
             commande_item_id: string;
@@ -2274,6 +2373,34 @@ export interface components {
          * @enum {string}
          */
         AuthorRoleEnum: "client" | "vendor" | "support";
+        /** @description Un avis tel que son auteur le voit. */
+        Avis: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly produit_id: number;
+            readonly produit_nom: string;
+            readonly produit_slug: string;
+            readonly boutique_nom: string;
+            /** Format: uuid */
+            readonly commande_item_id: string;
+            readonly note: number;
+            readonly commentaire: string;
+            readonly statut: components["schemas"]["AvisStatutEnum"];
+            readonly est_modifie: boolean;
+            /** Format: date-time */
+            readonly date_creation: string;
+            /** Format: date-time */
+            readonly date_modification: string;
+            /** @description Fin du délai de modification par l'auteur (ISO 8601). */
+            readonly modifiable_jusqu_au: string;
+        };
+        /**
+         * @description * `publie` - Publié
+         *     * `masque` - Masqué par la modération
+         *     * `supprime` - Supprimé par son auteur
+         * @enum {string}
+         */
+        AvisStatutEnum: "publie" | "masque" | "supprime";
         /**
          * @description Barème pas encore commencé : tout se modifie, date_debut maintenant ou
          *     plus tard. Barème commencé (date_debut passée) : seule sa clôture est
@@ -2785,6 +2912,20 @@ export interface components {
             readonly date_expiration: string | null;
             /** Format: date-time */
             readonly date_creation: string;
+        };
+        /** @description Corps de la publication d'un avis. */
+        CreerAvisRequest: {
+            /**
+             * Format: uuid
+             * @description Ligne de la commande livrée (article acheté) à noter.
+             */
+            commande_item_id: string;
+            note: number;
+            /**
+             * @description Facultatif : la note seule suffit.
+             * @default
+             */
+            commentaire: string;
         };
         CreerDemandeRetourRequest: {
             /** Format: uuid */
@@ -3382,6 +3523,36 @@ export interface components {
          * @enum {string}
          */
         OptionEnum: "50_PTS_5PCT" | "100_PTS_10PCT" | "250_PTS_2500FCFA" | "500_PTS_6000FCFA";
+        PaginatedArticleANoterList: {
+            /** @example 123 */
+            count: number;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=4
+             */
+            next?: string | null;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=2
+             */
+            previous?: string | null;
+            results: components["schemas"]["ArticleANoter"][];
+        };
+        PaginatedAvisList: {
+            /** @example 123 */
+            count: number;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=4
+             */
+            next?: string | null;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=2
+             */
+            previous?: string | null;
+            results: components["schemas"]["Avis"][];
+        };
         PaginatedBaremeFraisList: {
             /** @example 123 */
             count: number;
@@ -4202,6 +4373,11 @@ export interface components {
             commentaire: string;
             /** @default  */
             code: string;
+        };
+        /** @description Corps de la modification : au moins un des deux champs. */
+        PatchedModifierAvisRequest: {
+            note?: number;
+            commentaire?: string;
         };
         PatchedNoteTicketRequestRequest: {
             satisfaction_rating?: number;
@@ -5530,6 +5706,341 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    avis_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreerAvisRequest"];
+                "application/x-www-form-urlencoded": components["schemas"]["CreerAvisRequest"];
+                "multipart/form-data": components["schemas"]["CreerAvisRequest"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Avis"];
+                };
+            };
+            /** @description Requête invalide (erreurs par champ dans `errors`) ou refus métier (message dans `detail`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Action non autorisée pour ce compte. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Conflit : l'état actuel de la ressource ne permet pas cette action. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    avis_retrieve: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Avis"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    avis_destroy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No response body */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Action non autorisée pour ce compte. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    avis_partial_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["PatchedModifierAvisRequest"];
+                "application/x-www-form-urlencoded": components["schemas"]["PatchedModifierAvisRequest"];
+                "multipart/form-data": components["schemas"]["PatchedModifierAvisRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Avis"];
+                };
+            };
+            /** @description Requête invalide (erreurs par champ dans `errors`) ou refus métier (message dans `detail`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Action non autorisée pour ce compte. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    avis_a_noter_list: {
+        parameters: {
+            query?: {
+                /** @description Un numéro de page de l'ensemble des résultats. */
+                page?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaginatedArticleANoterList"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    avis_mes_avis_list: {
+        parameters: {
+            query?: {
+                /** @description Un numéro de page de l'ensemble des résultats. */
+                page?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaginatedAvisList"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
     catalogue_administration_produits_list: {
         parameters: {
             query?: {
