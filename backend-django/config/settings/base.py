@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 from decouple import Csv, config
 from celery.schedules import crontab
@@ -410,8 +409,10 @@ CELERY_BEAT_SCHEDULE = {
     },
 }
 
-# Cache Redis
-REDIS_URL = os.environ.get('REDIS_URL', 'redis://redis:6379/0')
+# Cache Redis : même source que Celery (environnement, puis .env), pour que le
+# cache suive le .env quand Django tourne hors Docker. Les compose fixent
+# toujours REDIS_URL.
+REDIS_URL = config('REDIS_URL', default='redis://localhost:6379/0')
 CACHES = {
     'default': {
         'BACKEND': 'django.core.cache.backends.redis.RedisCache',
