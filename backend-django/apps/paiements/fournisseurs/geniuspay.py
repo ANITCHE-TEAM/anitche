@@ -6,8 +6,7 @@ base), le versement manuel reste possible.
 
 - Authentification : en-têtes X-API-Key et X-API-Secret sur chaque appel.
 - Initiation : POST /payments → reference (stockée dans
-  Paiement.transaction_id_externe), payment_url. La référence ANITCHE du
-  paiement part dans metadata. Aucune URL de notification dans la requête :
+  Paiement.transaction_id_externe), checkout_url (la documentation écrit payment_url). La référence ANITCHE du paiement part dans metadata. Aucune URL de notification dans la requête :
   elle se déclare dans le tableau de bord GeniusPay, ou par POST /webhooks
   (creer_webhook), qui renvoie une seule fois le secret de signature.
 - Notification : signée, HMAC-SHA256(horodatage + "." + corps brut) avec le
@@ -15,7 +14,7 @@ base), le versement manuel reste possible.
   tolérance de 5 minutes. Elle n'est qu'un signal : son statut, son montant
   et sa devise ne sont JAMAIS utilisés. Le paiement se retrouve par la
   référence GeniusPay stockée à l'initiation, sans rien supposer de son
-  format (« MTX-… » ou « TXN-… » selon les exemples de la documentation).
+  format (« SANDBOX_… » en sandbox, « MTX-… » ou « TXN-… » dans la documentation).
 - Vérification : GET /payments/{reference}, systématiquement avant toute
   validation. Seule sa réponse fait foi : statut, `amount` (jamais
   `net_amount` ni `fees`), `currency`, et référence, environnement et
@@ -251,7 +250,7 @@ class FournisseurGeniusPay(FournisseurPaiement):
             "error_url": retour,
             "metadata": {CLE_REFERENCE: paiement.reference},
         })
-        reference, url = data.get("reference"), data.get("payment_url")
+        reference, url = data.get("reference"), data.get("checkout_url")
         if (
             data.get("environment") != self._environnement()
             or not _texte(reference, LONGUEUR_MAX_REFERENCE)
@@ -298,7 +297,8 @@ class FournisseurGeniusPay(FournisseurPaiement):
             environnement = self._environnement()
         except ErreurFournisseur as erreur:
             raise NotificationInvalide(str(erreur)) from None
-        if donnees.get("environment") != environnement:
+        # L'environnement est dans data (corps réel observé en sandbox), jamais à la racine.
+        if (data.get("environment") if isinstance(data, dict) else None) != environnement:
             raise NotificationInvalide(f"Notification d'un autre environnement que « {environnement} ».")
         if not evenement.startswith(PREFIXE_EVENEMENTS_PAIEMENT):
             # cashout.* (transferts, non gérés ici) et tout événement inconnu.

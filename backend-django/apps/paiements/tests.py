@@ -2502,7 +2502,7 @@ class FauxGeniusPay:
         }
         return sans_absents({
             "id": 455 + numero, "reference": reference, "amount": montant, "fees": 450, "net_amount": montant - 450,
-            "status": "pending", "payment_url": f"https://pay.geniuspay.test/checkout/{reference}", "gateway": "wave",
+            "status": "pending", "checkout_url": f"https://pay.geniuspay.test/checkout/{reference}", "gateway": "wave",
             "environment": self.environnement, "metadata": corps["metadata"], **self.reponse_initiation,
         })
 
@@ -2551,9 +2551,9 @@ class DonneesGeniusPay(Donnees):
                 "amount": Brut(f"{du}.00"), "currency": "XOF", "fees": Brut("250.00"),
                 "net_amount": Brut(f"{du - 250}.00"), "status": "completed", "payment_method": "mobile_money",
                 "provider": "wave", "customer_name": "Jean Kouassi", "customer_phone": "+2250748123456",
-                "merchant_id": 25, "metadata": {"reference": paiement.reference}, **data,
+                "merchant_id": 25, "metadata": {"reference": paiement.reference},
+                "environment": environnement, **data,
             }),
-            "environment": environnement,
             "api_version": "2024-01-01",
         })
 
@@ -2633,8 +2633,8 @@ class GeniusPayTests(DonneesGeniusPay, APITestCase):
             "environnement absent": {"reponse_initiation": {"environment": ABSENT}},
             "référence absente": {"reponse_initiation": {"reference": ABSENT}},
             "référence non textuelle": {"reponse_initiation": {"reference": 456}},
-            "URL de paiement absente": {"reponse_initiation": {"payment_url": ABSENT}},
-            "URL de paiement sans TLS": {"reponse_initiation": {"payment_url": "http://pay.geniuspay.test/x"}},
+            "URL de paiement absente": {"reponse_initiation": {"checkout_url": ABSENT}},
+            "URL de paiement sans TLS": {"reponse_initiation": {"checkout_url": "http://pay.geniuspay.test/x"}},
             "redirection (jamais suivie)": {"panne": (302, b"", {"Location": "https://ailleurs.test/vol"})},
             "délai dépassé": {"panne": requests.Timeout()},
             "500": {"panne": (500, erreur_geniuspay("INTERNAL_ERROR"))},
@@ -3320,7 +3320,7 @@ class EssaiGeniusPayTests(DonneesGeniusPay, APITestCase):
         self.assertEqual(corps, {
             "name": "ANITCHE essai sandbox", "url": URL_WEBHOOK_TUNNEL,
             "events": ["payment.initiated", "payment.success", "payment.failed", "payment.cancelled",
-                       "payment.refunded", "payment.expired", "webhook.test"],
+                       "payment.refunded", "payment.expired"],
         })
         self.assertIn("secret enregistré dans .env", sortie)
         self.assertIn("Webhook 77", sortie)
@@ -3552,8 +3552,8 @@ class EssaiGeniusPayTests(DonneesGeniusPay, APITestCase):
             f"Notification GeniusPay reçue : {len(corps)} octets, événement annoncé « payment.success », "
             "environnement annoncé « sandbox », signature hexadécimale (64 caractères).",
             "Notification GeniusPay : signature valide (encodage hex).",
-            "Notification GeniusPay payment.success : champs [api_version, created_at, data, environment, event, id, "
-            "timestamp]",
+            "Notification GeniusPay payment.success : champs [api_version, created_at, data, event, id, timestamp] ; "
+            "data [amount, currency, customer_name, customer_phone, environment, fees,",
             "amount de type Decimal ; référence « MTX-FAUX000001 ».",
             "GeniusPay GET /payments/MTX-FAUX000001 : HTTP 200.",
             f"Vérification GeniusPay de MTX-FAUX000001 (paiement {paiement.reference}) : statut « completed », "

@@ -47,10 +47,11 @@ VARIABLE_SECRET = "GENIUSPAY_WEBHOOK_SECRET"
 LIGNE_SECRET = re.compile(rf"^\s*(?:export\s+)?{VARIABLE_SECRET}\s*=(.*)$")
 CHEMIN_WEBHOOK = "/api/paiements/webhook/geniuspay/"
 NOM_WEBHOOK = "ANITCHE essai sandbox"
-#: Tous les événements de paiement de la documentation, et l'essai du webhook.
+#: Événements de paiement de la documentation. GeniusPay refuse « webhook.test »
+#: à la création (422 validation.in) : l'essai s'envoie depuis le tableau de bord.
 EVENEMENTS_WEBHOOK = (
     "payment.initiated", "payment.success", "payment.failed", "payment.cancelled", "payment.refunded",
-    "payment.expired", "webhook.test",
+    "payment.expired",
 )
 #: Noms possibles du champ qui porte le secret (la documentation n'en donne pas l'exemple).
 CHAMPS_SECRET = ("secret", "signing_secret", "webhook_secret")
