@@ -305,7 +305,7 @@ Suivi des **SDK officiels CinetPay** ([cinetpay-python](https://github.com/cinet
 | Environnement | celui de la notification et de chaque réponse doit être `GENIUSPAY_ENVIRONNEMENT` (`sandbox` ou `live`) |
 | Transfert | non implémenté (`OperationNonSupportee`) |
 
-Inactif par défaut : sans clés, sans secret de webhook ou sans environnement, rien n'est ouvert, vérifié ni accepté. **À confirmer en sandbox** (la documentation ne le précise pas) : l'encodage de la signature, l'usage du secret `whsec_…` tel quel comme clé HMAC, le renvoi de `metadata` par le `GET`, le corps de l'événement `webhook.test`.
+Inactif par défaut : sans clés, sans secret de webhook ou sans environnement, rien n'est ouvert, vérifié ni accepté. **À confirmer en sandbox** (la documentation ne le précise pas) : l'encodage de la signature, l'usage du secret `whsec_…` tel quel comme clé HMAC, le renvoi de `metadata` par le `GET`, le corps de l'événement `webhook.test`. L'essai se déroule avec la commande de développement `essai_geniuspay` (`creer-webhook`, `payer`, `etat`), pas à pas dans `docs/ESSAI_GENIUSPAY_SANDBOX.md`.
 
 ### Ajouter un fournisseur (PayDunya en réserve)
 

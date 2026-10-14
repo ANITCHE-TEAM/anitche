@@ -6,15 +6,15 @@ base), le versement manuel reste possible.
 
 - Authentification : en-têtes X-API-Key et X-API-Secret sur chaque appel.
 - Initiation : POST /payments → reference (stockée dans
-  Paiement.transaction_id_externe), payment_url. La référence ANITCHE du
-  paiement part dans metadata. Aucune URL de notification dans la requête :
-  elle se déclare dans le tableau de bord GeniusPay.
+  Paiement.transaction_id_externe), checkout_url (la documentation écrit payment_url). La référence ANITCHE du paiement part dans metadata. Aucune URL de notification dans la requête :
+  elle se déclare dans le tableau de bord GeniusPay, ou par POST /webhooks
+  (creer_webhook), qui renvoie une seule fois le secret de signature.
 - Notification : signée, HMAC-SHA256(horodatage + "." + corps brut) avec le
   secret du webhook, en-têtes X-Webhook-Signature et X-Webhook-Timestamp,
   tolérance de 5 minutes. Elle n'est qu'un signal : son statut, son montant
   et sa devise ne sont JAMAIS utilisés. Le paiement se retrouve par la
   référence GeniusPay stockée à l'initiation, sans rien supposer de son
-  format (« MTX-… » ou « TXN-… » selon les exemples de la documentation).
+  format (« SANDBOX_… » en sandbox, « MTX-… » ou « TXN-… » dans la documentation).
 - Vérification : GET /payments/{reference}, systématiquement avant toute
   validation. Seule sa réponse fait foi : statut, `amount` (jamais
   `net_amount` ni `fees`), `currency`, et référence, environnement et
@@ -31,6 +31,10 @@ et un succès est alors refusé par services.controler_montant_et_devise.
 la signature (ENCODAGE_SIGNATURE), l'usage du secret « whsec_… » tel quel
 comme clé HMAC, le renvoi de metadata par le GET, et le corps de
 l'événement webhook.test.
+
+Journal de niveau INFO (visible en dev seulement) : réception d'une
+notification, résultat de la signature, forme du corps, réponse du GET.
+Jamais une clé, un secret, une signature ni une donnée du client.
 
 Inactif par défaut : sans clés, sans secret de webhook ou sans
 environnement (réglages GENIUSPAY_* vides), rien n'est ouvert, vérifié ni
@@ -85,6 +89,9 @@ ENCODAGE_SIGNATURE = "hex"
 
 EVENEMENT_ESSAI = "webhook.test"
 PREFIXE_EVENEMENTS_PAIEMENT = "payment."
+#: En-têtes d'information d'une notification, journalisés avant la signature.
+EN_TETE_EVENEMENT = "X-Webhook-Event"
+EN_TETE_ENVIRONNEMENT = "X-Webhook-Environment"
 
 CODE_TRANSACTION_INTROUVABLE = "TRANSACTION_NOT_FOUND"
 STATUTS_SUCCES = {"completed"}
@@ -133,6 +140,29 @@ def _montant(valeur):
     return None
 
 
+def _forme_signature(signature):
+    """Forme de la signature reçue, jamais sa valeur."""
+    if len(signature) == 64 and all(caractere in "0123456789abcdefABCDEF" for caractere in signature):
+        return "hexadécimale (64 caractères)"
+    if len(signature) == 44 and signature.endswith("="):
+        return "base64 probable (44 caractères)"
+    return f"de forme inconnue ({len(signature)} caractères)" if signature else "absente"
+
+
+def _court(valeur):
+    """Valeur courte et imprimable pour le journal, sinon son type."""
+    if isinstance(valeur, str) and valeur.isprintable():
+        return valeur[:40]
+    return f"<{type(valeur).__name__}>"
+
+
+def _cles(objet):
+    """Noms des champs d'un objet JSON (jamais leurs valeurs)."""
+    if not isinstance(objet, dict):
+        return f"<{type(objet).__name__}>"
+    return ", ".join(sorted(_court(cle) for cle in objet)[:40]) or "aucun"
+
+
 class FournisseurGeniusPay(FournisseurPaiement):
     code = "geniuspay"
     notification_par_identifiant_externe = True
@@ -172,6 +202,7 @@ class FournisseurGeniusPay(FournisseurPaiement):
         except requests.RequestException as erreur:
             logger.error("GeniusPay %s %s injoignable : %s", methode, chemin, type(erreur).__name__)
             raise ErreurFournisseur("GeniusPay est injoignable.") from None
+        logger.info("GeniusPay %s %s : HTTP %s.", methode, chemin, reponse.status_code)
         try:
             donnees = _lire_json(reponse.content)
         except ValueError:
@@ -189,6 +220,12 @@ class FournisseurGeniusPay(FournisseurPaiement):
         if transaction_visee and reponse.status_code == 404 and code == CODE_TRANSACTION_INTROUVABLE:
             raise TransactionIntrouvable(f"GeniusPay ne connaît pas cette transaction (404 {code}).")
         raise ErreurFournisseur(f"GeniusPay a refusé l'opération (HTTP {reponse.status_code}, {code}).")
+
+    def creer_webhook(self, nom, url, evenements):
+        """Déclare l'URL de notification (POST /webhooks) → le « data » de la
+        réponse, qui porte le secret de signature, renvoyé cette seule fois :
+        à l'appelant de le conserver sans jamais l'afficher ni le journaliser."""
+        return self._appel("POST", "/webhooks", {"name": nom, "url": url, "events": list(evenements)})
 
     # --- Encaissement -------------------------------------------------------
 
@@ -213,7 +250,7 @@ class FournisseurGeniusPay(FournisseurPaiement):
             "error_url": retour,
             "metadata": {CLE_REFERENCE: paiement.reference},
         })
-        reference, url = data.get("reference"), data.get("payment_url")
+        reference, url = data.get("reference"), data.get("checkout_url")
         if (
             data.get("environment") != self._environnement()
             or not _texte(reference, LONGUEUR_MAX_REFERENCE)
@@ -229,7 +266,15 @@ class FournisseurGeniusPay(FournisseurPaiement):
         # Corps BRUT : la signature porte sur les octets reçus, jamais sur un
         # JSON ré-encodé. Le JSON n'est lu qu'une fois la signature vérifiée.
         corps = request.body
+        logger.info(
+            "Notification GeniusPay reçue : %s octets, événement annoncé « %s », environnement annoncé « %s », "
+            "signature %s.",
+            len(corps), _court(request.headers.get(EN_TETE_EVENEMENT, "")),
+            _court(request.headers.get(EN_TETE_ENVIRONNEMENT, "")),
+            _forme_signature(request.headers.get(EN_TETE_SIGNATURE, "")),
+        )
         self._verifier_signature(request, corps)
+        logger.info("Notification GeniusPay : signature valide (encodage %s).", ENCODAGE_SIGNATURE)
         try:
             donnees = _lire_json(corps)
         except ValueError:
@@ -239,18 +284,25 @@ class FournisseurGeniusPay(FournisseurPaiement):
         evenement = donnees.get("event")
         if not _texte(evenement, 60):
             raise NotificationInvalide("Événement manquant.")
+        data = donnees.get("data")
+        logger.info(
+            "Notification GeniusPay %s : champs [%s] ; data [%s] ; amount de type %s ; référence « %s ».",
+            _court(evenement), _cles(donnees), _cles(data),
+            type(data.get("amount")).__name__ if isinstance(data, dict) else "absent",
+            _court(data.get("reference")) if isinstance(data, dict) else "",
+        )
         if evenement == EVENEMENT_ESSAI:
             raise NotificationIgnoree(f"essai du webhook ({EVENEMENT_ESSAI})")
         try:
             environnement = self._environnement()
         except ErreurFournisseur as erreur:
             raise NotificationInvalide(str(erreur)) from None
-        if donnees.get("environment") != environnement:
+        # L'environnement est dans data (corps réel observé en sandbox), jamais à la racine.
+        if (data.get("environment") if isinstance(data, dict) else None) != environnement:
             raise NotificationInvalide(f"Notification d'un autre environnement que « {environnement} ».")
         if not evenement.startswith(PREFIXE_EVENEMENTS_PAIEMENT):
             # cashout.* (transferts, non gérés ici) et tout événement inconnu.
             raise NotificationIgnoree(f"événement {evenement} hors du périmètre des encaissements")
-        data = donnees.get("data")
         reference = data.get("reference") if isinstance(data, dict) else None
         if not _texte(reference, LONGUEUR_MAX_REFERENCE):
             raise NotificationInvalide("Référence de transaction manquante.")
@@ -288,6 +340,12 @@ class FournisseurGeniusPay(FournisseurPaiement):
         if not reference:
             raise TransactionIntrouvable("Aucune référence GeniusPay pour ce paiement (initiation inaboutie).")
         data = self._appel("GET", f"/payments/{quote(reference, safe='')}", transaction_visee=True)
+        logger.info(
+            "Vérification GeniusPay de %s (paiement %s) : statut « %s », amount de type %s, devise « %s », "
+            "environnement « %s », metadata [%s].",
+            reference, paiement.reference, _court(data.get("status")), type(data.get("amount")).__name__,
+            _court(data.get("currency")), _court(data.get("environment")), _cles(data.get("metadata")),
+        )
         if data.get("reference") != reference:
             raise NotificationInvalide("La transaction GeniusPay ne porte pas la référence stockée à l'initiation.")
         if notification is not None and notification.identifiant_externe != reference:

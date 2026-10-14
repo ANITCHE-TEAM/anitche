@@ -12,7 +12,10 @@ DOCUMENTATION_API_ACTIVE = True
 
 # POST /api/paiements/simulation/<reference>/ (page de paiement simulé du portail).
 PAIEMENT_SIMULATION_API_ACTIVE = True
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', 'anitche-backend']
+# ALLOWED_HOSTS_DEV : hôtes ajoutés depuis l'environnement, séparés par des
+# virgules. Sert au tunnel qui expose le serveur local aux notifications d'un
+# fournisseur de paiement (docs/ESSAI_GENIUSPAY_SANDBOX.md).
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', 'anitche-backend', *config('ALLOWED_HOSTS_DEV', default='', cast=Csv())]
 
 # Autorisé uniquement en dev : pas de CORS_ALLOW_CREDENTIALS, donc pas
 # de cookie de session exposé cross-origin. En prod, voir prod.py qui
@@ -60,3 +63,13 @@ REST_FRAMEWORK = {
 # collection postman_paiements.json pour signer ses notifications). Aucun
 # argent ne circule ; prod.py refuse ce fournisseur.
 PAIEMENT_SIMULE_SECRET = config('PAIEMENT_SIMULE_SECRET', default='dev-simulation-anitche')
+
+# Journal de niveau INFO du module paiements (initiation, notifications,
+# vérification auprès du fournisseur) : base.py ne montre que les WARNING.
+LOGGING = {
+    **LOGGING,
+    'loggers': {
+        **LOGGING['loggers'],
+        'apps.paiements': {'handlers': ['console'], 'level': 'INFO', 'propagate': False},
+    },
+}
