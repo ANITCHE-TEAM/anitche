@@ -64,9 +64,10 @@ variante FIELD_ENCRYPTION_KEYS pas-une-cle
 variante BACKUP_REPOSITORY /var/backups/anitche
 
 # --- Paiements : GeniusPay, mode staging, CinetPay ----------------------------
-# Valeurs factices. L'environnement de CI est celui de CinetPay : un scénario
-# GeniusPay retire donc les clés CinetPay pour prouver qu'elles ne sont plus
-# exigées.
+# Valeurs factices. L'environnement de CI est celui de GeniusPay (live) et
+# contient encore des clés CinetPay factices, requises par docker-compose :
+# les scénarios GeniusPay les retirent pour prouver qu'elles ne sont pas
+# exigées, les scénarios CinetPay fixent PAIEMENT_FOURNISSEUR=cinetpay.
 SANS_CINETPAY=(-CINETPAY_API_KEY -CINETPAY_API_PASSWORD)
 GP_LIVE=(PAIEMENT_FOURNISSEUR=geniuspay GENIUSPAY_API_KEY=sk_live_factice GENIUSPAY_API_SECRET=ss_live_factice
          GENIUSPAY_WEBHOOK_SECRET=whsec_factice GENIUSPAY_ENVIRONNEMENT=live)
@@ -105,7 +106,7 @@ scenario_refuse() {
         echo "❌ $libelle : refusé, mais sans erreur citant $nom." >&2
         sed 's/^/   | /' "$SORTIE" >&2
         ECHECS=$((ECHECS + 1))
-    elif grep -q -E "whsec_factice|ss_live_factice|ss_sandbox_factice" "$SORTIE"; then
+    elif grep -q -E "whsec_factice|whsec_ci_factice|ss_live_factice|ss_live_ci_factice|ss_sandbox_factice" "$SORTIE"; then
         echo "❌ $libelle : refusé, mais l'erreur affiche un secret." >&2
         ECHECS=$((ECHECS + 1))
     else
@@ -114,19 +115,21 @@ scenario_refuse() {
 }
 
 echo "==> Paiements : configurations valides"
-scenario_accepte "cinetpay, variable staging absente"
-scenario_accepte "cinetpay, GeniusPay absent"  -GENIUSPAY_API_KEY -GENIUSPAY_API_SECRET -GENIUSPAY_WEBHOOK_SECRET
-scenario_accepte "cinetpay, variable staging à true (sans effet)" "$STAGING=true"
-scenario_accepte "cinetpay, variable staging à false" "$STAGING=false"
+CP=PAIEMENT_FOURNISSEUR=cinetpay
+scenario_accepte "geniuspay live (environnement de CI), variable staging absente"
+scenario_accepte "cinetpay, variable staging absente" "$CP"
+scenario_accepte "cinetpay, GeniusPay absent" "$CP" -GENIUSPAY_API_KEY -GENIUSPAY_API_SECRET -GENIUSPAY_WEBHOOK_SECRET -GENIUSPAY_ENVIRONNEMENT
+scenario_accepte "cinetpay, variable staging à true (sans effet)" "$CP" "$STAGING=true"
+scenario_accepte "cinetpay, variable staging à false" "$CP" "$STAGING=false"
 scenario_accepte "geniuspay live, sans clés CinetPay" "${SANS_CINETPAY[@]}" "${GP_LIVE[@]}"
 scenario_accepte "geniuspay live, variable staging à false" "${SANS_CINETPAY[@]}" "${GP_LIVE[@]}" "$STAGING=false"
 scenario_accepte "geniuspay sandbox en staging" "${SANS_CINETPAY[@]}" "${GP_SANDBOX[@]}"
 
 echo "==> Paiements : variantes invalides"
-scenario_refuse CINETPAY_API_KEY "cinetpay sans CINETPAY_API_KEY" -CINETPAY_API_KEY
-scenario_refuse CINETPAY_API_PASSWORD "cinetpay avec CINETPAY_API_PASSWORD vide" CINETPAY_API_PASSWORD=
-scenario_refuse CINETPAY_API_KEY "cinetpay, clé sk_test_" CINETPAY_API_KEY=sk_test_factice
-scenario_refuse CINETPAY_API_KEY "cinetpay, clé sk_test_, variable staging à true" CINETPAY_API_KEY=sk_test_factice "$STAGING=true"
+scenario_refuse CINETPAY_API_KEY "cinetpay sans CINETPAY_API_KEY" "$CP" -CINETPAY_API_KEY
+scenario_refuse CINETPAY_API_PASSWORD "cinetpay avec CINETPAY_API_PASSWORD vide" "$CP" CINETPAY_API_PASSWORD=
+scenario_refuse CINETPAY_API_KEY "cinetpay, clé sk_test_" "$CP" CINETPAY_API_KEY=sk_test_factice
+scenario_refuse CINETPAY_API_KEY "cinetpay, clé sk_test_, variable staging à true" "$CP" CINETPAY_API_KEY=sk_test_factice "$STAGING=true"
 scenario_refuse PAIEMENT_FOURNISSEUR "fournisseur inconnu" PAIEMENT_FOURNISSEUR=stripe
 scenario_refuse PAIEMENT_FOURNISSEUR "fournisseur geniuspay en casse différente" "${GP_LIVE[@]}" PAIEMENT_FOURNISSEUR=GeniusPay
 for nom in GENIUSPAY_API_KEY GENIUSPAY_API_SECRET GENIUSPAY_WEBHOOK_SECRET; do
@@ -157,7 +160,7 @@ scenario_refuse GENIUSPAY_API_KEY "geniuspay sandbox, clé publique live" "${GP_
 scenario_refuse GENIUSPAY_API_SECRET "geniuspay sandbox, clé secrète live" "${GP_SANDBOX[@]}" GENIUSPAY_API_SECRET=ss_live_factice
 for valeur in True TRUE 1 yes on "" " " "true " " true" False 0 oui; do
     scenario_refuse "$STAGING" "geniuspay, variable staging « $valeur »" "${GP_SANDBOX[@]}" "$STAGING=$valeur"
-    scenario_refuse "$STAGING" "cinetpay, variable staging « $valeur »" "$STAGING=$valeur"
+    scenario_refuse "$STAGING" "cinetpay, variable staging « $valeur »" "$CP" "$STAGING=$valeur"
 done
 
 if [ "$ECHECS" -gt 0 ]; then

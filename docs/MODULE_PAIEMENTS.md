@@ -1,7 +1,7 @@
 # Module paiements — contrat et règles
 
 > Périmètre : backend Django, `backend-django/apps/paiements/` (et ses points de contact dans `commandes`, `livraison`, `retours`, `fidelite`, `notifications`, `utilisateurs`).
-> État : **compte marchand CinetPay pas encore ouvert** (pas de RCCM) : tout fonctionne et se teste avec le **fournisseur simulé** ; les clés CinetPay seront branchées plus tard (§ 9).
+> État : **GeniusPay est le fournisseur de production** (essai réel en sandbox réussi, `docs/ESSAI_GENIUSPAY_SANDBOX.md` § 7) ; les clés `live` du compte marchand restent à renseigner (§ 9). CinetPay est l'ancien fournisseur, retiré dans une PR séparée ; en développement, le **fournisseur simulé** reste le défaut.
 
 ## 1. Ce sur quoi le module s'appuie, et qui s'appuie sur lui
 
@@ -294,7 +294,7 @@ Suivi des **SDK officiels CinetPay** ([cinetpay-python](https://github.com/cinet
 
 ### Adaptateur GeniusPay
 
-`fournisseurs/geniuspay.py`, **encaissement seulement** (API marchand v1, `https://pay.genius.ci/api/v1/merchant`) :
+`fournisseurs/geniuspay.py`, **encaissement seulement** (API marchand v1, `https://geniuspay.ci/api/v1/merchant` ; l'ancienne adresse `pay.genius.ci` ne répondait plus le 14 octobre) :
 
 | Étape | API |
 |---|---|
@@ -305,7 +305,7 @@ Suivi des **SDK officiels CinetPay** ([cinetpay-python](https://github.com/cinet
 | Environnement | celui de la notification et de chaque réponse doit être `GENIUSPAY_ENVIRONNEMENT` (`sandbox` ou `live`) |
 | Transfert | non implémenté (`OperationNonSupportee`) |
 
-Inactif par défaut : sans clés, sans secret de webhook ou sans environnement, rien n'est ouvert, vérifié ni accepté. **À confirmer en sandbox** (la documentation ne le précise pas) : l'encodage de la signature, l'usage du secret `whsec_…` tel quel comme clé HMAC, le renvoi de `metadata` par le `GET`, le corps de l'événement `webhook.test`. L'essai se déroule avec la commande de développement `essai_geniuspay` (`creer-webhook`, `payer`, `etat`), pas à pas dans `docs/ESSAI_GENIUSPAY_SANDBOX.md`.
+Inactif par défaut : sans clés, sans secret de webhook ou sans environnement, rien n'est ouvert, vérifié ni accepté. **Confirmé par l'essai en sandbox** (`docs/ESSAI_GENIUSPAY_SANDBOX.md` § 7) : signature hexadécimale (64 caractères), secret `whsec_…` utilisé tel quel comme clé HMAC, `metadata` renvoyée par le `GET`, URL de paiement dans `checkout_url`, `environment` dans `data` (et non à la racine du corps), `webhook.test` refusé à la création d'un webhook (les six événements `payment.*` sont acceptés). L'essai se rejoue avec la commande de développement `essai_geniuspay` (`creer-webhook`, `payer`, `etat`), pas à pas dans le même runbook ; **reste à faire en `live`** : confirmer les préfixes des clés et le secret du webhook de production.
 
 ### Ajouter un fournisseur (PayDunya en réserve)
 
@@ -317,26 +317,25 @@ Inactif par défaut : sans clés, sans secret de webhook ou sans environnement, 
 
 Rien d'autre ne change : commandes, remboursements, reversements et frais ignorent le fournisseur.
 
-## 9. Gestion des clés CinetPay
+## 9. Gestion des clés de paiement
 
 | Variable | Rôle |
 |---|---|
-| `PAIEMENT_FOURNISSEUR` | `cinetpay` ou `geniuspay` en production (`simule` interdit) ; `cinetpay` tant que la bascule n'est pas faite |
-| `CINETPAY_API_KEY` | Clé du compte marchand Côte d'Ivoire (`sk_live_…` en production, `sk_test_…` interdite) |
-| `CINETPAY_API_PASSWORD` | Mot de passe API associé |
+| `PAIEMENT_FOURNISSEUR` | `geniuspay` en production (fournisseur de production) ; `cinetpay` encore accepté jusqu'à son retrait ; `simule` interdit |
 | `GENIUSPAY_API_KEY`, `GENIUSPAY_API_SECRET` | Clés du compte marchand GeniusPay (clé publique `sk_live_…` et clé secrète `ss_live_…` en production ; préfixes relevés sur le tableau de bord GeniusPay, dont la documentation annonce `pk_…` / `sk_…` ; ceux de `live` restent à confirmer) ; exigées seulement si `PAIEMENT_FOURNISSEUR=geniuspay` |
 | `GENIUSPAY_WEBHOOK_SECRET` | Secret de signature des webhooks (`whsec_live_…` ou `whsec_sandbox_…` d'après la documentation ; préfixe non contrôlé) ; exigé avec `geniuspay` |
 | `GENIUSPAY_ENVIRONNEMENT` | `live` en production, `sandbox` en staging ; exigé avec `geniuspay` |
 | `ANITCHE_STAGING_SANDBOX_PAIEMENT` | Staging seulement : exactement `true` ou `false`, ou absente (= `false`) |
-| `GENIUSPAY_API_URL`, `GENIUSPAY_TIMEOUT` | Facultatifs (URL de la documentation ; 10 s) ; non transmis par `docker-compose.prod.yml` |
+| `GENIUSPAY_API_URL`, `GENIUSPAY_TIMEOUT` | Facultatifs (`https://geniuspay.ci/api/v1/merchant` ; 10 s) ; non transmis par `docker-compose.prod.yml` |
 | `BACKEND_BASE_URL` | Origine HTTPS publique de Django, sans chemin ni « / » final : `https://anitche.com` en production (URL de notification) |
-| `CINETPAY_API_URL`, `CINETPAY_TIMEOUT` | Facultatifs (URL déduite de la clé ; 10 s) |
+| `CINETPAY_API_KEY`, `CINETPAY_API_PASSWORD` | Ancien fournisseur, retiré prochainement : exigées seulement si `PAIEMENT_FOURNISSEUR=cinetpay` (`sk_live_…` en production, `sk_test_…` interdite) |
+| `CINETPAY_API_URL`, `CINETPAY_TIMEOUT` | Ancien fournisseur ; facultatifs (URL déduite de la clé ; 10 s) |
 
 - **Jamais dans le code ni dans le dépôt.** Transmises comme `FIELD_ENCRYPTION_KEYS` : `infra/.env` (hors dépôt) → `docker-compose.prod.yml` (Django, worker et beat Celery) ; `infra/scripts/check_prod_env.sh` bloque le déploiement si elles manquent (celles du seul fournisseur actif), si le fournisseur n'est pas dans la liste (`simule` compris), si la clé est de sandbox ou si `BACKEND_BASE_URL` n'est pas en HTTPS ; `prod.py` refuse de démarrer dans les mêmes cas, et aussi si l'hôte de `BACKEND_BASE_URL` n'est pas dans `ALLOWED_HOSTS` (Django rejetterait chaque notification en 400) ou si elle contient un chemin.
-- **URL de notification en production** : `https://anitche.com/api/paiements/webhook/cinetpay/` (paiement) et `https://anitche.com/api/paiements/webhook/cinetpay/transfert/` (transfert). Même domaine et même certificat que le site : nginx (`location /api/` de `infra/nginx/nginx.conf`) transmet le chemin complet à Django, qui l'adresse à `WebhookPaiementView` ou `WebhookTransfertView`. Aucun sous-domaine `api.`.
-- Jamais journalisées (seuls les codes d'erreur CinetPay le sont) ; le jeton Bearer vit dans le cache Redis (clé dérivée d'une empreinte de la clé API).
-- **Rotation** : générer un nouveau couple dans le tableau de bord CinetPay, mettre à jour `infra/.env`, redémarrer Django et Celery ; le jeton en cache expire seul (ou vider la clé `cinetpay:jeton:*`).
-- En dev : laisser `PAIEMENT_FOURNISSEUR` vide (simulé). Pour essayer la sandbox : `PAIEMENT_FOURNISSEUR=cinetpay`, clé `sk_test_…`, et un `BACKEND_BASE_URL` joignable par CinetPay (tunnel).
+- **URL de notification en production** : `https://anitche.com/api/paiements/webhook/geniuspay/` (déclarée dans le tableau de bord GeniusPay ou par `GET/PUT/DELETE /webhooks`) ; avec CinetPay : `https://anitche.com/api/paiements/webhook/cinetpay/` (paiement) et `.../cinetpay/transfert/` (transfert). Même domaine et même certificat que le site : nginx (`location /api/` de `infra/nginx/nginx.conf`) transmet le chemin complet à Django, qui l'adresse à `WebhookPaiementView` ou `WebhookTransfertView`. Aucun sous-domaine `api.`.
+- Jamais journalisées (seuls les codes d'erreur du fournisseur le sont) ; le jeton Bearer vit dans le cache Redis (clé dérivée d'une empreinte de la clé API).
+- **Rotation** : générer un nouveau couple dans le tableau de bord du fournisseur (GeniusPay), mettre à jour `infra/.env`, redémarrer Django et Celery ; le jeton en cache expire seul (ou vider la clé `cinetpay:jeton:*` avec CinetPay ; GeniusPay n'a pas de jeton, ses clés partent à chaque appel).
+- En dev : laisser `PAIEMENT_FOURNISSEUR` vide (simulé). Pour essayer la sandbox : `PAIEMENT_FOURNISSEUR=geniuspay`, `GENIUSPAY_ENVIRONNEMENT=sandbox`, clés `sk_sandbox_…` / `ss_sandbox_…`, et un `BACKEND_BASE_URL` joignable par GeniusPay (tunnel) ; pas à pas : `docs/ESSAI_GENIUSPAY_SANDBOX.md`.
 
 ### GeniusPay et mode staging
 
@@ -355,7 +354,7 @@ En production réelle, GeniusPay n'accepte ni clé ni environnement de sandbox. 
 - **Absente** : `docker-compose.prod.yml` transmet `false` (`${ANITCHE_STAGING_SANDBOX_PAIEMENT-false}`) ; **présente mais vide** : la valeur vide est transmise telle quelle et `prod.py` refuse de démarrer, jamais de conversion tolérante. Dans `infra/.env.example` elle est commentée.
 - Les variables `GENIUSPAY_*` et la variable de staging sont transmises à Django, au worker et à beat comme `CINETPAY_*`.
 - `check_prod_env.sh` exige les variables du seul fournisseur actif (`CINETPAY_*` avec `cinetpay`, `GENIUSPAY_*` avec `geniuspay`) et applique les mêmes cas que `prod.py` ; `infra/ci/verifier_environnement.sh` le rejoue sur chaque ligne du tableau.
-- La CI de la pile de production reste sur `cinetpay`. Elle vérifie en plus que `POST /api/paiements/webhook/geniuspay/` sans signature, à travers nginx, répond **401** « Notification non authentique » (`infra/ci/smoke_prod.sh`).
+- La CI de la pile de production tourne avec `PAIEMENT_FOURNISSEUR=geniuspay` et des valeurs factices au bon format (`sk_live_…`, `ss_live_…`, `GENIUSPAY_ENVIRONNEMENT=live`) ; `infra/ci/verifier_environnement.sh` rejoue aussi les scénarios `cinetpay` tant que CinetPay existe. Elle vérifie en plus que `POST /api/paiements/webhook/geniuspay/` sans signature, à travers nginx, répond **401** « Notification non authentique » (`infra/ci/smoke_prod.sh`).
 
 ## 10. Impact frontend
 
@@ -439,8 +438,8 @@ Postman : `postman_paiements.json` (hors dépôt, reconstruite) — mise en plac
 
 - **Abonnement selon le volume de ventes** (modèle Jumia) : non implémenté, **0 FCFA au lancement**. Forme prévue : un barème d'abonnement mensuel par tranche de chiffre d'affaires, prélevé sur les reversements du mois (ajustement négatif). À concevoir quand le volume le justifie.
 - **TVA sur la commission** : **tranché, TVA incluse** (septembre 2026) : 14 % + 100 / 200 FCFA sont des montants toutes taxes comprises, rien ne s'y ajoute (comme Jumia, qui affiche des commissions TTC). **Point ouvert** : la décomposition HT / TVA (taux de **18 % à confirmer avec un comptable**) le jour où ANITCHE émettra des factures de commission aux vendeurs. Rien n'est calculé ni stocké pour l'instant ; ce jour-là, la TVA se déduira des montants figés (TVA = TTC × taux / (100 + taux)) et la règle d'arrondi sera à fixer avec le comptable.
-- **Bascule vers GeniusPay** (décision du 11 octobre 2026, § 16) : essai réel en sandbox (points à confirmer du § 8, « Adaptateur GeniusPay »), puis bascule de `PAIEMENT_FOURNISSEUR`, transferts vers les vendeurs (non implémentés chez GeniusPay : versement manuel d'ici là), retrait de CinetPay.
-- **Compte CinetPay** : à ouvrir (RCCM) ; points à confirmer en sandbox au § 8.
+- **Bascule vers GeniusPay** (décision du 11 octobre 2026, § 16) : essai réel en sandbox réussi (`docs/ESSAI_GENIUSPAY_SANDBOX.md` § 7) et `PAIEMENT_FOURNISSEUR=geniuspay` par défaut. Restent : l'ouverture du compte `live` (clés et secret de webhook de production, préfixes à confirmer), les transferts vers les vendeurs (non implémentés chez GeniusPay : versement manuel d'ici là), le retrait de CinetPay (PR séparée).
+- **Compte CinetPay** : n'est plus à ouvrir, CinetPay est retiré ; les points à confirmer en sandbox CinetPay du § 8 n'ont plus d'objet une fois le code retiré.
 - **Remboursement et transfert automatiques** : manuels au lancement ; API de remboursement à brancher quand CinetPay la publie.
 - **Notification traitée de façon synchrone** : passer en tâche Celery si le temps de réponse de la vérification CinetPay le justifie (mesure en sandbox).
 - **Réconciliation, à confirmer en sandbox CinetPay** : la politique de rejeu des notifications (hypothèse non vérifiée), le délai après lequel une transaction non payée passe `EXPIRED`, la limite de débit de `GET /v1/payment/{id}`, et le code HTTP et le corps renvoyés pour une référence inconnue, expirée ou ancienne (400 / 404 supposés, § 8 « Classement des réponses du fournisseur »). Selon ces mesures, ajuster `PAIEMENT_RECONCILIATION_*` (§ 8).
@@ -456,8 +455,8 @@ Postman : `postman_paiements.json` (hors dépôt, reconstruite) — mise en plac
 État du code :
 
 - l'adaptateur GeniusPay existe (encaissement seulement, § 8) et `prod.py` l'autorise (§ 8, « Liste fermée de production ») ;
-- **`PAIEMENT_FOURNISSEUR` reste `cinetpay`** : rien n'est basculé tant que l'essai réel en sandbox n'est pas fait ;
-- à faire ensuite, dans cet ordre : essai en sandbox, bascule, transferts vers les vendeurs (versement manuel d'ici là), retrait de CinetPay.
+- **`PAIEMENT_FOURNISSEUR=geniuspay`** par défaut dans `infra/.env.example` et dans la CI : l'essai réel en sandbox est réussi (`docs/ESSAI_GENIUSPAY_SANDBOX.md` § 7) ;
+- à faire ensuite, dans cet ordre : ouverture du compte `live`, transferts vers les vendeurs (versement manuel d'ici là), retrait de CinetPay.
 
 Les motifs de la décision ne sont pas consignés dans ce document : à compléter par l'équipe. Les options étudiées en septembre 2026, avant la décision, restent ci-dessous comme référence (frais relevés sur les sites des fournisseurs et des articles qui les reprennent ; **à confirmer par devis**) :
 

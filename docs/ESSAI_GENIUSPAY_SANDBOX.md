@@ -118,3 +118,5 @@ Constaté sur le vrai service, différent ou absent de la documentation :
 | GET `/payments/{reference}` | `status` « completed », `amount` entier, `currency` XOF, `environment`, `metadata` renvoyée (notre `reference` plus `error_url`, `external_reference`, `scenario`, `success_url`) |
 | Quota sandbox | `tokens_remaining` dans la réponse de `POST /payments` (50 au départ) |
 | Page de paiement sandbox | scénario (succès, échec…) et passerelle simulés, aucun argent réel ; nom marchand affiché « Anitche Fams » |
+| Adresse de l'API | `https://geniuspay.ci/api/v1/merchant` (celle de la documentation actuelle) ; l'ancienne `pay.genius.ci` ne répondait plus le 14 octobre (délai dépassé) |
+| Gestion des webhooks | `GET /webhooks`, `PUT /webhooks/{id}`, `DELETE /webhooks/{id}` (pas de bouton dans le tableau de bord) |
