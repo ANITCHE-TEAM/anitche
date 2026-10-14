@@ -3,7 +3,8 @@
 # Écrit le fichier d'environnement de la pile de production pour la CI.
 # Les valeurs secrètes sont tirées au hasard à chaque appel et n'existent que
 # le temps du job ; les autres sont des constantes manifestement fausses
-# (domaines .invalid, « factice »). Aucune valeur ne ressemble à une clé réelle.
+# (domaines .invalid, « factice »). Les clés GeniusPay n'ont que le préfixe
+# attendu en production (sk_live_, ss_live_), suivi de « ci_factice ».
 # Sous GitHub Actions, chaque valeur aléatoire est masquée dans les journaux.
 #
 # Usage : bash infra/ci/generer_env_ci.sh <fichier_de_sortie>
@@ -40,7 +41,11 @@ DB_PASSWORD=$DB_PASSWORD
 FASTAPI_DB_PASSWORD=$FASTAPI_DB_PASSWORD
 PUBLIC_BASE_URL=https://anitche.com/fast
 MEDIA_BASE_URL=https://anitche.com/media/
-PAIEMENT_FOURNISSEUR=cinetpay
+PAIEMENT_FOURNISSEUR=geniuspay
+GENIUSPAY_API_KEY=sk_live_ci_factice
+GENIUSPAY_API_SECRET=ss_live_ci_factice
+GENIUSPAY_WEBHOOK_SECRET=whsec_ci_factice
+GENIUSPAY_ENVIRONNEMENT=live
 CINETPAY_API_KEY=ci-cinetpay-cle-factice
 CINETPAY_API_PASSWORD=ci-cinetpay-mdp-factice
 BACKEND_BASE_URL=https://anitche.com
