@@ -45,7 +45,7 @@ Les commandes `manage.py` se lancent là où tourne Django : dans le conteneur (
    ```
    python manage.py essai_geniuspay creer-webhook --url https://xxx.trycloudflare.com
    ```
-   La commande déclare `https://xxx.trycloudflare.com/api/paiements/webhook/geniuspay/` pour les événements `payment.*` et `webhook.test`, écrit le secret renvoyé dans `.env` et affiche seulement « secret enregistré dans .env » et l'identifiant du webhook. Si `GENIUSPAY_WEBHOOK_SECRET` a déjà une valeur, elle demande confirmation **avant** de créer le webhook.
+   La commande déclare `https://xxx.trycloudflare.com/api/paiements/webhook/geniuspay/` pour les six événements payment.* (GeniusPay refuse l’abonnement à webhook.test : 422 validation.in), écrit le secret renvoyé dans `.env` et affiche seulement « secret enregistré dans .env » et l'identifiant du webhook. Si `GENIUSPAY_WEBHOOK_SECRET` a déjà une valeur, elle demande confirmation **avant** de créer le webhook.
 5. **Redémarrer Django** (nouveau secret).
 6. Depuis le tableau de bord GeniusPay, envoyer l'événement d'essai (`webhook.test`) vers ce webhook et lire le journal de Django (§ 4).
 7. Ouvrir un paiement :
@@ -100,3 +100,21 @@ En cas de refus, la raison est sur une ligne `WARNING securite Notification geni
 - Supprimer le webhook d'essai dans le tableau de bord GeniusPay et fermer le tunnel.
 - Remettre `PAIEMENT_FOURNISSEUR=simule` dans `.env` (ou retirer la ligne) et redémarrer Django : `seed_demo` et les collections Postman en dépendent.
 - Les données de test restent en base (comptes `…@essai.anitche.test`, boutique « Essai GeniusPay ») et sont réutilisées au prochain essai. Une commande d'essai non payée s'annule seule à la fin du délai de paiement.
+
+## 7. Résultats de l'essai (13 et 14 octobre 2026)
+
+Essai réussi de bout en bout en sandbox : paiement `PAY-2026-7C31CB8C64`, webhook `payment.success` signé, vérifié, traité en 200, commande confirmée. La réconciliation seule (`etat --reconcilier`) a aussi validé un paiement dont la notification s'était perdue.
+
+Constaté sur le vrai service, différent ou absent de la documentation :
+
+| Point | Constat |
+|---|---|
+| URL de paiement | champ `checkout_url` (la documentation écrit `payment_url`) |
+| Référence | `SANDBOX_…` en sandbox |
+| Création du webhook | `webhook.test` refusé dans `events` (422 `validation.in`) ; les six `payment.*` acceptés ; le secret `whsec_…` est renvoyé par la création |
+| Signature | hexadécimale, 64 caractères, HMAC-SHA256 avec le secret `whsec_…` tel quel |
+| Corps du webhook | racine : `data`, `event`, `id`, `timestamp` ; **`environment` est dans `data`**, pas à la racine ; `amount` en texte |
+| En-tête `X-Webhook-Environment` | absent |
+| GET `/payments/{reference}` | `status` « completed », `amount` entier, `currency` XOF, `environment`, `metadata` renvoyée (notre `reference` plus `error_url`, `external_reference`, `scenario`, `success_url`) |
+| Quota sandbox | `tokens_remaining` dans la réponse de `POST /payments` (50 au départ) |
+| Page de paiement sandbox | scénario (succès, échec…) et passerelle simulés, aucun argent réel ; nom marchand affiché « Anitche Fams » |
