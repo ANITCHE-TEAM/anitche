@@ -3207,7 +3207,7 @@ class GeniusPayInactifParDefautTests(Donnees, APITestCase):
         self.assertIsInstance(obtenir_fournisseur("cinetpay"), FournisseurCinetPay)
 
     def test_url_de_l_api_par_defaut(self):
-        self.assertEqual(FournisseurGeniusPay()._url("/payments"), "https://pay.genius.ci/api/v1/merchant/payments")
+        self.assertEqual(FournisseurGeniusPay()._url("/payments"), "https://geniuspay.ci/api/v1/merchant/payments")
         with self.settings(GENIUSPAY_API_URL="https://exemple.test/api/"):
             self.assertEqual(FournisseurGeniusPay()._url("/payments"), "https://exemple.test/api/payments")
 

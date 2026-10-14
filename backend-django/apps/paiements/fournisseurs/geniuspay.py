@@ -1,4 +1,4 @@
-"""Adaptateur GeniusPay (API marchand v1 : pay.genius.ci/api/v1/merchant).
+"""Adaptateur GeniusPay (API marchand v1 : geniuspay.ci/api/v1/merchant).
 
 Encaissement seulement. Les transferts vers les vendeurs (« cashout ») ne
 sont pas implémentés : transferer lève OperationNonSupportee (contrat de
@@ -71,7 +71,7 @@ from .base import (
 logger = logging.getLogger(__name__)
 logger_securite = logging.getLogger("securite")
 
-URL_API = "https://pay.genius.ci/api/v1/merchant"
+URL_API = "https://geniuspay.ci/api/v1/merchant"
 ENVIRONNEMENTS = ("sandbox", "live")
 PAIEMENT_MIN = 200
 PAYS_CLIENT = "CI"

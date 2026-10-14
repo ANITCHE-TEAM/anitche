@@ -294,7 +294,7 @@ Suivi des **SDK officiels CinetPay** ([cinetpay-python](https://github.com/cinet
 
 ### Adaptateur GeniusPay
 
-`fournisseurs/geniuspay.py`, **encaissement seulement** (API marchand v1, `https://pay.genius.ci/api/v1/merchant`) :
+`fournisseurs/geniuspay.py`, **encaissement seulement** (API marchand v1, `https://geniuspay.ci/api/v1/merchant`) :
 
 | Étape | API |
 |---|---|
