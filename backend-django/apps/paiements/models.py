@@ -10,7 +10,7 @@ from apps.core.fields import EncryptedCharField
 
 
 def generer_reference(prefixe):
-    """Référence lisible, unique, de moins de 30 caractères (limite CinetPay)."""
+    """Référence lisible, unique, de moins de 30 caractères (taille des colonnes de référence)."""
     return f"{prefixe}-{timezone.now().year}-{uuid.uuid4().hex[:10].upper()}"
 
 

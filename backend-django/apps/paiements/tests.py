@@ -45,7 +45,7 @@ from apps.utilisateurs.models import DocumentKYC, Role, StatutKYC, TypePieceIden
 from apps.vendeurs.models import Boutique
 
 from . import reversements, services
-from .fournisseurs import FOURNISSEURS, obtenir_fournisseur
+from .fournisseurs import FOURNISSEURS, FournisseurInconnu, obtenir_fournisseur
 from .fournisseurs import geniuspay
 from .fournisseurs.base import (
     ECHEC,
@@ -58,13 +58,12 @@ from .fournisseurs.base import (
     TransactionIntrouvable,
     hacher_jeton,
 )
-from .fournisseurs.cinetpay import FournisseurCinetPay
 from .fournisseurs.geniuspay import FournisseurGeniusPay
 from .fournisseurs.simule import EN_TETE_SIGNATURE, FournisseurSimule, definir_etat_distant, signer
 from .frais import bareme_en_vigueur, calculer_frais_ligne
 from .management.commands import essai_geniuspay
 from .models import AjustementVendeur, BaremeFrais, JournalWebhook, Paiement, Remboursement, Reversement
-from .services import reconcilier_paiement, reconcilier_paiements_en_suspens, valider_paiement
+from .services import reconcilier_paiement, reconcilier_paiements_en_suspens
 from .signals import paiement_valide
 from .tasks import reconcilier_paiements
 
@@ -429,9 +428,9 @@ class SimulationPaiementTests(Donnees, APITestCase):
         self.assertEqual(r.status_code, 401)
 
     def test_hors_fournisseur_simule_404(self):
-        with override_settings(PAIEMENT_FOURNISSEUR="cinetpay"):
+        with override_settings(PAIEMENT_FOURNISSEUR="geniuspay"):
             self.assertEqual(self.simuler().status_code, 404)
-        Paiement.objects.filter(pk=self.paiement.pk).update(fournisseur="cinetpay")
+        Paiement.objects.filter(pk=self.paiement.pk).update(fournisseur="geniuspay")
         self.assertEqual(self.simuler().status_code, 404)
         self.paiement.refresh_from_db()
         self.assertEqual(self.paiement.statut, Paiement.Statut.EN_ATTENTE)
@@ -500,7 +499,7 @@ class NotificationTests(Donnees, APITestCase):
         self.assertFalse(CompteFidelite.objects.filter(utilisateur=self.client1, solde_points__gt=0).exists())
 
     def test_notification_d_un_autre_fournisseur_refusee(self):
-        Paiement.objects.filter(pk=self.paiement.pk).update(fournisseur="cinetpay")
+        Paiement.objects.filter(pk=self.paiement.pk).update(fournisseur="geniuspay")
         self.assertEqual(self.notifier_succes(self.paiement).status_code, 404)
         self.paiement.refresh_from_db()
         self.assertEqual(self.paiement.statut, Paiement.Statut.EN_ATTENTE)
@@ -953,9 +952,8 @@ class ReconciliationPlanifieeTests(DonneesReconciliation, APITestCase):
         self.assertIsNone(self.paiement.date_derniere_reconciliation)
 
     def test_transaction_introuvable_refusee_sans_interrompre(self):
-        """Fournisseur simulé, même règle que CinetPay
-        (ReconciliationReponsesCinetPayTests) : refus pour ce paiement,
-        journalisé et daté ; les suivants sont vérifiés."""
+        """Refus pour ce paiement, journalisé et daté ; les suivants sont
+        vérifiés (ReconciliationRefusEtPanneTests pour l'expiration)."""
         from io import StringIO
 
         from django.core.management import call_command
@@ -1026,7 +1024,7 @@ class ReconciliationPlanifieeTests(DonneesReconciliation, APITestCase):
         self.assertEqual(self.statuts(), ("valide", "confirmee"))
         with self.assertRaises(CommandError):
             call_command("simuler_etat_paiement", "PAY-INCONNU", "succes")
-        Paiement.objects.filter(pk=self.paiement.pk).update(fournisseur="cinetpay")
+        Paiement.objects.filter(pk=self.paiement.pk).update(fournisseur="geniuspay")
         with self.assertRaises(CommandError):
             call_command("simuler_etat_paiement", self.paiement.reference, "echec")
 
@@ -2038,358 +2036,59 @@ class ReversementTests(Donnees, APITestCase):
 
 
 # =====================================================================
-# ADAPTATEUR CINETPAY (appels HTTP simulés, format des SDK officiels)
+# RÉCONCILIATION : REFUS D'UN PAIEMENT ET PANNE DU FOURNISSEUR
 # =====================================================================
 
-class ReponseHTTP:
-    def __init__(self, donnees, code=200):
-        self.donnees, self.status_code = donnees, code
-
-    def json(self):
-        return self.donnees
-
-
-class ReponseIllisible(ReponseHTTP):
-    """Corps non JSON (page HTML d'un proxy, par exemple)."""
-
-    def json(self):
-        raise ValueError("Expecting value")
-
-
-class ReponsesCinetPay:
-    """CinetPay en sandbox, réponses HTTP simulées : aucun appel au vrai CinetPay."""
-
-    def configurer_cinetpay(self):
-        reglages = self.settings(PAIEMENT_FOURNISSEUR="cinetpay", CINETPAY_API_KEY="sk_test_cle",
-                                 CINETPAY_API_PASSWORD="mdp", CINETPAY_API_URL="")
-        reglages.enable()
-        self.addCleanup(reglages.disable)
-        self.appels = []
-        self.reponses = {}
-
-    def repondre(self, methode, url, json=None, headers=None, timeout=None):
-        self.appels.append((methode, url, json, headers))
-        chemin = url.replace("https://api.cinetpay.net", "")
-        reponse = self.reponses.get((methode, chemin))
-        if callable(reponse):
-            return reponse()
-        return reponse or ReponseHTTP({"access_token": "jwt"} if chemin == "/v1/oauth/login" else {}, 200)
-
-    def initier_cinetpay(self, commande=None, client=None, transaction_id="CP-TX-1"):
-        self.reponses[("POST", "/v1/payment")] = ReponseHTTP({
-            "code": 200, "status": "OK", "payment_token": "pt", "notify_token": "jeton-secret",
-            "transaction_id": transaction_id, "merchant_transaction_id": "x",
-            "payment_url": "https://pay.cinetpay.co/p/1",
-        })
-        with mock.patch("requests.request", side_effect=self.repondre):
-            paiement = self.payer(commande or self.commande, client=client, methode="orange_money")
-        return paiement
-
-    def verifications(self):
-        """Références vérifiées par GET /v1/payment/{référence}, dans l'ordre."""
-        return [url.rsplit("/", 1)[1] for methode, url, _, _ in self.appels
-                if methode == "GET" and "/v1/payment/" in url]
-
-
-class CinetPayTests(ReponsesCinetPay, Donnees, APITestCase):
-    def setUp(self):
-        self.creer_donnees()
-        (self.commande,) = self.commander((self.variante1, 3))
-        self.configurer_cinetpay()
-
-    def notification(self, paiement, jeton="jeton-secret", transaction_id="CP-TX-1"):
-        return self.api().post(url_webhook("cinetpay"), {
-            "notify_token": jeton, "merchant_transaction_id": paiement.reference, "transaction_id": transaction_id,
-            "status": "SUCCESS",
-        }, format="json")
-
-    def test_initiation(self):
-        paiement = self.initier_cinetpay()
-        self.assertEqual(paiement.fournisseur, "cinetpay")
-        self.assertEqual(paiement.url_paiement, "https://pay.cinetpay.co/p/1")
-        self.assertEqual(paiement.hash_jeton_notification, hacher_jeton("jeton-secret"))
-        (_, url, corps, entetes) = self.appels[-1]
-        self.assertEqual(url, "https://api.cinetpay.net/v1/payment")
-        self.assertEqual(entetes["Authorization"], "Bearer jwt")
-        self.assertEqual((corps["amount"], corps["currency"], corps["payment_method"], corps["merchant_transaction_id"]),
-                         (15000 + FRAIS_ABIDJAN, "XOF", "OM_CI", paiement.reference))
-        self.assertEqual(corps["notify_url"], "https://api.anitche.test/api/paiements/webhook/cinetpay/")
-        self.assertNotIn(b"jeton-secret", self.api(self.client1).get(f"/api/paiements/{paiement.pk}/").content)
-
-    def test_carte_bancaire_sans_moyen_impose(self):
-        self.reponses[("POST", "/v1/payment")] = ReponseHTTP({"payment_url": "https://p", "notify_token": "t",
-                                                               "transaction_id": "T"})
-        with mock.patch("requests.request", side_effect=self.repondre):
-            self.payer(self.commande, methode="carte_bancaire")
-        self.assertNotIn("payment_method", self.appels[-1][2])
-
-    def test_notification_verifiee_aupres_de_cinetpay(self):
-        paiement = self.initier_cinetpay()
-        self.reponses[("GET", f"/v1/payment/{paiement.reference}")] = ReponseHTTP({
-            "code": 100, "status": "SUCCESS", "merchant_transaction_id": paiement.reference, "transaction_id": "CP-TX-1",
-            "amount": int(paiement.montant), "currency": "XOF",
-        })
-        with mock.patch("requests.request", side_effect=self.repondre):
-            self.assertEqual(self.notification(paiement, jeton="mauvais").status_code, 401)
-            self.assertEqual(self.notification(paiement).status_code, 200)
-        paiement.refresh_from_db()
-        self.assertEqual(paiement.statut, Paiement.Statut.VALIDE)
-        self.assertEqual(self.appels[-1][:2], ("GET", f"https://api.cinetpay.net/v1/payment/{paiement.reference}"))
-
-    def test_statut_de_la_notification_ignore_seule_l_api_fait_foi(self):
-        paiement = self.initier_cinetpay()
-        self.reponses[("GET", f"/v1/payment/{paiement.reference}")] = ReponseHTTP({
-            "code": 2010, "status": "FAILED", "merchant_transaction_id": paiement.reference, "transaction_id": "CP-TX-1",
-        })
-        with mock.patch("requests.request", side_effect=self.repondre):
-            self.assertEqual(self.notification(paiement).status_code, 200)  # la notification dit SUCCESS
-        paiement.refresh_from_db()
-        self.assertEqual(paiement.statut, Paiement.Statut.ECHOUE)
-
-    def test_transaction_ou_montant_incoherents_refuses(self):
-        paiement = self.initier_cinetpay()
-        chemin = ("GET", f"/v1/payment/{paiement.reference}")
-        self.reponses[chemin] = ReponseHTTP({"status": "SUCCESS", "merchant_transaction_id": paiement.reference,
-                                             "transaction_id": "AUTRE"})
-        with mock.patch("requests.request", side_effect=self.repondre):
-            self.assertEqual(self.notification(paiement).status_code, 400)
-            self.reponses[chemin] = ReponseHTTP({"status": "SUCCESS", "merchant_transaction_id": paiement.reference,
-                                                 "transaction_id": "CP-TX-2", "amount": "100", "currency": "XOF"})
-            self.assertEqual(self.notification(paiement, transaction_id="CP-TX-2").status_code, 400)
-        paiement.refresh_from_db()
-        self.assertEqual(paiement.statut, Paiement.Statut.EN_ATTENTE)
-
-    def test_jeton_expire_renouvele_une_fois(self):
-        paiement = self.initier_cinetpay()
-        reponses = iter([ReponseHTTP({"code": 1003, "status": "EXPIRED_TOKEN"}, 401),
-                         ReponseHTTP({"status": "SUCCESS", "merchant_transaction_id": paiement.reference,
-                                      "transaction_id": "CP-TX-1", "amount": int(paiement.montant),
-                                      "currency": "XOF"})])
-        self.reponses[("GET", f"/v1/payment/{paiement.reference}")] = lambda: next(reponses)
-        with mock.patch("requests.request", side_effect=self.repondre):
-            self.assertEqual(self.notification(paiement).status_code, 200)
-        self.assertEqual(sum(1 for appel in self.appels if appel[1].endswith("/v1/oauth/login")), 2)
-
-    def test_cinetpay_injoignable(self):
-        import requests
-
-        with mock.patch("requests.request", side_effect=requests.ConnectionError()):
-            r = self.initier(commande_id=str(self.commande.pk))
-        self.assertEqual(r.status_code, 502)
-        paiement = self.initier_cinetpay()
-        with mock.patch("requests.request", side_effect=requests.Timeout()):
-            self.assertEqual(self.notification(paiement).status_code, 503)
-
-    def test_classement_des_reponses_a_la_verification(self):
-        """Un 400 ou un 404 sur la vérification vise CE paiement
-        (TransactionIntrouvable, qui n'est pas une ErreurFournisseur). Tout
-        le reste est une panne du fournisseur, y compris un 4xx de
-        l'authentification ou d'un transfert."""
-        import requests
-
-        from .fournisseurs.base import TransactionIntrouvable
-
-        paiement = self.initier_cinetpay()
-        adaptateur = FournisseurCinetPay()
-        verification = ("GET", f"/v1/payment/{paiement.reference}")
-
-        def lever(erreur):
-            def reponse():
-                raise erreur
-            return reponse
-
-        cas = {
-            "404": (ReponseHTTP({"code": 404, "status": "TRANSACTION_NOT_FOUND"}, 404), TransactionIntrouvable),
-            "400": (ReponseHTTP({"code": 400, "status": "INVALID_REQUEST"}, 400), TransactionIntrouvable),
-            "500": (ReponseHTTP({"code": 500, "status": "INTERNAL_ERROR"}, 500), ErreurFournisseur),
-            "503": (ReponseHTTP({"code": 503, "status": "SERVICE_UNAVAILABLE"}, 503), ErreurFournisseur),
-            "429": (ReponseHTTP({"code": 429, "status": "TOO_MANY_REQUESTS"}, 429), ErreurFournisseur),
-            "401 hors jeton": (ReponseHTTP({"code": 401, "status": "UNAUTHORIZED"}, 401), ErreurFournisseur),
-            "403": (ReponseHTTP({"code": 403, "status": "FORBIDDEN"}, 403), ErreurFournisseur),
-            "jeton refusé après renouvellement": (ReponseHTTP({"code": 1003, "status": "EXPIRED_TOKEN"}, 401),
-                                                  ErreurFournisseur),
-            "404 illisible": (ReponseIllisible(None, 404), ErreurFournisseur),
-            "200 illisible": (ReponseIllisible(None, 200), ErreurFournisseur),
-            "délai dépassé": (lever(requests.Timeout()), ErreurFournisseur),
-            "connexion": (lever(requests.ConnectionError()), ErreurFournisseur),
-        }
-        with mock.patch("requests.request", side_effect=self.repondre):
-            for libelle, (reponse, attendue) in cas.items():
-                with self.subTest(libelle):
-                    self.reponses[verification] = reponse
-                    with self.assertRaises(attendue) as contexte:
-                        adaptateur.verifier_transaction(paiement)
-                    if attendue is TransactionIntrouvable:
-                        self.assertNotIsInstance(contexte.exception, ErreurFournisseur)
-
-            with self.subTest("4xx de l'authentification"):
-                cache.clear()
-                self.reponses[("POST", "/v1/oauth/login")] = ReponseHTTP({"code": 400, "status": "INVALID_CREDENTIALS"},
-                                                                         400)
-                with self.assertRaises(ErreurFournisseur):
-                    adaptateur.verifier_transaction(paiement)
-                del self.reponses[("POST", "/v1/oauth/login")]
-
-            with self.subTest("404 d'un transfert"):
-                self.reponses[("GET", "/v1/transfer/REV-2026-A")] = ReponseHTTP({"code": 404, "status": "NOT_FOUND"}, 404)
-                with self.assertRaises(ErreurFournisseur):
-                    adaptateur.verifier_transfert(Reversement(reference="REV-2026-A"))
-
-    def test_webhook_transaction_inconnue_toujours_503(self):
-        # Webhook : vérification impossible → 503, CinetPay rejoue la notification.
-        paiement = self.initier_cinetpay()
-        self.reponses[("GET", f"/v1/payment/{paiement.reference}")] = ReponseHTTP(
-            {"code": 404, "status": "TRANSACTION_NOT_FOUND"}, 404)
-        with mock.patch("requests.request", side_effect=self.repondre):
-            self.assertEqual(self.notification(paiement).status_code, 503)
-        self.assertEqual(JournalWebhook.objects.get().statut_traitement, JournalWebhook.StatutTraitement.ERREUR)
-        paiement.refresh_from_db()
-        self.assertEqual(paiement.statut, Paiement.Statut.EN_ATTENTE)
-
-    def test_montant_hors_limites(self):
-        Commande.objects.filter(pk=self.commande.pk).update(montant_total=Decimal("3000000"))
-        self.assertEqual(self.initier(commande_id=str(self.commande.pk)).status_code, 400)
-
-    def test_transfert(self):
-        adaptateur = FournisseurCinetPay()
-        reversement = Reversement(reference="REV-2026-A", montant_a_verser=Decimal("8400"))
-        self.reponses[("POST", "/v1/transfer")] = ReponseHTTP({"code": 200, "status": "PENDING",
-                                                                "transaction_id": "TR-1", "notify_token": "nt"})
-        with mock.patch("requests.request", side_effect=self.repondre):
-            resultat = adaptateur.transferer(reversement, "+2250707070707", "wave")
-        self.assertEqual((resultat.statut, resultat.identifiant_externe), (EN_ATTENTE, "TR-1"))
-        corps = self.appels[-1][2]
-        self.assertEqual((corps["payment_method"], corps["amount"], corps["phone_number"]),
-                         ("WAVE_CI", 8400, "+2250707070707"))
-
-    def test_transfert_montant_et_devise_lus_dans_la_reponse(self):
-        """Jamais recopiés du reversement : absents ou illisibles dans la
-        réponse de CinetPay, ils valent None."""
-        adaptateur = FournisseurCinetPay()
-        reversement = Reversement(reference="REV-2026-A", montant_a_verser=Decimal("8400"))
-        base = {"code": 200, "status": "SUCCESS", "transaction_id": "TR-1", "notify_token": "nt"}
-        cas = {
-            "présents": ({"amount": 8400, "currency": "XOF"}, (8400, "XOF")),
-            "montant en texte": ({"amount": "8400", "currency": "XOF"}, (8400, "XOF")),
-            "autres valeurs": ({"amount": 8399, "currency": "EUR"}, (8399, "EUR")),
-            "absents": ({}, (None, None)),
-            "fractionnaire, devise vide": ({"amount": "8400.50", "currency": ""}, (None, None)),
-        }
-        with mock.patch("requests.request", side_effect=self.repondre):
-            for libelle, (champs, attendu) in cas.items():
-                with self.subTest(libelle):
-                    self.reponses[("POST", "/v1/transfer")] = ReponseHTTP({**base, **champs})
-                    resultat = adaptateur.transferer(reversement, "+2250707070707", "wave")
-                    self.assertEqual((resultat.statut, resultat.montant, resultat.devise), (SUCCES, *attendu))
-
-    def test_succes_immediat_sans_montant_ni_devise_reste_en_cours(self):
-        valider_paiement(self.initier_cinetpay())
-        reversement = Reversement.objects.get(commande=self.commande)
-        Reversement.objects.filter(pk=reversement.pk).update(statut=Reversement.Statut.DISPONIBLE)
-        url = f"/api/paiements/admin/reversements/{reversement.pk}/transferer/"
-        self.reponses[("POST", "/v1/transfer")] = ReponseHTTP({"code": 200, "status": "SUCCESS",
-                                                                "transaction_id": "TR-1", "notify_token": "nt"})
-        with mock.patch("requests.request", side_effect=self.repondre), self.assertLogs("securite", "ERROR"):
-            r = self.api(self.admin).post(url, {"operateur": "wave"})
-        self.assertEqual((r.status_code, r.data["statut"]), (200, "en_cours"))
-        self.assertFalse(Notification.objects.filter(destinataire=self.vendeur1, titre="Reversement effectué").exists())
-        # Même réponse, montant et devise confirmés : appliqué.
-        Reversement.objects.filter(pk=reversement.pk).update(statut=Reversement.Statut.DISPONIBLE)
-        reversement.refresh_from_db()
-        self.reponses[("POST", "/v1/transfer")] = ReponseHTTP({
-            "code": 200, "status": "SUCCESS", "transaction_id": "TR-2", "notify_token": "nt",
-            "amount": int(reversement.montant_net), "currency": "XOF",
-        })
-        with mock.patch("requests.request", side_effect=self.repondre):
-            r = self.api(self.admin).post(url, {"operateur": "wave"})
-        self.assertEqual((r.status_code, r.data["statut"]), (200, "verse"))
-
-
-class ReconciliationReponsesCinetPayTests(ReponsesCinetPay, DonneesReconciliation, TransactionTestCase):
-    """Un 4xx de CinetPay pour UN paiement P1 (transaction inconnue) est un
-    refus pour P1, pas une panne du fournisseur : la réconciliation vérifie
-    ensuite P2, encaissé et placé derrière. Une vraie panne (5xx, délai
-    dépassé) arrête l'exécution. PostgreSQL, vraies transactions ; réponses
-    HTTP simulées."""
+class ReconciliationRefusEtPanneTests(DonneesReconciliation, APITestCase):
+    """Une transaction inconnue du fournisseur pour UN paiement P1 est un
+    refus pour P1, pas une panne : la tâche et l'expiration vérifient ensuite
+    P2, encaissé et placé derrière. Une vraie panne arrête l'exécution."""
 
     def setUp(self):
-        recreer_bareme_plateforme()
-        recreer_tarifs_initiaux()
         self.creer_donnees()
-        self.configurer_cinetpay()
         (premiere,) = self.commander((self.variante1, 1))
         (seconde,) = self.commander((self.variante2, 1), client=self.client2)
         # P1 passe toujours en premier : plus petite clé de commande
         # (expiration, triée par pk) et paiement le plus ancien (tâche).
         self.c1, self.c2 = sorted((premiere, seconde), key=lambda commande: commande.pk)
-        self.p1 = self.initier_cinetpay(self.c1, self.c1.client, "CP-TX-1")
-        self.p2 = self.initier_cinetpay(self.c2, self.c2.client, "CP-TX-2")
+        self.p1 = self.payer(self.c1, client=self.c1.client)
+        self.p2 = self.payer(self.c2, client=self.c2.client)
         vieillir_paiement(self.p1, 20)
         vieillir_paiement(self.p2, 16)
-        self.repondre_a(self.p1, ReponseHTTP({"code": 404, "status": "TRANSACTION_NOT_FOUND"}, 404))
-        self.repondre_a(self.p2, ReponseHTTP({"code": 100, "status": "SUCCESS", "transaction_id": "CP-TX-2",
-                                              "merchant_transaction_id": self.p2.reference,
-                                              "amount": int(self.p2.montant), "currency": "XOF"}))
-        self.appels.clear()
 
-    def repondre_a(self, paiement, reponse):
-        self.reponses[("GET", f"/v1/payment/{paiement.reference}")] = reponse
+    @staticmethod
+    def verifies(verifier):
+        return [appel.args[1].reference for appel in verifier.call_args_list]
 
-    def reconcilier(self):
-        with mock.patch("requests.request", side_effect=self.repondre):
-            return reconcilier_paiements()
-
-    def expirer(self):
-        from apps.commandes.tasks import expirer_commandes_non_payees
-
-        with mock.patch("requests.request", side_effect=self.repondre):
-            return expirer_commandes_non_payees()
-
-    def test_404_sur_p1_n_empeche_pas_la_tache_de_valider_p2(self):
-        with self.assertLogs("securite", "ERROR") as journaux:
-            self.assertEqual(self.reconcilier(), "2 paiement(s) vérifié(s), 1 statut(s) changé(s).")
-        self.assertEqual(self.verifications(), [self.p1.reference, self.p2.reference])
-        self.assertEqual(self.statuts(self.p2, self.c2), ("valide", "confirmee"))
-        self.assertEqual(self.statuts(self.p1, self.c1), ("en_attente", "creee"))
-        # Daté : P1 passe ensuite après les paiements jamais vérifiés.
-        self.assertIsNotNone(self.p1.date_derniere_reconciliation)
-        self.assertIn(f"Réconciliation de {self.p1.reference} : transaction refusée par le fournisseur cinetpay",
-                      journaux.output[0])
-
-    def test_404_sur_p1_n_empeche_pas_l_expiration_de_valider_p2(self):
+    def test_refus_sur_p1_n_empeche_pas_l_expiration_de_valider_p2(self):
+        self.etat_distant("introuvable", self.p1)
+        self.etat_distant("succes", self.p2)
         vieillir_commandes(self.c1, self.c2, minutes=31)
-        with self.assertLogs("securite", "ERROR"):
-            self.assertEqual(self.expirer(), "0 commande(s) non payée(s) annulée(s).")
-        self.assertEqual(self.verifications(), [self.p1.reference, self.p2.reference])
+        with self.assertLogs("securite", "ERROR"), compter_verifications() as verifier:
+            self.assertEqual(expirer_commandes_impayees(), 0)
+        self.assertEqual(self.verifies(verifier), [self.p1.reference, self.p2.reference])
         self.assertEqual(self.statuts(self.p2, self.c2), ("valide", "confirmee"))
         # Refus pour P1 : état incertain, expiration repoussée jusqu'à la fin
         # du délai de grâce, puis faite.
         self.assertEqual(self.statuts(self.p1, self.c1), ("en_attente", "creee"))
         vieillir_commandes(self.c1, minutes=61)
         with self.assertLogs("securite", "ERROR"):
-            self.assertEqual(self.expirer(), "1 commande(s) non payée(s) annulée(s).")
+            self.assertEqual(expirer_commandes_impayees(), 1)
         self.assertEqual(self.statuts(self.p1, self.c1), ("annule", "annulee"))
 
-    def test_5xx_ou_delai_depasse_arretent_toujours_l_execution(self):
-        import requests
-
-        def delai_depasse():
-            raise requests.Timeout()
-
+    def test_panne_arrete_la_tache_et_l_expiration_sans_demander_p2(self):
+        self.etat_distant("injoignable", self.p1)
+        self.etat_distant("succes", self.p2)
         vieillir_commandes(self.c1, self.c2, minutes=31)
-        for libelle, panne in (("503", ReponseHTTP({"code": 503, "status": "SERVICE_UNAVAILABLE"}, 503)),
-                               ("délai dépassé", delai_depasse)):
-            with self.subTest(libelle):
-                self.repondre_a(self.p1, panne)
-                self.appels.clear()
-                self.assertEqual(self.reconcilier(), "0 paiement(s) vérifié(s), 0 statut(s) changé(s). "
-                                                     "Interrompue : fournisseur injoignable.")
-                self.assertEqual(self.expirer(), "0 commande(s) non payée(s) annulée(s).")
-                # Un seul appel par exécution, sur P1 : P2 n'est jamais demandé.
-                self.assertEqual(self.verifications(), [self.p1.reference, self.p1.reference])
-                self.assertEqual(self.statuts(self.p2, self.c2), ("en_attente", "creee"))
-                self.assertEqual(self.statuts(self.p1, self.c1), ("en_attente", "creee"))
-                self.assertIsNone(self.p1.date_derniere_reconciliation)
+        with compter_verifications() as verifier:
+            self.assertEqual(reconcilier_paiements(), "0 paiement(s) vérifié(s), 0 statut(s) changé(s). "
+                                                      "Interrompue : fournisseur injoignable.")
+            self.assertEqual(expirer_commandes_impayees(), 0)
+        # Un seul appel par exécution, sur P1 : P2 n'est jamais demandé.
+        self.assertEqual(self.verifies(verifier), [self.p1.reference, self.p1.reference])
+        self.assertEqual(self.statuts(self.p2, self.c2), ("en_attente", "creee"))
+        self.assertEqual(self.statuts(self.p1, self.c1), ("en_attente", "creee"))
+        self.assertIsNone(self.p1.date_derniere_reconciliation)
 
 
 # =====================================================================
@@ -2884,7 +2583,7 @@ class GeniusPayTests(DonneesGeniusPay, APITestCase):
 
     def test_paiement_ouvert_chez_un_autre_fournisseur_refuse(self):
         self.encaisser()
-        Paiement.objects.filter(pk=self.paiement.pk).update(fournisseur="cinetpay")
+        Paiement.objects.filter(pk=self.paiement.pk).update(fournisseur="simule")
         self.assertEqual(self.poster(self.evenement()).status_code, 404)
         self.assertEqual(self.statuts(), ("en_attente", "creee"))
         self.assertEqual(self.verifications(), [])
@@ -3172,6 +2871,8 @@ class GeniusPayTests(DonneesGeniusPay, APITestCase):
         self.assertEqual(len(self.faux.appels), nombre)
         r = admin.post(f"/api/paiements/admin/reversements/{reversement.pk}/verser/", {"reference_externe": "WAVE-1"})
         self.assertEqual((r.status_code, r.data["statut"]), (200, "verse"))
+        self.assertEqual(Notification.objects.filter(
+            destinataire=self.vendeur1, titre="Reversement effectué").count(), 1)
 
     def test_notification_de_transfert_refusee(self):
         for evenement in ("cashout.completed", "payment.success", "webhook.test"):
@@ -3202,9 +2903,10 @@ class GeniusPayInactifParDefautTests(Donnees, APITestCase):
         self.assertEqual(self.payer(self.commande).fournisseur, "simule")
 
     def test_registre(self):
-        self.assertEqual(set(FOURNISSEURS), {"simule", "cinetpay", "geniuspay"})
+        self.assertEqual(set(FOURNISSEURS), {"simule", "geniuspay"})
         self.assertIsInstance(obtenir_fournisseur("geniuspay"), FournisseurGeniusPay)
-        self.assertIsInstance(obtenir_fournisseur("cinetpay"), FournisseurCinetPay)
+        with self.assertRaises(FournisseurInconnu):
+            obtenir_fournisseur("cinetpay")
 
     def test_url_de_l_api_par_defaut(self):
         self.assertEqual(FournisseurGeniusPay()._url("/payments"), "https://geniuspay.ci/api/v1/merchant/payments")
@@ -3288,7 +2990,7 @@ class EssaiGeniusPayTests(DonneesGeniusPay, APITestCase):
             "DEBUG désactivé": ({"DEBUG": False}, "DEBUG est désactivé"),
             "settings de production": ({"SETTINGS_MODULE": "config.settings.prod"}, "settings de production"),
             "fournisseur simulé": ({"PAIEMENT_FOURNISSEUR": "simule"}, "PAIEMENT_FOURNISSEUR n'est pas geniuspay"),
-            "fournisseur cinetpay": ({"PAIEMENT_FOURNISSEUR": "cinetpay"}, "PAIEMENT_FOURNISSEUR n'est pas geniuspay"),
+            "fournisseur inconnu": ({"PAIEMENT_FOURNISSEUR": "autre"}, "PAIEMENT_FOURNISSEUR n'est pas geniuspay"),
             "environnement live": ({"GENIUSPAY_ENVIRONNEMENT": "live"}, "GENIUSPAY_ENVIRONNEMENT n'est pas sandbox"),
             "clé publique live": ({"GENIUSPAY_API_KEY": "sk_live_factice"}, "GENIUSPAY_API_KEY ne commence pas"),
             "clé secrète live": ({"GENIUSPAY_API_SECRET": "ss_live_factice"}, "GENIUSPAY_API_SECRET ne commence pas"),
@@ -3629,9 +3331,11 @@ class ConfigurationProductionTests(APITestCase):
             "ALLOWED_HOSTS": "api.anitche.com",
             "CORS_ALLOWED_ORIGINS": "https://anitche.com",
             "BACKEND_BASE_URL": "https://api.anitche.com",
-            "PAIEMENT_FOURNISSEUR": "cinetpay",
-            "CINETPAY_API_KEY": "sk_live_cle",
-            "CINETPAY_API_PASSWORD": "mdp",
+            "PAIEMENT_FOURNISSEUR": "geniuspay",
+            "GENIUSPAY_API_KEY": "sk_live_cle",
+            "GENIUSPAY_API_SECRET": "ss_live_cle",
+            "GENIUSPAY_WEBHOOK_SECRET": "whsec_cle",
+            "GENIUSPAY_ENVIRONNEMENT": "live",
             "EMAIL_BACKEND": "django.core.mail.backends.smtp.EmailBackend",
             "EMAIL_HOST": "smtp.exemple.test",
             "EMAIL_HOST_USER": "identifiant-factice",
@@ -3683,8 +3387,9 @@ class ConfigurationProductionTests(APITestCase):
     def test_refus(self):
         cas = {
             "simulé": {"PAIEMENT_FOURNISSEUR": "simule"},
-            "sandbox": {"CINETPAY_API_KEY": "sk_test_cle"},
-            "sans clé": {"CINETPAY_API_KEY": ""},
+            "sandbox": {"GENIUSPAY_ENVIRONNEMENT": "sandbox", "GENIUSPAY_API_KEY": "sk_sandbox_cle",
+                        "GENIUSPAY_API_SECRET": "ss_sandbox_cle"},
+            "sans clé": {"GENIUSPAY_API_KEY": ""},
             "http": {"BACKEND_BASE_URL": "http://api.anitche.com"},
         }
         for libelle, variables in cas.items():
@@ -3704,6 +3409,7 @@ class ConfigurationProductionTests(APITestCase):
             "vide": "",
             "casse différente": "CinetPay",
             "espace": "cinetpay ",
+            "cinetpay": "cinetpay",
         }
         for libelle, valeur in cas.items():
             with self.subTest(libelle):
@@ -3726,7 +3432,7 @@ class ConfigurationProductionTests(APITestCase):
 
     def test_refus_url_de_notification_injoignable(self):
         cas = {
-            # Notification CinetPay rejetée par Django (400 DisallowedHost).
+            # Notification rejetée par Django (400 DisallowedHost).
             "hôte hors ALLOWED_HOSTS": ({"BACKEND_BASE_URL": "https://anitche.com"}, "doit figurer dans ALLOWED_HOSTS"),
             # « /x/api/... » part vers le frontend ; « //api/... » dépend de la
             # fusion des « / » par nginx.

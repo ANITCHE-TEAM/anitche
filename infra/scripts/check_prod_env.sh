@@ -204,7 +204,7 @@ fi
 # --- Paiements (prod.py) ----------------------------------------------------
 # ANITCHE_STAGING_SANDBOX_PAIEMENT : exactement « true » ou « false », ou
 # absente. Définie mais vide, ou d'une autre valeur : refusée, comme prod.py.
-# Ne concerne que GeniusPay ; sans effet sur CinetPay.
+# Ne concerne que GeniusPay.
 STAGING_SANDBOX=faux
 if [ "${ANITCHE_STAGING_SANDBOX_PAIEMENT+defini}" = defini ]; then
     case "$ANITCHE_STAGING_SANDBOX_PAIEMENT" in
@@ -216,14 +216,6 @@ fi
 
 case "${PAIEMENT_FOURNISSEUR:-}" in
     '') ;; # absente : déjà signalée plus haut
-    cinetpay)
-        for var in CINETPAY_API_KEY CINETPAY_API_PASSWORD; do
-            [ -n "$(nettoyer "${!var:-}")" ] || erreur "$var : absente ou vide (PAIEMENT_FOURNISSEUR=cinetpay)."
-        done
-        if [[ "${CINETPAY_API_KEY:-}" == sk_test_* ]]; then
-            erreur "CINETPAY_API_KEY : clé de sandbox (sk_test_), interdite en production, staging compris (ANITCHE_STAGING_SANDBOX_PAIEMENT ne concerne que GeniusPay)."
-        fi
-        ;;
     geniuspay)
         for var in GENIUSPAY_API_KEY GENIUSPAY_API_SECRET GENIUSPAY_WEBHOOK_SECRET; do
             [ -n "$(nettoyer "${!var:-}")" ] || erreur "$var : absente ou vide (PAIEMENT_FOURNISSEUR=geniuspay)."
@@ -254,7 +246,7 @@ case "${PAIEMENT_FOURNISSEUR:-}" in
         esac
         ;;
     *)
-        erreur "PAIEMENT_FOURNISSEUR : cinetpay ou geniuspay en production (le fournisseur simulé n'encaisse rien)."
+        erreur "PAIEMENT_FOURNISSEUR : geniuspay en production (le fournisseur simulé n'encaisse rien ; toute autre valeur est refusée)."
         ;;
 esac
 

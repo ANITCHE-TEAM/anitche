@@ -1,9 +1,8 @@
 """Interface commune des fournisseurs de paiement.
 
 Le reste du module ne parle qu'à cette interface : changer de fournisseur
-(CinetPay aujourd'hui, PayDunya en réserve) revient à écrire un nouvel
-adaptateur, sans toucher aux commandes, aux remboursements ni aux
-reversements. Procédure : docs/MODULE_PAIEMENTS.md, « Ajouter un fournisseur ».
+revient à écrire un nouvel adaptateur, sans toucher aux commandes, aux
+remboursements ni aux reversements. Procédure : docs/MODULE_PAIEMENTS.md, « Ajouter un fournisseur ».
 
 Règle de sécurité commune à tous les adaptateurs : une notification n'est
 qu'un signal. Elle doit être authentifiée (lire_notification puis

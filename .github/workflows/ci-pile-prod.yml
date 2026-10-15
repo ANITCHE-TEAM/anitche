@@ -9,7 +9,7 @@ name: CI Pile prod
 #   - frontend/Dockerfile.prod : le frontend est remplacé par une page statique
 #     (infra/ci/docker-compose.ci.yml) ; le bundle est construit par
 #     ci-frontend.yml ;
-#   - Let's Encrypt, Cloudflare, SMTP, CinetPay, S3 et les sauvegardes : le
+#   - Let's Encrypt, Cloudflare, SMTP, GeniusPay, S3 et les sauvegardes : le
 #     certificat est autosigné, les fournisseurs sont factices.
 # Aucun fichier de production n'est modifié : tout vit dans infra/ci/.
 

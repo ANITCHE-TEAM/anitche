@@ -50,7 +50,7 @@ TOLERANCE_SECONDES = 300
 STATUTS = {SUCCES, ECHEC, EN_ATTENTE}
 # États distants simulés, levés à la vérification : « injoignable » →
 # ErreurFournisseur (panne), « introuvable » → TransactionIntrouvable
-# (transaction inconnue du fournisseur, comme un 404 de CinetPay).
+# (transaction inconnue du fournisseur, comme un 404 du fournisseur).
 INJOIGNABLE = "injoignable"
 INTROUVABLE = "introuvable"
 DUREE_ETAT_DISTANT = 3 * 24 * 3600  # au-delà de la fenêtre de réconciliation (24 h)

@@ -445,17 +445,11 @@ FIELD_ENCRYPTION_KEYS = config('FIELD_ENCRYPTION_KEYS', default='', cast=Csv())
 
 # Paiements (apps.paiements, docs/MODULE_PAIEMENTS.md).
 # Fournisseur actif : 'simule' (dev, tests ; refusé en production) ou
-# 'cinetpay'. Aucun secret n'a de valeur par défaut ici : ils viennent de
+# 'geniuspay'. Aucun secret n'a de valeur par défaut ici : ils viennent de
 # l'environnement (docker-compose.prod.yml), comme FIELD_ENCRYPTION_KEYS.
 PAIEMENT_FOURNISSEUR = config('PAIEMENT_FOURNISSEUR', default='simule')
 # Secret HMAC des notifications du fournisseur simulé (dev.py en fournit un).
 PAIEMENT_SIMULE_SECRET = config('PAIEMENT_SIMULE_SECRET', default='')
-# CinetPay (API v1) : identifiants du compte marchand Côte d'Ivoire. L'URL
-# de l'API se déduit du préfixe de la clé (sk_test_ → sandbox).
-CINETPAY_API_KEY = config('CINETPAY_API_KEY', default='')
-CINETPAY_API_PASSWORD = config('CINETPAY_API_PASSWORD', default='')
-CINETPAY_API_URL = config('CINETPAY_API_URL', default='')
-CINETPAY_TIMEOUT = config('CINETPAY_TIMEOUT', default=10, cast=int)
 # GeniusPay (API marchand v1, encaissement) : clés du compte, secret de
 # signature des webhooks (whsec_…) et environnement attendu, 'sandbox' ou
 # 'live', comparé à celui de chaque notification et de chaque réponse.
@@ -468,7 +462,7 @@ GENIUSPAY_ENVIRONNEMENT = config('GENIUSPAY_ENVIRONNEMENT', default='')
 GENIUSPAY_API_URL = config('GENIUSPAY_API_URL', default='')
 GENIUSPAY_TIMEOUT = config('GENIUSPAY_TIMEOUT', default=10, cast=int)
 # Adresse publique de l'API, pour les URL de notification envoyées au
-# fournisseur (120 caractères au plus chez CinetPay).
+# fournisseur.
 BACKEND_BASE_URL = config('BACKEND_BASE_URL', default='http://localhost:8000')
 # Reversement au vendeur : N jours après la livraison confirmée.
 REVERSEMENT_DELAI_RETRACTATION_JOURS = config('REVERSEMENT_DELAI_RETRACTATION_JOURS', default=7, cast=int)
@@ -508,7 +502,7 @@ PAIEMENT_RECONCILIATION_AGE_MINUTES = config('PAIEMENT_RECONCILIATION_AGE_MINUTE
 # (succès tardif constaté chez le fournisseur).
 PAIEMENT_RECONCILIATION_FENETRE_HEURES = config('PAIEMENT_RECONCILIATION_FENETRE_HEURES', default=24, cast=int)
 # Paiements vérifiés au plus par exécution (un appel au fournisseur chacun,
-# CINETPAY_TIMEOUT au plus) : 50 x 10 s reste sous l'intervalle de 10 minutes.
+# GENIUSPAY_TIMEOUT au plus) : 50 x 10 s reste sous l'intervalle de 10 minutes.
 PAIEMENT_RECONCILIATION_LOT = config('PAIEMENT_RECONCILIATION_LOT', default=50, cast=int)
 
 FRONTEND_BASE_URL = config('FRONTEND_BASE_URL', default='http://localhost:5173')
