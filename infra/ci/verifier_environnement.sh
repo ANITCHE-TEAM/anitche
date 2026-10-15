@@ -63,12 +63,8 @@ variante SECRET_KEY django-insecure-court
 variante FIELD_ENCRYPTION_KEYS pas-une-cle
 variante BACKUP_REPOSITORY /var/backups/anitche
 
-# --- Paiements : GeniusPay, mode staging, CinetPay ----------------------------
-# Valeurs factices. L'environnement de CI est celui de GeniusPay (live) et
-# contient encore des clés CinetPay factices, requises par docker-compose :
-# les scénarios GeniusPay les retirent pour prouver qu'elles ne sont pas
-# exigées, les scénarios CinetPay fixent PAIEMENT_FOURNISSEUR=cinetpay.
-SANS_CINETPAY=(-CINETPAY_API_KEY -CINETPAY_API_PASSWORD)
+# --- Paiements : GeniusPay, mode staging --------------------------------------
+# Valeurs factices. L'environnement de CI est celui de GeniusPay (live).
 GP_LIVE=(PAIEMENT_FOURNISSEUR=geniuspay GENIUSPAY_API_KEY=sk_live_factice GENIUSPAY_API_SECRET=ss_live_factice
          GENIUSPAY_WEBHOOK_SECRET=whsec_factice GENIUSPAY_ENVIRONNEMENT=live)
 GP_SANDBOX=(PAIEMENT_FOURNISSEUR=geniuspay GENIUSPAY_API_KEY=sk_sandbox_factice GENIUSPAY_API_SECRET=ss_sandbox_factice
@@ -115,21 +111,14 @@ scenario_refuse() {
 }
 
 echo "==> Paiements : configurations valides"
-CP=PAIEMENT_FOURNISSEUR=cinetpay
 scenario_accepte "geniuspay live (environnement de CI), variable staging absente"
-scenario_accepte "cinetpay, variable staging absente" "$CP"
-scenario_accepte "cinetpay, GeniusPay absent" "$CP" -GENIUSPAY_API_KEY -GENIUSPAY_API_SECRET -GENIUSPAY_WEBHOOK_SECRET -GENIUSPAY_ENVIRONNEMENT
-scenario_accepte "cinetpay, variable staging à true (sans effet)" "$CP" "$STAGING=true"
-scenario_accepte "cinetpay, variable staging à false" "$CP" "$STAGING=false"
-scenario_accepte "geniuspay live, sans clés CinetPay" "${SANS_CINETPAY[@]}" "${GP_LIVE[@]}"
-scenario_accepte "geniuspay live, variable staging à false" "${SANS_CINETPAY[@]}" "${GP_LIVE[@]}" "$STAGING=false"
-scenario_accepte "geniuspay sandbox en staging" "${SANS_CINETPAY[@]}" "${GP_SANDBOX[@]}"
+scenario_accepte "geniuspay live" "${GP_LIVE[@]}"
+scenario_accepte "geniuspay live, variable staging à false" "${GP_LIVE[@]}" "$STAGING=false"
+scenario_accepte "geniuspay sandbox en staging" "${GP_SANDBOX[@]}"
 
 echo "==> Paiements : variantes invalides"
-scenario_refuse CINETPAY_API_KEY "cinetpay sans CINETPAY_API_KEY" "$CP" -CINETPAY_API_KEY
-scenario_refuse CINETPAY_API_PASSWORD "cinetpay avec CINETPAY_API_PASSWORD vide" "$CP" CINETPAY_API_PASSWORD=
-scenario_refuse CINETPAY_API_KEY "cinetpay, clé sk_test_" "$CP" CINETPAY_API_KEY=sk_test_factice
-scenario_refuse CINETPAY_API_KEY "cinetpay, clé sk_test_, variable staging à true" "$CP" CINETPAY_API_KEY=sk_test_factice "$STAGING=true"
+scenario_refuse PAIEMENT_FOURNISSEUR "fournisseur cinetpay (hors liste)" "${GP_LIVE[@]}" PAIEMENT_FOURNISSEUR=cinetpay
+scenario_refuse PAIEMENT_FOURNISSEUR "fournisseur cinetpay, variable staging à true" "${GP_SANDBOX[@]}" PAIEMENT_FOURNISSEUR=cinetpay
 scenario_refuse PAIEMENT_FOURNISSEUR "fournisseur inconnu" PAIEMENT_FOURNISSEUR=stripe
 scenario_refuse PAIEMENT_FOURNISSEUR "fournisseur geniuspay en casse différente" "${GP_LIVE[@]}" PAIEMENT_FOURNISSEUR=GeniusPay
 for nom in GENIUSPAY_API_KEY GENIUSPAY_API_SECRET GENIUSPAY_WEBHOOK_SECRET; do
@@ -160,7 +149,6 @@ scenario_refuse GENIUSPAY_API_KEY "geniuspay sandbox, clé publique live" "${GP_
 scenario_refuse GENIUSPAY_API_SECRET "geniuspay sandbox, clé secrète live" "${GP_SANDBOX[@]}" GENIUSPAY_API_SECRET=ss_live_factice
 for valeur in True TRUE 1 yes on "" " " "true " " true" False 0 oui; do
     scenario_refuse "$STAGING" "geniuspay, variable staging « $valeur »" "${GP_SANDBOX[@]}" "$STAGING=$valeur"
-    scenario_refuse "$STAGING" "cinetpay, variable staging « $valeur »" "$CP" "$STAGING=$valeur"
 done
 
 if [ "$ECHECS" -gt 0 ]; then

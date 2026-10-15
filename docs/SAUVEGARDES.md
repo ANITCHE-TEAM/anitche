@@ -37,7 +37,7 @@ cron (3 h UTC) → infra/scripts/backup.sh
 | `infra/backup/entrypoint.sh` | Sous-commandes `init`, `sauvegarder`, `instantanes`, `restaurer` |
 | `infra/scripts/backup.sh` | Script de l'hôte appelé par cron |
 | `infra/scripts/restore.sh` | Script de l'hôte pour lister, s'exercer et reprendre après sinistre |
-| `infra/docker-compose.prod.yml`, service `backup` | Profil `backup` : jamais démarré par `up -d`. Reçoit seulement les variables de la base et de la sauvegarde (ni `SECRET_KEY`, ni `FIELD_ENCRYPTION_KEYS`, ni les clés CinetPay) ; aucun autre service ne reçoit les variables `BACKUP_*` |
+| `infra/docker-compose.prod.yml`, service `backup` | Profil `backup` : jamais démarré par `up -d`. Reçoit seulement les variables de la base et de la sauvegarde (ni `SECRET_KEY`, ni `FIELD_ENCRYPTION_KEYS`, ni les clés GeniusPay) ; aucun autre service ne reçoit les variables `BACKUP_*` |
 
 Points de conception :
 

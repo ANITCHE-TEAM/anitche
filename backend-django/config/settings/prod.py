@@ -91,9 +91,9 @@ except ValueError as erreur:
 # listé ici (aucun des contrôles de clés ci-dessous ne s'y appliquerait),
 # jamais une clé de sandbox hors staging, jamais sans clés. Transmis par
 # docker-compose.prod.yml.
-PAIEMENT_FOURNISSEURS_AUTORISES = ('cinetpay', 'geniuspay')
+PAIEMENT_FOURNISSEURS_AUTORISES = ('geniuspay',)
 
-# Staging uniquement, et seulement pour GeniusPay : ANITCHE_STAGING_SANDBOX_PAIEMENT
+# Staging uniquement : ANITCHE_STAGING_SANDBOX_PAIEMENT
 # vaut exactement « true » (staging, environnement et clés de sandbox) ou
 # « false » ; absente = « false ». Toute autre valeur est refusée, sans
 # conversion tolérante : un « 1 » ou un « True » mal compris ne doit jamais
@@ -103,7 +103,7 @@ if ANITCHE_STAGING_SANDBOX_PAIEMENT not in (None, 'true', 'false'):
     raise ImproperlyConfigured(
         "ANITCHE_STAGING_SANDBOX_PAIEMENT doit valoir exactement « true » ou « false » "
         "(ou être absente) : toute autre valeur, y compris vide, « True » ou « 1 », est refusée. "
-        "Elle ne concerne que GeniusPay en staging ; elle ne change rien pour CinetPay."
+        "Elle ne concerne que GeniusPay en staging."
     )
 STAGING_SANDBOX_PAIEMENT = ANITCHE_STAGING_SANDBOX_PAIEMENT == 'true'
 
@@ -113,18 +113,6 @@ if PAIEMENT_FOURNISSEUR not in PAIEMENT_FOURNISSEURS_AUTORISES:
         f"(valeurs autorisées : {', '.join(PAIEMENT_FOURNISSEURS_AUTORISES)}) : définissez "
         "PAIEMENT_FOURNISSEUR et ses clés (docs/MODULE_PAIEMENTS.md)."
     )
-if PAIEMENT_FOURNISSEUR == 'cinetpay':
-    # ANITCHE_STAGING_SANDBOX_PAIEMENT n'ouvre rien ici : une clé de sandbox
-    # CinetPay reste refusée, staging compris.
-    if not CINETPAY_API_KEY or not CINETPAY_API_PASSWORD:
-        raise ImproperlyConfigured(
-            "CINETPAY_API_KEY et CINETPAY_API_PASSWORD doivent être définis en production."
-        )
-    if CINETPAY_API_KEY.startswith('sk_test_'):
-        raise ImproperlyConfigured(
-            "Clé CinetPay de sandbox (sk_test_) interdite en production : aucun paiement ne serait réel. "
-            "ANITCHE_STAGING_SANDBOX_PAIEMENT ne concerne que GeniusPay."
-        )
 if PAIEMENT_FOURNISSEUR == 'geniuspay':
     _geniuspay_manquants = [
         nom for nom, valeur in (
@@ -188,7 +176,7 @@ if '*' in ALLOWED_HOSTS:
         "ALLOWED_HOSTS='*' est interdit en production."
     )
 
-# L'URL de notification CinetPay (apps.paiements.fournisseurs.cinetpay) est
+# L'URL de notification des fournisseurs est
 # f"{BACKEND_BASE_URL}/api/paiements/webhook/...". Elle n'aboutit que si son
 # hôte est accepté par Django (sinon 400 DisallowedHost, et aucun paiement
 # n'est jamais confirmé) et si BACKEND_BASE_URL est l'origine seule : nginx

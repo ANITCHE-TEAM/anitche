@@ -47,14 +47,11 @@ services:
       # Clés de chiffrement des données KYC (apps.core.fields), clé active en
       # premier. Sans elles, prod.py refuse de démarrer (Django et Celery).
       FIELD_ENCRYPTION_KEYS: ${FIELD_ENCRYPTION_KEYS}
-      # Paiements (apps.paiements) : fournisseur et clés CinetPay. Sans
-      # elles, prod.py refuse de démarrer (Django et Celery).
-      PAIEMENT_FOURNISSEUR: ${PAIEMENT_FOURNISSEUR}
-      CINETPAY_API_KEY: ${CINETPAY_API_KEY}
-      CINETPAY_API_PASSWORD: ${CINETPAY_API_PASSWORD}
-      # GeniusPay : vides tant que PAIEMENT_FOURNISSEUR=cinetpay. La variable
+      # Paiements (apps.paiements) : fournisseur et clés GeniusPay. Sans
+      # elles, prod.py refuse de démarrer (Django et Celery). La variable
       # de staging absente vaut « false » ; vide, elle reste vide et prod.py
       # refuse de démarrer (jamais de conversion tolérante).
+      PAIEMENT_FOURNISSEUR: ${PAIEMENT_FOURNISSEUR}
       GENIUSPAY_API_KEY: ${GENIUSPAY_API_KEY:-}
       GENIUSPAY_API_SECRET: ${GENIUSPAY_API_SECRET:-}
       GENIUSPAY_WEBHOOK_SECRET: ${GENIUSPAY_WEBHOOK_SECRET:-}
@@ -113,14 +110,11 @@ services:
       # Clés de chiffrement des données KYC (apps.core.fields), clé active en
       # premier. Sans elles, prod.py refuse de démarrer (Django et Celery).
       FIELD_ENCRYPTION_KEYS: ${FIELD_ENCRYPTION_KEYS}
-      # Paiements (apps.paiements) : fournisseur et clés CinetPay. Sans
-      # elles, prod.py refuse de démarrer (Django et Celery).
-      PAIEMENT_FOURNISSEUR: ${PAIEMENT_FOURNISSEUR}
-      CINETPAY_API_KEY: ${CINETPAY_API_KEY}
-      CINETPAY_API_PASSWORD: ${CINETPAY_API_PASSWORD}
-      # GeniusPay : vides tant que PAIEMENT_FOURNISSEUR=cinetpay. La variable
+      # Paiements (apps.paiements) : fournisseur et clés GeniusPay. Sans
+      # elles, prod.py refuse de démarrer (Django et Celery). La variable
       # de staging absente vaut « false » ; vide, elle reste vide et prod.py
       # refuse de démarrer (jamais de conversion tolérante).
+      PAIEMENT_FOURNISSEUR: ${PAIEMENT_FOURNISSEUR}
       GENIUSPAY_API_KEY: ${GENIUSPAY_API_KEY:-}
       GENIUSPAY_API_SECRET: ${GENIUSPAY_API_SECRET:-}
       GENIUSPAY_WEBHOOK_SECRET: ${GENIUSPAY_WEBHOOK_SECRET:-}
@@ -164,14 +158,11 @@ services:
       # Clés de chiffrement des données KYC (apps.core.fields), clé active en
       # premier. Sans elles, prod.py refuse de démarrer (Django et Celery).
       FIELD_ENCRYPTION_KEYS: ${FIELD_ENCRYPTION_KEYS}
-      # Paiements (apps.paiements) : fournisseur et clés CinetPay. Sans
-      # elles, prod.py refuse de démarrer (Django et Celery).
-      PAIEMENT_FOURNISSEUR: ${PAIEMENT_FOURNISSEUR}
-      CINETPAY_API_KEY: ${CINETPAY_API_KEY}
-      CINETPAY_API_PASSWORD: ${CINETPAY_API_PASSWORD}
-      # GeniusPay : vides tant que PAIEMENT_FOURNISSEUR=cinetpay. La variable
+      # Paiements (apps.paiements) : fournisseur et clés GeniusPay. Sans
+      # elles, prod.py refuse de démarrer (Django et Celery). La variable
       # de staging absente vaut « false » ; vide, elle reste vide et prod.py
       # refuse de démarrer (jamais de conversion tolérante).
+      PAIEMENT_FOURNISSEUR: ${PAIEMENT_FOURNISSEUR}
       GENIUSPAY_API_KEY: ${GENIUSPAY_API_KEY:-}
       GENIUSPAY_API_SECRET: ${GENIUSPAY_API_SECRET:-}
       GENIUSPAY_WEBHOOK_SECRET: ${GENIUSPAY_WEBHOOK_SECRET:-}
@@ -301,7 +292,7 @@ services:
   # par infra/scripts/backup.sh (cron, chaque nuit) et
   # infra/scripts/restore.sh. Reçoit seulement les variables de la base et
   # de la sauvegarde : ni SECRET_KEY, ni FIELD_ENCRYPTION_KEYS, ni les clés
-  # CinetPay ; aucun autre service ne reçoit les variables BACKUP_*.
+  # GeniusPay ; aucun autre service ne reçoit les variables BACKUP_*.
   backup:
     build:
       context: ./backup

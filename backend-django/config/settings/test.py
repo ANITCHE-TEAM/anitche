@@ -84,12 +84,10 @@ CACHES = {
 
 
 # Paiements : fournisseur simulé avec un secret de test fixe (jamais utilisé
-# hors tests). Les tests CinetPay remplacent les appels HTTP ; ceux de
-# GeniusPay passent par un faux serveur et fixent eux-mêmes leurs réglages.
+# hors tests). Les tests de GeniusPay passent par un faux serveur et fixent
+# eux-mêmes leurs réglages.
 PAIEMENT_FOURNISSEUR = 'simule'
 PAIEMENT_SIMULE_SECRET = 'secret-test-simulation'
-CINETPAY_API_KEY = ''
-CINETPAY_API_PASSWORD = ''
 GENIUSPAY_API_KEY = ''
 GENIUSPAY_API_SECRET = ''
 GENIUSPAY_WEBHOOK_SECRET = ''

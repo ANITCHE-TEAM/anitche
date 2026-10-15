@@ -42,21 +42,16 @@ class ImportProdMixin:
             "ALLOWED_HOSTS": "anitche.com,backend-django",
             "CORS_ALLOWED_ORIGINS": "https://anitche.com",
             "BACKEND_BASE_URL": "https://anitche.com",
-            "PAIEMENT_FOURNISSEUR": "cinetpay",
-            "CINETPAY_API_KEY": "sk_live_cle",
-            "CINETPAY_API_PASSWORD": "mdp",
             "EMAIL_BACKEND": "django.core.mail.backends.smtp.EmailBackend",
             "EMAIL_HOST": "smtp.exemple.test",
             "EMAIL_PORT": "587",
             "EMAIL_USE_TLS": "True",
             "EMAIL_USE_SSL": "False",
             "EMAIL_TIMEOUT": None,
-            # Absentes par défaut, quel que soit l'environnement du développeur.
+            # GeniusPay live, sans mode staging, quel que soit l'environnement
+            # du développeur.
+            **GENIUSPAY_LIVE,
             "ANITCHE_STAGING_SANDBOX_PAIEMENT": None,
-            "GENIUSPAY_API_KEY": None,
-            "GENIUSPAY_API_SECRET": None,
-            "GENIUSPAY_WEBHOOK_SECRET": None,
-            "GENIUSPAY_ENVIRONNEMENT": None,
             "EMAIL_HOST_USER": "identifiant-factice",
             "EMAIL_HOST_PASSWORD": MOT_DE_PASSE_SMTP,
             "DEFAULT_FROM_EMAIL": "ANITCHE <no-reply@anitche.com>",
@@ -193,16 +188,12 @@ class PaiementProductionTests(ImportProdMixin, SimpleTestCase):
 
     def test_configurations_valides(self):
         cas = {
-            "cinetpay seul": ({}, {"fournisseur": "cinetpay"}),
             "geniuspay live, variable staging absente": (
                 GENIUSPAY_LIVE, {"fournisseur": "geniuspay", "environnement": "live"}),
             "geniuspay live, variable staging à false": (
                 {**GENIUSPAY_LIVE, STAGING: "false"}, {"fournisseur": "geniuspay", "environnement": "live"}),
             "geniuspay sandbox en staging": (
                 GENIUSPAY_SANDBOX, {"fournisseur": "geniuspay", "environnement": "sandbox"}),
-            # La variable ne concerne que geniuspay.
-            "cinetpay avec la variable staging à true": ({STAGING: "true"}, {"fournisseur": "cinetpay"}),
-            "cinetpay avec la variable staging à false": ({STAGING: "false"}, {"fournisseur": "cinetpay"}),
         }
         for libelle, (variables, attendu) in cas.items():
             with self.subTest(libelle):
@@ -217,6 +208,9 @@ class PaiementProductionTests(ImportProdMixin, SimpleTestCase):
             "inconnu": {"PAIEMENT_FOURNISSEUR": "stripe"},
             "absent (simulé par défaut)": {"PAIEMENT_FOURNISSEUR": None},
             "casse différente": {**GENIUSPAY_LIVE, "PAIEMENT_FOURNISSEUR": "GeniusPay"},
+            "cinetpay": {**GENIUSPAY_LIVE, "PAIEMENT_FOURNISSEUR": "cinetpay"},
+            "cinetpay avec la variable staging": {**GENIUSPAY_LIVE, "PAIEMENT_FOURNISSEUR": "cinetpay",
+                                                  STAGING: "true"},
         }, "est interdit en production")
 
     def test_refus_cles_geniuspay_absentes(self):
@@ -286,14 +280,6 @@ class PaiementProductionTests(ImportProdMixin, SimpleTestCase):
 
     def test_refus_valeurs_non_exactes_de_la_variable_staging(self):
         valeurs = ("True", "TRUE", "1", "yes", "on", "", " ", "true ", " true", "False", "0", "oui")
-        for fournisseur, base in (("geniuspay", GENIUSPAY_SANDBOX), ("cinetpay", {})):
-            self.verifier_refus({
-                f"{fournisseur} : {valeur!r}": {**base, STAGING: valeur} for valeur in valeurs
-            }, f"{STAGING} doit valoir exactement")
-
-    def test_cinetpay_garde_son_refus_des_cles_de_sandbox(self):
-        # La variable staging n'ouvre rien pour CinetPay.
         self.verifier_refus({
-            "variable absente": {"CINETPAY_API_KEY": "sk_test_cle"},
-            "variable à true": {"CINETPAY_API_KEY": "sk_test_cle", STAGING: "true"},
-        }, "Clé CinetPay de sandbox")
+            repr(valeur): {**GENIUSPAY_SANDBOX, STAGING: valeur} for valeur in valeurs
+        }, f"{STAGING} doit valoir exactement")
