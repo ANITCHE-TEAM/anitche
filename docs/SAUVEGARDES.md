@@ -113,7 +113,7 @@ Ces relectures téléchargent des données : gratuit chez R2, dans les limites d
 
 ## 6. Restauration
 
-`restore.sh` n'écrase jamais de données : la base cible doit être absente ou vide, le dossier des médias vide ; sinon refus, sortie 1, rien d'écrit. Le service `db` doit tourner.
+`restore.sh` n'écrase jamais de données : la base cible doit être absente ou vide, le dossier des médias vide ; sinon refus, sortie 1, rien d'écrit. Le service `db` doit tourner. Il crée ou met à jour d'abord le rôle applicatif (`create_app_role.sh`, d'où `DB_PASSWORD`) : la base restaurée et ses objets lui appartiennent ; une base cible existante d'un autre propriétaire est refusée.
 
 ### 6.1 Lister les instantanés
 
@@ -132,8 +132,8 @@ Une fois par mois, sur un poste avec Docker, **jamais sur le serveur de producti
    ```text
    COMPOSE_PROJECT_NAME=anitche-exercice
    DB_NAME=anitche
-   DB_USER=anitche_exercice
    DB_PASSWORD=<aléatoire>
+   DB_SUPERUSER_PASSWORD=<aléatoire, différent>
    BACKUP_REPOSITORY=<gestionnaire de secrets>
    BACKUP_PASSWORD=<copie hors ligne du chef de projet>
    BACKUP_S3_ACCESS_KEY_ID=<gestionnaire de secrets>
@@ -222,7 +222,7 @@ Si le mot de passe **et** l'accès au bucket ont fuité ensemble, changer de mot
 | Un attaquant maître du serveur peut lire toutes les sauvegardes (le mot de passe y est) | Acceptée : il lit déjà la base vivante et possède `FIELD_ENCRYPTION_KEYS` |
 | Il peut aussi **supprimer** les sauvegardes (la clé S3 a le droit de supprimer, nécessaire à la rétention) | À traiter : versionnement ou verrouillage d'objets du bucket, clés aux droits séparés, ou seconde copie récupérée par une autre machine. Dépend du fournisseur |
 | Fenêtre base puis médias (resoumission KYC pendant la sauvegarde) | Rare ; comptée par la restauration (§ 6.4) |
-| La restauration crée la base et les extensions avec `DB_USER`, aujourd'hui superutilisateur | Si ce rôle perd ses droits, il lui faudra `CREATEDB`, et `unaccent` / `pg_trgm` devront être créées par un superutilisateur |
+| Le conteneur `backup` reçoit le mot de passe du superutilisateur (`pg_dump` de toute la base, `CREATE DATABASE` à la restauration) | Acceptée : il ne reçoit ni `SECRET_KEY`, ni `FIELD_ENCRYPTION_KEYS`, ni les clés de paiement, et ne tourne que le temps d'une sauvegarde. La base restaurée et chacun de ses objets appartiennent à `anitche_app` (`CREATE DATABASE … OWNER`, `pg_restore --role`), comme la base vivante |
 | Pas de sauvegarde automatique avant les migrations de `deploy.sh` | À ajouter dans `deploy.sh` ; `backup.sh` est appelable tel quel |
 
 ## 10. Journal des exercices

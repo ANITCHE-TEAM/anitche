@@ -1,4 +1,5 @@
 from decimal import Decimal
+from django.test import TestCase
 from django.urls import reverse
 from rest_framework.test import APITestCase
 from rest_framework import status
@@ -240,6 +241,55 @@ class CommandeAdminTestCase(APITestCase):
         self.assertIn("prix_unitaire", admin_instance.readonly_fields)
         self.assertIn("quantite", admin_instance.readonly_fields)
         self.assertIn("nom_produit", admin_instance.readonly_fields)
+
+
+class SuppressionAdminCommandeTestCase(TestCase):
+    """Aucune suppression de commande dans l'admin Django, même pour un
+    superutilisateur : une correction passe par un remboursement."""
+
+    def setUp(self):
+        self.client_user = Utilisateur.objects.create_user(
+            email="client-admin@test.com", password="testpass123", nom="C", prenom="L", role=Role.CLIENT,
+        )
+        vendeur = Utilisateur.objects.create_user(
+            email="vendeur-admin@test.com", password="testpass123", nom="V", prenom="D",
+            role=Role.VENDEUR, statut_kyc=StatutKYC.VALIDE,
+        )
+        boutique = Boutique.objects.create(proprietaire=vendeur, nom="Boutique admin", est_active=True)
+        produit = Produit.objects.create(boutique=boutique, nom="Produit", prix_base=Decimal("500"))
+        variante = VarianteProduit.objects.create(produit=produit, nom="Standard", prix=Decimal("500"))
+        self.groupe = GroupeCommande.objects.create(client=self.client_user)
+        self.commande = Commande.objects.create(
+            groupe=self.groupe, boutique=boutique, client=self.client_user, montant_total=Decimal("500.00"),
+        )
+        self.item = CommandeItem.objects.create(
+            commande=self.commande, variante=variante, nom_produit="Produit",
+            prix_unitaire=Decimal("500.00"), quantite=1,
+        )
+        superutilisateur = Utilisateur.objects.create_superuser(
+            email="su-admin@test.com", password="testpass123", nom="S", prenom="U",
+        )
+        self.client.force_login(superutilisateur)
+
+    def test_suppression_refusee_403(self):
+        for nom, objet in (
+            ("commande", self.commande), ("groupecommande", self.groupe), ("commandeitem", self.item),
+        ):
+            with self.subTest(modele=nom):
+                url = f"/admin/commandes/{nom}/{objet.pk}/delete/"
+                self.assertEqual(self.client.get(url).status_code, 403)
+                self.assertEqual(self.client.post(url, {"post": "yes"}).status_code, 403)
+        self.assertTrue(Commande.objects.filter(pk=self.commande.pk).exists())
+        self.assertTrue(GroupeCommande.objects.filter(pk=self.groupe.pk).exists())
+        self.assertTrue(CommandeItem.objects.filter(pk=self.item.pk).exists())
+
+    def test_action_de_suppression_groupee_absente(self):
+        url = "/admin/commandes/commande/"
+        formulaire = self.client.get(url).context["action_form"]
+        actions = [] if formulaire is None else [valeur for valeur, _ in formulaire.fields["action"].choices]
+        self.assertNotIn("delete_selected", actions)
+        self.client.post(url, {"action": "delete_selected", "_selected_action": [str(self.commande.pk)], "post": "yes"})
+        self.assertTrue(Commande.objects.filter(pk=self.commande.pk).exists())
 
 
 class ValiderPanierCouponTestCase(APITestCase):

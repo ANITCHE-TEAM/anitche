@@ -6,6 +6,7 @@ class RetourItemInline(admin.TabularInline):
     model = RetourItem
     extra = 0
     readonly_fields = ("commande_item", "quantite")
+    can_delete = False
 
 
 class PhotoRetourInline(admin.TabularInline):
@@ -41,6 +42,11 @@ class DemandeRetourAdmin(admin.ModelAdmin):
     inlines = [RetourItemInline, PhotoRetourInline]
     ordering = ("-date_creation",)
 
+    # Une demande porte le montant remboursé et justifie le remboursement
+    # versé : elle ne se supprime jamais dans l'admin.
+    def has_delete_permission(self, request, obj=None):
+        return False
+
 
 @admin.register(RetourItem)
 class RetourItemAdmin(admin.ModelAdmin):
@@ -55,6 +61,9 @@ class RetourItemAdmin(admin.ModelAdmin):
     # fausserait aussi le stock réel (même principe que le verrouillage de
     # CommandeItem dans apps.commandes.admin).
     readonly_fields = ("id", "demande_retour", "commande_item", "quantite")
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(PhotoRetour)

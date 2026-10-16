@@ -8,6 +8,7 @@
 #     et adresses publiques ;
 #   - infra/postgres/fastapi_readonly.sql : mot de passe du rôle en lecture
 #     seule de FastAPI ;
+#   - infra/postgres/app_role.sql : mot de passe du rôle applicatif ;
 #   - infra/scripts/backup.sh : dépôt de sauvegarde hors du serveur, mot de
 #     passe du dépôt ;
 # plus les valeurs de infra/.env.example laissées telles quelles.
@@ -134,7 +135,7 @@ verifier_url_publique() {
 # --- Variables obligatoires -------------------------------------------------
 REQUIS=(
     SECRET_KEY FIELD_ENCRYPTION_KEYS ALLOWED_HOSTS CORS_ALLOWED_ORIGINS
-    DB_NAME DB_USER DB_PASSWORD FASTAPI_DB_PASSWORD
+    DB_NAME DB_PASSWORD DB_SUPERUSER_PASSWORD FASTAPI_DB_PASSWORD REDIS_PASSWORD
     PAIEMENT_FOURNISSEUR BACKEND_BASE_URL
     PUBLIC_BASE_URL MEDIA_BASE_URL
     EMAIL_BACKEND EMAIL_HOST EMAIL_HOST_USER EMAIL_HOST_PASSWORD DEFAULT_FROM_EMAIL
@@ -300,11 +301,30 @@ if [ -n "${FASTAPI_DB_PASSWORD:-}" ]; then
 fi
 
 # --- PostgreSQL ---------------------------------------------------------------
-if [ -n "${DB_PASSWORD:-}" ]; then
-    case "$DB_PASSWORD" in
-        postgres|change-me-too) erreur "DB_PASSWORD : valeur d'exemple, à remplacer par un mot de passe aléatoire." ;;
-        *) [ "${#DB_PASSWORD}" -ge 12 ] || erreur "DB_PASSWORD : 12 caractères au moins." ;;
+# DB_PASSWORD : rôle applicatif anitche_app (Django, Celery) ;
+# DB_SUPERUSER_PASSWORD : superutilisateur postgres (scripts et sauvegardes).
+# Trois mots de passe distincts : aucun rôle ne connaît celui d'un autre.
+for var in DB_PASSWORD DB_SUPERUSER_PASSWORD; do
+    valeur="${!var:-}"
+    [ -n "$valeur" ] || continue
+    case "$valeur" in
+        postgres|change-me-too) erreur "$var : valeur d'exemple, à remplacer par un mot de passe aléatoire." ;;
+        *) [ "${#valeur}" -ge 12 ] || erreur "$var : 12 caractères au moins." ;;
     esac
+done
+if [ -n "${DB_SUPERUSER_PASSWORD:-}" ]         && { [ "$DB_SUPERUSER_PASSWORD" = "${DB_PASSWORD:-}" ] || [ "$DB_SUPERUSER_PASSWORD" = "${FASTAPI_DB_PASSWORD:-}" ]; }; then
+    erreur "DB_SUPERUSER_PASSWORD : distinct de DB_PASSWORD et de FASTAPI_DB_PASSWORD."
+fi
+if [ -n "${DB_PASSWORD:-}" ] && [ "$DB_PASSWORD" = "${FASTAPI_DB_PASSWORD:-}" ]; then
+    erreur "DB_PASSWORD : distinct de FASTAPI_DB_PASSWORD (rôle en lecture seule de FastAPI)."
+fi
+
+# --- Redis (prod.py) ----------------------------------------------------------
+# Inséré tel quel dans REDIS_URL et REDIS_CACHE_URL : lettres et chiffres
+# seulement (un « / », « @ » ou « : » couperait l'URL), 32 au moins
+# (openssl rand -hex 32).
+if [ -n "${REDIS_PASSWORD:-}" ] && [[ ! "$REDIS_PASSWORD" =~ ^[A-Za-z0-9]{32,}$ ]]; then
+    erreur "REDIS_PASSWORD : 32 caractères au moins, lettres et chiffres uniquement (inséré tel quel dans l'URL de Redis ; openssl rand -hex 32)."
 fi
 
 # --- Sauvegardes (infra/scripts/backup.sh, docs/SAUVEGARDES.md) --------------

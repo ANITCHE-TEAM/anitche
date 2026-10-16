@@ -386,6 +386,21 @@ class RetoursAdminTestCase(APITestCase):
         admin_instance = RetourItemAdmin(RetourItem, AdminSite())
         self.assertIn("quantite", admin_instance.readonly_fields)
 
+    def test_demande_et_articles_jamais_supprimes_dans_admin(self):
+        """Une demande porte le montant remboursé : ni elle ni ses articles
+        ne se suppriment dans l'admin, même pour un superutilisateur."""
+        from apps.retours.admin import DemandeRetourAdmin, RetourItemAdmin, RetourItemInline
+        from django.contrib.admin.sites import AdminSite
+        from django.test import RequestFactory
+
+        requete = RequestFactory().get("/")
+        requete.user = Utilisateur.objects.create_superuser(
+            email="su-retours@test.com", password="testpass123", nom="S", prenom="U",
+        )
+        self.assertFalse(DemandeRetourAdmin(DemandeRetour, AdminSite()).has_delete_permission(requete))
+        self.assertFalse(RetourItemAdmin(RetourItem, AdminSite()).has_delete_permission(requete))
+        self.assertFalse(RetourItemInline.can_delete)
+
     def test_image_photo_retour_readonly_dans_admin(self):
         from apps.retours.admin import PhotoRetourAdmin
         from apps.retours.models import PhotoRetour

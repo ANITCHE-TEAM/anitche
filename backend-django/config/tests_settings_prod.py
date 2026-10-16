@@ -18,6 +18,7 @@ from django.conf import settings
 from django.test import SimpleTestCase
 
 MOT_DE_PASSE_SMTP = "mot-de-passe-smtp-factice"
+MOT_DE_PASSE_REDIS = "RedisFactice0123456789abcdefghijk"
 SANS_FICHIER_ENV = "import decouple\ndecouple.config = decouple.Config(decouple.RepositoryEmpty())\n"
 IMPORT_PROD = SANS_FICHIER_ENV + "import config.settings.prod\n"
 LECTURE_EMAIL = (
@@ -55,6 +56,8 @@ class ImportProdMixin:
             "EMAIL_HOST_USER": "identifiant-factice",
             "EMAIL_HOST_PASSWORD": MOT_DE_PASSE_SMTP,
             "DEFAULT_FROM_EMAIL": "ANITCHE <no-reply@anitche.com>",
+            "REDIS_URL": f"redis://:{MOT_DE_PASSE_REDIS}@redis:6379/0",
+            "REDIS_CACHE_URL": f"redis://:{MOT_DE_PASSE_REDIS}@redis:6379/1",
             **variables,
         }
         env = {cle: valeur for cle, valeur in env.items() if valeur is not None}
@@ -71,6 +74,7 @@ class ImportProdMixin:
                 self.assertIn("ImproperlyConfigured", resultat.stderr)
                 self.assertIn(message, resultat.stderr)
                 self.assertNotIn(MOT_DE_PASSE_SMTP, resultat.stderr)
+                self.assertNotIn(MOT_DE_PASSE_REDIS, resultat.stderr)
 
 
 class ConfigurationEmailProductionTests(ImportProdMixin, SimpleTestCase):
@@ -283,3 +287,58 @@ class PaiementProductionTests(ImportProdMixin, SimpleTestCase):
         self.verifier_refus({
             repr(valeur): {**GENIUSPAY_SANDBOX, STAGING: valeur} for valeur in valeurs
         }, f"{STAGING} doit valoir exactement")
+
+
+LECTURE_REDIS = (
+    SANS_FICHIER_ENV
+    + "import json\n"
+    "import config.settings.prod as p\n"
+    "print(json.dumps({'broker': p.CELERY_BROKER_URL, 'cache': p.CACHES['default']['LOCATION']}))\n"
+)
+
+
+class RedisProductionTests(ImportProdMixin, SimpleTestCase):
+    """REDIS_URL et REDIS_CACHE_URL portent le mot de passe de Redis."""
+
+    def test_configurations_valides(self):
+        url = f"redis://:{MOT_DE_PASSE_REDIS}@redis:6379"
+        cas = {
+            "deux URL explicites": ({}, {"broker": f"{url}/0", "cache": f"{url}/1"}),
+            # Base 1 posée sur le chemin de l'URL découpée, rien d'autre ne change.
+            "cache déduit de REDIS_URL": ({"REDIS_CACHE_URL": None}, {"broker": f"{url}/0", "cache": f"{url}/1"}),
+            "cache déduit, paramètres conservés": (
+                {"REDIS_URL": f"{url}/0?socket_timeout=5", "REDIS_CACHE_URL": None},
+                {"cache": f"{url}/1?socket_timeout=5"}),
+        }
+        for libelle, (variables, attendu) in cas.items():
+            with self.subTest(libelle):
+                resultat = self.importer_prod(script=LECTURE_REDIS, **variables)
+                self.assertEqual(resultat.returncode, 0, resultat.stderr[-500:])
+                lu = json.loads(resultat.stdout.strip().splitlines()[-1])
+                self.assertEqual({cle: lu[cle] for cle in attendu}, attendu)
+
+    def test_refus_sans_mot_de_passe_valide(self):
+        court = MOT_DE_PASSE_REDIS[:31]
+        # REDIS_URL absente : valeur par défaut de base.py, sans mot de passe
+        # (REDIS_CACHE_URL absente aussi, donc déduite d'elle).
+        cas = {"REDIS_URL absente": ("REDIS_URL", {"REDIS_URL": None, "REDIS_CACHE_URL": None})}
+        for nom, base in (("REDIS_URL", "0"), ("REDIS_CACHE_URL", "1")):
+            for libelle, url in (
+                ("sans mot de passe", f"redis://redis:6379/{base}"),
+                ("mot de passe vide", f"redis://:@redis:6379/{base}"),
+                ("mot de passe de 31 caractères", f"redis://:{court}@redis:6379/{base}"),
+                ("mot de passe avec « / »", f"redis://:{court}/x@redis:6379/{base}"),
+                ("mot de passe avec « - »", f"redis://:{court}-x@redis:6379/{base}"),
+                ("mot de passe accentué", f"redis://:{court}é@redis:6379/{base}"),
+                ("autre schéma", f"http://:{MOT_DE_PASSE_REDIS}@redis:6379/{base}"),
+                ("sans hôte", f"redis://:{MOT_DE_PASSE_REDIS}@:6379/{base}"),
+                ("port invalide", f"redis://:{MOT_DE_PASSE_REDIS}@redis:port/{base}"),
+            ):
+                cas[f"{nom}, {libelle}"] = (nom, {nom: url})
+        for libelle, (nom, variables) in cas.items():
+            with self.subTest(libelle):
+                resultat = self.importer_prod(**variables)
+                self.assertNotEqual(resultat.returncode, 0)
+                self.assertIn("ImproperlyConfigured", resultat.stderr)
+                self.assertIn(f"{nom} doit contenir le mot de passe de Redis", resultat.stderr)
+                self.assertNotIn(court, resultat.stderr)

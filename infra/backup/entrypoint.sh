@@ -12,8 +12,8 @@
 #                restaure dans une base vide et un dossier vide, puis vérifie.
 # Variables : RESTIC_REPOSITORY, RESTIC_PASSWORD, AWS_ACCESS_KEY_ID,
 # AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION (facultative), RESTIC_CACHE_DIR,
-# PGHOST (db par défaut), PGPASSWORD, DB_NAME, DB_USER. Aucune valeur n'est
-# jamais affichée.
+# PGHOST (db par défaut), PGPASSWORD, DB_NAME, DB_USER (superutilisateur).
+# Aucune valeur n'est jamais affichée.
 
 set -eu
 set -o pipefail
@@ -23,6 +23,10 @@ set -o pipefail
 HOTE=anitche
 MEDIAS=/sauvegarde/media
 FICHIER_DUMP=anitche.dump
+# Rôle applicatif (infra/postgres/app_role.sql) : propriétaire de la base
+# restaurée et de chacun de ses objets, comme dans la base vivante, pour que
+# Django la migre ensuite sans superutilisateur.
+ROLE_APPLICATION=anitche_app
 # Contrôle approfondi : une part différente des données relue chaque
 # semaine ; tout le dépôt est relu en PARTS_CONTROLE semaines.
 PARTS_CONTROLE=8
@@ -126,9 +130,11 @@ sauvegarder() {
     fi
 }
 
+# --role : chaque objet est créé par le rôle applicatif (SET ROLE), donc lui
+# appartient ; les extensions unaccent et pg_trgm sont « trusted ».
 restaurer_base() {
     restic dump --host "$HOTE" --tag db "$instantane_base" "/$FICHIER_DUMP" \
-        | pg_restore -U "$DB_USER" -d "$cible" \
+        | pg_restore -U "$DB_USER" -d "$cible" --role "$ROLE_APPLICATION" \
             --single-transaction --exit-on-error --no-owner --no-privileges
 }
 
@@ -160,9 +166,16 @@ restaurer() {
     if [ -e "$medias" ] && [ -n "$(ls -A "$medias")" ]; then
         refus "$medias n'est pas vide : les médias ne sont restaurés que dans un dossier vide."
     fi
+    role=$(printf "SELECT count(*) FROM pg_roles WHERE rolname = :'role';\n" \
+        | psql_requete -d postgres -v role="$ROLE_APPLICATION")
+    [ "$role" = 1 ] || refus "rôle $ROLE_APPLICATION absent : lancer infra/scripts/create_app_role.sh."
     existe=$(printf "SELECT count(*) FROM pg_database WHERE datname = :'cible';\n" \
         | psql_requete -d postgres -v cible="$cible")
     if [ "$existe" = 1 ]; then
+        proprietaire=$(printf "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = :'cible';\n" \
+            | psql_requete -d postgres -v cible="$cible")
+        [ "$proprietaire" = "$ROLE_APPLICATION" ] \
+            || refus "la base $cible n'appartient pas à $ROLE_APPLICATION : ALTER DATABASE $cible OWNER TO $ROLE_APPLICATION;"
         objets=$(psql_requete -d "$cible" -c "SELECT count(*) FROM pg_class c
             JOIN pg_namespace n ON n.oid = c.relnamespace
             WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
@@ -175,7 +188,8 @@ restaurer() {
     if [ "$existe" = 1 ]; then
         journal "base $cible : existante et vide"
     else
-        printf 'CREATE DATABASE :"cible";\n' | psql_requete -d postgres -v cible="$cible"
+        printf 'CREATE DATABASE :"cible" OWNER :"role";\n' \
+            | psql_requete -d postgres -v cible="$cible" -v role="$ROLE_APPLICATION"
         journal "base $cible : créée"
     fi
     # Une seule transaction : en cas d'erreur, la base cible reste vide.

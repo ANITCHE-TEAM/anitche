@@ -148,15 +148,18 @@ Pour que les Runs Postman répétés (connexions, codes OTP, inscriptions, paiem
 ./infra/scripts/deploy.sh
 ```
 
-Toujours passer par `deploy.sh`, jamais par un `docker compose … up -d --build` direct : seul le script contrôle `infra/.env` et recrée le rôle PostgreSQL de FastAPI après les migrations. Étapes, arrêt à la première erreur :
+Toujours passer par `deploy.sh`, jamais par un `docker compose … up -d --build` direct : seul le script contrôle `infra/.env`, prépare le rôle PostgreSQL applicatif avant les migrations et recrée celui de FastAPI après elles. Étapes, arrêt à la première erreur :
 
 1. `git pull origin main` ;
-2. `infra/scripts/check_prod_env.sh` : refuse tout ce que refuseraient au démarrage `config/settings/prod.py` (Django et Celery) et les réglages de production de FastAPI (origines CORS, `FRONTEND_BASE_URL`, `PUBLIC_BASE_URL`, `MEDIA_BASE_URL`), plus un `FASTAPI_DB_PASSWORD` de moins de 12 caractères ou pas seulement alphanumérique, et un `DB_PASSWORD` d'exemple ou de moins de 12 caractères. Il affiche toutes les erreurs (noms des variables, jamais leurs valeurs) puis sort en 1, et avertit si `infra/.env` n'a pas les droits 600 ;
+2. `infra/scripts/check_prod_env.sh` : refuse tout ce que refuseraient au démarrage `config/settings/prod.py` (Django et Celery) et les réglages de production de FastAPI (origines CORS, `FRONTEND_BASE_URL`, `PUBLIC_BASE_URL`, `MEDIA_BASE_URL`), plus un `FASTAPI_DB_PASSWORD` de moins de 12 caractères ou pas seulement alphanumérique, un `DB_PASSWORD` ou un `DB_SUPERUSER_PASSWORD` d'exemple ou de moins de 12 caractères, deux mots de passe PostgreSQL identiques, et un `REDIS_PASSWORD` de moins de 32 caractères ou pas seulement alphanumérique. Il affiche toutes les erreurs (noms des variables, jamais leurs valeurs) puis sort en 1, et avertit si `infra/.env` n'a pas les droits 600 ;
 3. construction des images (`docker compose build`) ;
 4. démarrage de `db` et `redis` seuls, jusqu'à ce qu'ils soient prêts (`up -d --wait db redis`) ;
-5. migrations dans un conteneur ponctuel (`docker compose run --rm backend-django python manage.py migrate`) ;
-6. `infra/scripts/create_fastapi_readonly_role.sh` (avec `COMPOSE_FILE=infra/docker-compose.prod.yml`) : crée ou met à jour le rôle `anitche_fastapi_ro`, son mot de passe (`FASTAPI_DB_PASSWORD`) et ses droits. À chaque déploiement, car ses `GRANT` portent sur des tables et des vues créées par les migrations : une migration qui recrée une vue lui retire ses droits ;
-7. `up -d` de toute la pile, puis statut. `backend-django` relance `migrate` à son démarrage, sans effet après l'étape 5.
+5. `infra/scripts/create_app_role.sh` (avec `COMPOSE_FILE=infra/docker-compose.prod.yml`) : crée ou met à jour le rôle `anitche_app` (ni superutilisateur, ni `CREATEDB`, ni `CREATEROLE`), son mot de passe (`DB_PASSWORD`), et lui donne la base ; s'arrête si une table, vue ou séquence du schéma `public` appartient à un autre rôle. Django, Celery et les migrations se connectent avec ce rôle ; le superutilisateur `postgres` (`DB_SUPERUSER_PASSWORD`) ne sert qu'à ce script, à celui de FastAPI et aux sauvegardes ;
+6. migrations dans un conteneur ponctuel (`docker compose run --rm backend-django python manage.py migrate`) ; `unaccent` et `pg_trgm` (catalogue 0004) sont des extensions « trusted », créées par le propriétaire de la base sans superutilisateur ;
+7. `infra/scripts/create_fastapi_readonly_role.sh` (avec `COMPOSE_FILE=infra/docker-compose.prod.yml`) : crée ou met à jour le rôle `anitche_fastapi_ro`, son mot de passe (`FASTAPI_DB_PASSWORD`) et ses droits. À chaque déploiement, car ses `GRANT` portent sur des tables et des vues créées par les migrations : une migration qui recrée une vue lui retire ses droits ;
+8. `up -d` de toute la pile, puis statut. `backend-django` relance `migrate` à son démarrage, sans effet après l'étape 6.
+
+Durcissement de la pile : Redis exige `REDIS_PASSWORD` (`requirepass` dans un fichier de configuration monté, URL `redis://:<mot de passe>@redis:6379/<base>` pour Django, Celery et FastAPI ; `prod.py` refuse une URL sans lui) ; `backend-django`, `celery-worker`, `celery-beat` et `backend-fastapi` tournent sous l'utilisateur `app` (uid non nul), le code appartient à root en lecture seule, seuls `/app/media` et `/app/staticfiles` appartiennent à `app`.
 
 ### Emails en production
 

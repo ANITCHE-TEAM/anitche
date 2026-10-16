@@ -3,7 +3,9 @@ name: CI Pile prod
 # Démarre la vraie pile de production (infra/docker-compose.prod.yml) sur le
 # runner et vérifie, par des requêtes à travers nginx, le routage, les
 # statiques et médias, la route interne, les webhooks, la documentation
-# fermée et le refus de démarrer de prod.py (infra/ci/smoke_prod.sh).
+# fermée, le refus de démarrer de prod.py et le durcissement (Redis sans mot
+# de passe refusé, rôle PostgreSQL non superutilisateur, conteneurs sans
+# root) (infra/ci/smoke_prod.sh).
 #
 # Ce que ce job ne teste pas :
 #   - frontend/Dockerfile.prod : le frontend est remplacé par une page statique
@@ -94,6 +96,18 @@ jobs:
       - name: Démarrer PostgreSQL et Redis
         timeout-minutes: 5
         run: bash infra/ci/etape.sh "db et redis" timeout 240 bash infra/ci/compose.sh up -d --wait --wait-timeout 120 db redis
+
+      # Le script réel de déploiement : rôle anitche_app, propriétaire de la
+      # base, avant les migrations qu'il exécute.
+      - name: Rôle PostgreSQL applicatif
+        timeout-minutes: 3
+        run: |
+          set -a
+          # shellcheck source=/dev/null
+          . "$ENV_CI"
+          set +a
+          export COMPOSE_FILE=infra/docker-compose.prod.yml
+          bash infra/ci/etape.sh "Rôle applicatif anitche_app" timeout 120 bash infra/scripts/create_app_role.sh
 
       - name: Migrations (conteneur ponctuel)
         timeout-minutes: 8

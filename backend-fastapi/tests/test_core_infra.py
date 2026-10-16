@@ -32,8 +32,13 @@ def test_compose_passes_the_right_settings(compose_file):
 
     assert environment["DJANGO_API_BASE_URL"].endswith(":8000/api")
     assert environment["DATABASE_URL"].startswith("postgresql://anitche_fastapi_ro:${FASTAPI_DB_PASSWORD")
-    assert environment["REDIS_URL"] == "redis://redis:6379/2"
-    assert not {"DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD"} & set(environment)
+    redis_url = {
+        "docker-compose.yml": "redis://redis:6379/2",
+        # Redis protégé par mot de passe en production (requirepass).
+        "docker-compose.prod.yml": "redis://:${REDIS_PASSWORD}@redis:6379/2",
+    }[compose_file]
+    assert environment["REDIS_URL"] == redis_url
+    assert not {"DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD", "DB_SUPERUSER_PASSWORD"} & set(environment)
 
     command = service["command"]
     assert "--factory app.main:create_app" in command

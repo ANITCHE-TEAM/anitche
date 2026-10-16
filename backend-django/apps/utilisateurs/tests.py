@@ -2653,6 +2653,8 @@ class VerificationJetonProductionTests(TestCase):
             'EMAIL_HOST_USER': 'identifiant-factice',
             'EMAIL_HOST_PASSWORD': 'mot-de-passe-factice',
             'DEFAULT_FROM_EMAIL': 'ANITCHE <no-reply@anitche.com>',
+            'REDIS_URL': 'redis://:rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr@redis:6379/0',
+            'REDIS_CACHE_URL': 'redis://:rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr@redis:6379/1',
         }
         # Sans jeton : aucune requête en base, la vue répond 401 si elle est
         # atteinte. Une redirection répondrait 301 avant même la vue.
