@@ -114,13 +114,23 @@ config_gunicorn() {
         sortie="$(timeout 120 bash infra/ci/compose.sh run --rm --no-deps -T backend-django \
             gunicorn --print-config -c gunicorn.conf.py config.wsgi:application 2>&1)"
     fi
-    local attendu
+    # --print-config aligne les valeurs (« workers         = 3 ») : on ramène
+    # chaque ligne à « nom = valeur » avant de comparer.
+    local normalisee
+    normalisee="$(sed -E 's/^[[:space:]]+//; s/[[:space:]]*=[[:space:]]*/ = /; s/[[:space:]]+$//' <<<"$sortie")"
+    local attendu absent=0
     for attendu in "workers = $2" "timeout = 30" "graceful_timeout = 30" "max_requests = 1000" \
                    "max_requests_jitter = 100" "worker_tmp_dir = /dev/shm" "accesslog = -"; do
-        if ! grep -qx "$attendu" <<<"$sortie"; then
+        if ! grep -qxF "$attendu" <<<"$normalisee"; then
             ko "gunicorn --print-config (GUNICORN_WORKERS='${1}') : « $attendu » absent"
+            absent=1
         fi
     done
+    if [ "$absent" = 1 ]; then
+        echo "--- début de la sortie de gunicorn --print-config (GUNICORN_WORKERS='${1}') ---"
+        head -n 40 <<<"$sortie"
+        echo "--- fin ---"
+    fi
 }
 
 reglages_gunicorn() {
