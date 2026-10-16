@@ -295,6 +295,16 @@ verifier_conteneurs() {
         conclure
     done
 
+    # Rotation des journaux appliquée par Docker à chaque conteneur créé.
+    for id in $(compose ps -q 2>/dev/null); do
+        service="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$id" 2>/dev/null)"
+        marquer "Rotation des journaux de $service"
+        etat="$(docker inspect -f '{{.HostConfig.LogConfig.Type}} {{index .HostConfig.LogConfig.Config "max-size"}} {{index .HostConfig.LogConfig.Config "max-file"}}' "$id" 2>/dev/null)"
+        STATUT="$etat"
+        [ "$etat" = "json-file 10m 5" ] || ko "journaux « $etat », « json-file 10m 5 » attendu"
+        conclure
+    done
+
     marquer "Worker Celery joint le broker (ping)"
     if ! timeout 90 bash infra/ci/compose.sh exec -T celery-worker celery -A config inspect ping --timeout 10 > "$TMP/corps" 2>&1 \
             || ! grep -q pong "$TMP/corps"; then
