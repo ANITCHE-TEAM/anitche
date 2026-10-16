@@ -8,7 +8,11 @@
 #                    (conteneur ponctuel, avant le démarrage de la pile)
 #   attendre         attend un 200 de Django à travers nginx (120 s au plus)
 #   verifier         routage, statiques, médias, route interne, webhook,
-#                    documentation fermée, conteneurs
+#                    documentation fermée, routes de santé fermées,
+#                    X-Request-ID, conteneurs
+#   resolver         nginx redémarre sans backend-fastapi (502 sur /fast/),
+#                    puis le sert sans rechargement dès que FastAPI revient
+#                    (à lancer en dernier : recrée nginx et FastAPI)
 #
 # Variables : ENV_CI, CI_CERT_DIR, COMPOSE_PROJECT_NAME (voir compose.sh).
 # Les requêtes visent https://anitche.com résolu vers 127.0.0.1, certificat
@@ -252,10 +256,9 @@ except Exception as erreur:
 }
 
 verifier_fastapi() {
-    appel "FastAPI : état du service (préfixe /fast retiré)" GET "$URL/fast/health"
-    statut_attendu 200; corps_attendu '"status": *"ok"'; conclure
-
-    appel "FastAPI : recherche publique" GET "$URL/fast/recherche/produits"
+    # /fast/health est interne (404 à l'extérieur) : le préfixe /fast retiré
+    # est prouvé par la recherche, dont la route est /recherche/produits.
+    appel "FastAPI : recherche publique (préfixe /fast retiré)" GET "$URL/fast/recherche/produits"
     statut_attendu 200; corps_attendu '"count": *0'; conclure
 
     appel "FastAPI : recherche publique, jeton invalide ignoré" GET "$URL/fast/recherche/produits" \
@@ -283,6 +286,57 @@ verifier_webhooks_et_documentation() {
     done
 }
 
+verifier_sante_et_tracabilite() {
+    local chemin rid
+
+    # Les routes de santé sont internes : 404 produit par nginx (son corps
+    # contient « nginx »), jamais le frontend ni Django.
+    for chemin in /health /health/ /fast/health /fast/health/ /fast/healthz; do
+        appel "Route de santé fermée à l'extérieur" GET "$URL$chemin" --path-as-is
+        statut_attendu 404; corps_attendu nginx; conclure
+    done
+
+    # Le healthcheck de nginx écoute sur 127.0.0.1:8081 du conteneur nginx :
+    # un autre conteneur du réseau n'y accède pas (connexion refusée).
+    marquer "/nginx-health injoignable depuis les autres conteneurs"
+    STATUT="$(timeout 60 bash infra/ci/compose.sh exec -T backend-django python -c "
+import urllib.request, urllib.error
+try:
+    print(urllib.request.urlopen('http://nginx:8081/nginx-health', timeout=5).status)
+except urllib.error.HTTPError as erreur:
+    print(erreur.code)
+except OSError:
+    print('refuse')
+" 2>&1 | tail -n 1)"
+    [ "$STATUT" = refuse ] || ko "réponse « $STATUT », connexion refusée attendue"
+    conclure
+
+    # Un identifiant de 32 caractères hexadécimaux par réponse, y compris sur
+    # un 404 produit par nginx.
+    for chemin in /api/catalogue/categories/ /fast/recherche/produits /static/admin/css/base.css \
+                  /media/kyc/ci.txt; do
+        appel "X-Request-ID renvoyé ($chemin)" GET "$URL$chemin"
+        entete_attendu x-request-id '[0-9a-f]{32}'; conclure
+    done
+
+    # Celui qu'envoie le client est écrasé.
+    appel "X-Request-ID du client ignoré" GET "$URL/api/catalogue/categories/" -H "X-Request-ID: forge-par-le-client"
+    entete_attendu x-request-id '[0-9a-f]{32}'
+    ! grep -qi "forge-par-le-client" "$TMP/entetes" || ko "l'identifiant envoyé par le client est renvoyé"
+    conclure
+
+    # Le même identifiant est dans le journal d'accès de nginx et dans celui
+    # de Gunicorn (rid=).
+    appel "X-Request-ID relevé pour les journaux" GET "$URL/api/catalogue/categories/"
+    rid="$(grep -i '^x-request-id:' "$TMP/entetes" | tr -d '\r' | awk '{print $2}')"
+    marquer "X-Request-ID ${rid:-absent} écrit dans les journaux de nginx et de Gunicorn"
+    sleep 2
+    [ -n "$rid" ] || ko "aucun identifiant relevé"
+    compose logs --no-color nginx 2>/dev/null | grep -q "rid=$rid" || ko "absent du journal de nginx"
+    compose logs --no-color backend-django 2>/dev/null | grep -q "rid=$rid" || ko "absent du journal de Gunicorn"
+    conclure
+}
+
 verifier_conteneurs() {
     local service id etat
 
@@ -294,6 +348,35 @@ verifier_conteneurs() {
         [ "$etat" = "true 0" ] || ko "état « $etat », « true 0 » attendu (en marche, 0 redémarrage)"
         conclure
     done
+
+    # Chaque service qui a un healthcheck doit être « healthy » (frontend et
+    # certbot n'en ont pas).
+    for service in db redis backend-django celery-worker celery-beat backend-fastapi nginx; do
+        marquer "Healthcheck de $service"
+        id="$(compose ps -q "$service" 2>/dev/null)"
+        etat="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}sans-healthcheck{{end}}' "$id" 2>/dev/null)"
+        STATUT="$etat"
+        [ "$etat" = "healthy" ] || ko "santé « $etat », « healthy » attendu"
+        conclure
+    done
+
+    marquer "/health/ de Django répond 200 depuis son conteneur (base et Redis)"
+    etat="$(timeout 60 bash infra/ci/compose.sh exec -T backend-django python -c "
+import urllib.request
+print(urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8000/health/', headers={'Host': 'backend-django'}), timeout=5).read().decode())
+" 2>&1 | tail -n 1)"
+    STATUT="$etat"
+    [ "$etat" = '{"status": "ok"}' ] || ko "réponse « $etat », {\"status\": \"ok\"} attendu"
+    conclure
+
+    marquer "/health de FastAPI répond 200 depuis son conteneur (base et Redis)"
+    etat="$(timeout 60 bash infra/ci/compose.sh exec -T backend-fastapi python -c "
+import urllib.request
+print(urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=5).status)
+" 2>&1 | tail -n 1)"
+    STATUT="$etat"
+    [ "$etat" = 200 ] || ko "code « $etat », 200 attendu"
+    conclure
 
     # Rotation des journaux appliquée par Docker à chaque conteneur créé.
     for id in $(compose ps -q 2>/dev/null); do
@@ -320,6 +403,7 @@ verifier() {
     verifier_route_interne
     verifier_fastapi
     verifier_webhooks_et_documentation
+    verifier_sante_et_tracabilite
     verifier_conteneurs
 
     if [ "${#ECHECS[@]}" -gt 0 ]; then
@@ -331,11 +415,69 @@ verifier() {
     echo "✅ Tous les contrôles de la pile de production sont passés."
 }
 
+# --- resolver -----------------------------------------------------------------
+
+# attendre_statut <url> <statut> : attend 60 s au plus ce statut à travers nginx.
+attendre_statut() {
+    local limite=$((SECONDS + 60))
+    while [ "$SECONDS" -lt "$limite" ]; do
+        appel "$3" GET "$1"
+        if [ "$STATUT" = "$2" ]; then return 0; fi
+        sleep 2
+    done
+    return 1
+}
+
+resolver() {
+    local id_nginx demarre_avant demarre_apres
+
+    # FastAPI absent, nginx recréé : sans resolver, nginx refuse de démarrer
+    # (« host not found in upstream »).
+    marquer "nginx démarre sans FastAPI"
+    compose rm -sf backend-fastapi >/dev/null 2>&1 || ko "FastAPI non retiré"
+    if ! compose up -d --no-deps --force-recreate --wait --wait-timeout 60 nginx >/dev/null 2>"$TMP/erreur"; then
+        ko "nginx ne démarre pas sans FastAPI"
+        compose logs --no-color --tail=20 nginx >&2 || true
+        conclure; return
+    fi
+    conclure
+
+    id_nginx="$(compose ps -q nginx)"
+    demarre_avant="$(docker inspect -f '{{.State.StartedAt}}' "$id_nginx")"
+
+    attendre_statut "$URL/fast/recherche/produits" 502 "FastAPI absent : 502 produit par nginx" || true
+    statut_attendu 502; conclure
+
+    appel "Django reste servi pendant l'absence de FastAPI" GET "$URL/api/catalogue/categories/"
+    statut_attendu 200; conclure
+
+    marquer "FastAPI relancé et sain"
+    compose up -d --no-deps --wait --wait-timeout 120 backend-fastapi >/dev/null 2>"$TMP/erreur" || ko "FastAPI ne redevient pas sain"
+    conclure
+
+    # Sans reload ni redémarrage de nginx : la résolution suit le conteneur.
+    if attendre_statut "$URL/fast/recherche/produits" 200 "nginx sert FastAPI relancé, sans rechargement"; then
+        corps_attendu '"count": *0'
+    else
+        ko "statut $STATUT, 200 attendu dans les 60 s"
+    fi
+    conclure
+
+    marquer "nginx n'a ni redémarré ni été rechargé"
+    demarre_apres="$(docker inspect -f '{{.State.StartedAt}}' "$id_nginx")"
+    [ "$demarre_avant" = "$demarre_apres" ] || ko "nginx a redémarré ($demarre_avant puis $demarre_apres)"
+    if compose logs --no-color nginx 2>/dev/null | grep -q "signal process started"; then
+        ko "nginx a reçu un signal de rechargement"
+    fi
+    conclure
+}
+
 case "${1:-}" in
     refus_demarrage) refus_demarrage ;;
     attendre) attendre; exit $? ;;
     verifier) verifier; exit $? ;;
-    *) echo "Usage : smoke_prod.sh refus_demarrage|attendre|verifier" >&2; exit 2 ;;
+    resolver) resolver ;;
+    *) echo "Usage : smoke_prod.sh refus_demarrage|attendre|verifier|resolver" >&2; exit 2 ;;
 esac
 
 if [ "${#ECHECS[@]}" -gt 0 ]; then exit 1; fi

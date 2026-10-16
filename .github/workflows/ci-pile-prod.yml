@@ -123,6 +123,11 @@ jobs:
         timeout-minutes: 8
         run: bash infra/ci/etape.sh "Requêtes à travers nginx" bash infra/ci/smoke_prod.sh verifier
 
+      # En dernier : recrée nginx et FastAPI.
+      - name: nginx démarre sans FastAPI et le sert sans rechargement
+        timeout-minutes: 5
+        run: bash infra/ci/etape.sh "Resolver nginx" bash infra/ci/smoke_prod.sh resolver
+
       # État et journaux de chaque conteneur : aucun secret n'y est écrit par
       # les applications, et le fichier d'environnement n'est jamais affiché.
       - name: Journaux des conteneurs (en cas d'échec)
