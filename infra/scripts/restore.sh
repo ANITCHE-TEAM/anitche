@@ -18,7 +18,10 @@
 # si l'une échoue. Instantanés les plus récents par défaut, sinon ceux
 # affichés par --lister (base et médias de la même nuit).
 #
-# Le service « db » doit tourner (docker compose … up -d --wait db).
+# Le service « db » doit tourner (docker compose … up -d --wait db). Le
+# rôle applicatif anitche_app est créé ou mis à jour d'abord
+# (create_app_role.sh) : la base restaurée et ses objets lui appartiennent,
+# comme ceux de la base vivante.
 
 set -euo pipefail
 
@@ -26,7 +29,7 @@ cd "$(dirname "$0")/../.."   # racine du dépôt
 
 COMPOSE_PROD=infra/docker-compose.prod.yml
 REQUISES=(
-    DB_NAME DB_USER DB_PASSWORD
+    DB_NAME DB_PASSWORD DB_SUPERUSER_PASSWORD
     BACKUP_REPOSITORY BACKUP_PASSWORD BACKUP_S3_ACCESS_KEY_ID BACKUP_S3_SECRET_ACCESS_KEY
 )
 
@@ -76,6 +79,9 @@ if [ "${#manquantes[@]}" -gt 0 ]; then
 fi
 
 compose build --quiet backup
+if [ "$mode" != lister ]; then
+    bash infra/scripts/create_app_role.sh
+fi
 case "$mode" in
     lister)
         compose run --rm --no-deps -T backup instantanes ;;

@@ -155,6 +155,31 @@ if PAIEMENT_FOURNISSEUR == 'geniuspay':
                 f"{_nom} doit commencer par {_prefixe} (GENIUSPAY_ENVIRONNEMENT="
                 f"{GENIUSPAY_ENVIRONNEMENT}) : clés et environnement doivent être cohérents."
             )
+# Redis (broker Celery, cache, compteurs OTP, limites de débit) exige un mot de
+# passe : REDIS_URL et REDIS_CACHE_URL portent REDIS_PASSWORD
+# (redis://:<mot de passe>@redis:6379/<base>, docker-compose.prod.yml).
+# Lettres et chiffres seulement, 32 au moins : inséré tel quel dans l'URL, un
+# « / », « @ » ou « : » la couperait ailleurs que prévu.
+REDIS_MOT_DE_PASSE_LONGUEUR_MINIMALE = 32
+for _nom, _url in (('REDIS_URL', REDIS_URL), ('REDIS_CACHE_URL', REDIS_CACHE_URL)):
+    _parties = urlsplit(_url)
+    try:
+        _port_valide = _parties.port is None or _parties.port > 0
+    except ValueError:
+        _port_valide = False
+    _mot_de_passe = _parties.password or ''
+    if (
+        _parties.scheme not in ('redis', 'rediss') or not _parties.hostname or not _port_valide
+        or len(_mot_de_passe) < REDIS_MOT_DE_PASSE_LONGUEUR_MINIMALE or not _mot_de_passe.isascii()
+        or not _mot_de_passe.isalnum()
+    ):
+        raise ImproperlyConfigured(
+            f"{_nom} doit contenir le mot de passe de Redis (redis://:<REDIS_PASSWORD>@redis:6379/<base>) : "
+            f"REDIS_PASSWORD de {REDIS_MOT_DE_PASSE_LONGUEUR_MINIMALE} caractères au moins, lettres et "
+            "chiffres uniquement. Sans lui, tout conteneur du réseau lit et écrit le broker Celery, le "
+            "cache, les codes OTP en cours et les limites de débit."
+        )
+
 if not BACKEND_BASE_URL.startswith('https://'):
     raise ImproperlyConfigured(
         "BACKEND_BASE_URL doit être l'adresse HTTPS publique de l'API (URL de notification des paiements)."

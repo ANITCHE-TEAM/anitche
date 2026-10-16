@@ -4,12 +4,16 @@
 # production plus infra/ci/docker-compose.ci.yml), à travers nginx.
 #
 # Sous-commandes, à lancer depuis la racine du dépôt :
-#   refus_demarrage  prod.py refuse un fournisseur simulé et un SMTP absent
+#   refus_demarrage  prod.py refuse un fournisseur simulé, un SMTP absent et un
+#                    Redis sans mot de passe
 #                    (conteneur ponctuel, avant le démarrage de la pile)
 #   attendre         attend un 200 de Django à travers nginx (120 s au plus)
 #   verifier         routage, statiques, médias, route interne, webhook,
 #                    documentation fermée, routes de santé fermées,
-#                    X-Request-ID, conteneurs
+#                    X-Request-ID, conteneurs, sécurité (Redis sans mot de
+#                    passe refusé, rôle PostgreSQL non superutilisateur,
+#                    conteneurs sans root)
+#   securite         les seuls contrôles de sécurité de « verifier »
 #   resolver         nginx redémarre sans backend-fastapi (502 sur /fast/),
 #                    puis le sert sans rechargement dès que FastAPI revient
 #                    (à lancer en dernier : recrée nginx et FastAPI)
@@ -112,6 +116,7 @@ refus_demarrage() {
     conclure
     refuser_prod "PAIEMENT_FOURNISSEUR=simule" "PAIEMENT_FOURNISSEUR=simule"
     refuser_prod "un EMAIL_HOST vide" "EMAIL_HOST="
+    refuser_prod "un REDIS_URL sans mot de passe" "REDIS_URL=redis://redis:6379/0"
 }
 
 # --- attendre -----------------------------------------------------------------
@@ -396,6 +401,46 @@ print(urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=5).status)
     conclure
 }
 
+verifier_securite() {
+    local service sortie
+
+    # Sans mot de passe, Redis refuse toute commande. redis-cli tourne dans le
+    # conteneur redis et passe par le réseau (-h redis), REDISCLI_AUTH retiré.
+    marquer "Redis refuse une connexion sans mot de passe (NOAUTH)"
+    sortie="$(timeout 30 bash infra/ci/compose.sh exec -T redis env -u REDISCLI_AUTH redis-cli -h redis ping 2>&1)"
+    STATUT="$sortie"
+    grep -q NOAUTH <<<"$sortie" || ko "réponse « $sortie », NOAUTH attendu"
+    conclure
+
+    marquer "Témoin : Redis répond PONG avec le mot de passe"
+    sortie="$(timeout 30 bash infra/ci/compose.sh exec -T redis redis-cli -h redis ping 2>&1)"
+    STATUT="$sortie"
+    [ "$sortie" = PONG ] || ko "réponse « $sortie », PONG attendu"
+    conclure
+
+    # Django et Celery se connectent avec le rôle applicatif, jamais avec un
+    # superutilisateur.
+    marquer "Django : rôle PostgreSQL anitche_app, non superutilisateur"
+    sortie="$(timeout 90 bash infra/ci/compose.sh exec -T backend-django python manage.py shell -c "
+from django.db import connection
+with connection.cursor() as curseur:
+    curseur.execute('SELECT current_user, rolsuper, rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname = current_user')
+    print(*curseur.fetchone())
+" 2>&1 | tail -n 1)"
+    STATUT="$sortie"
+    [ "$sortie" = "anitche_app False False False" ] \
+        || ko "réponse « $sortie », « anitche_app False False False » attendu (current_user, rolsuper, rolcreatedb, rolcreaterole)"
+    conclure
+
+    for service in backend-django celery-worker celery-beat backend-fastapi; do
+        marquer "Conteneur $service sans root (id -u ≠ 0)"
+        sortie="$(timeout 30 bash infra/ci/compose.sh exec -T "$service" id -u 2>&1 | tail -n 1)"
+        STATUT="$sortie"
+        [[ "$sortie" =~ ^[0-9]+$ && "$sortie" != 0 ]] || ko "id -u « $sortie », un uid non nul attendu"
+        conclure
+    done
+}
+
 verifier() {
     preparer_donnees
     verifier_routage
@@ -405,6 +450,7 @@ verifier() {
     verifier_webhooks_et_documentation
     verifier_sante_et_tracabilite
     verifier_conteneurs
+    verifier_securite
 
     if [ "${#ECHECS[@]}" -gt 0 ]; then
         echo >&2
@@ -476,8 +522,9 @@ case "${1:-}" in
     refus_demarrage) refus_demarrage ;;
     attendre) attendre; exit $? ;;
     verifier) verifier; exit $? ;;
+    securite) verifier_securite ;;
     resolver) resolver ;;
-    *) echo "Usage : smoke_prod.sh refus_demarrage|attendre|verifier|resolver" >&2; exit 2 ;;
+    *) echo "Usage : smoke_prod.sh refus_demarrage|attendre|verifier|securite|resolver" >&2; exit 2 ;;
 esac
 
 if [ "${#ECHECS[@]}" -gt 0 ]; then exit 1; fi

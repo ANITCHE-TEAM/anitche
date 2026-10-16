@@ -8,11 +8,14 @@
 #   2. contrôle des variables (check_prod_env.sh) ;
 #   3. construction des images ;
 #   4. démarrage de db et redis seuls, jusqu'à ce qu'ils soient prêts ;
-#   5. migrations, dans un conteneur ponctuel ;
-#   6. rôle PostgreSQL en lecture seule de FastAPI, recréé à chaque
+#   5. rôle PostgreSQL applicatif anitche_app (infra/postgres/app_role.sql),
+#      propriétaire de la base : les migrations et l'application s'en
+#      servent, jamais du superutilisateur ;
+#   6. migrations, dans un conteneur ponctuel ;
+#   7. rôle PostgreSQL en lecture seule de FastAPI, recréé à chaque
 #      déploiement : ses droits portent sur des tables et des vues créées
 #      par les migrations (infra/postgres/fastapi_readonly.sql) ;
-#   7. démarrage de toute la pile, puis statut.
+#   8. démarrage de toute la pile, puis statut.
 #
 # Usage : ./infra/scripts/deploy.sh
 
@@ -37,6 +40,9 @@ compose build
 
 echo "==> Démarrage de PostgreSQL et Redis"
 compose up -d --wait db redis
+
+echo "==> Rôle PostgreSQL applicatif"
+COMPOSE_FILE="$COMPOSE_PROD" bash infra/scripts/create_app_role.sh
 
 echo "==> Migrations (conteneur ponctuel)"
 compose run --rm backend-django python manage.py migrate

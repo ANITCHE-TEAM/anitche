@@ -1,4 +1,5 @@
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 from decouple import Csv, config
 from celery.schedules import crontab
 
@@ -409,14 +410,16 @@ CELERY_BEAT_SCHEDULE = {
     },
 }
 
-# Cache Redis : même source que Celery (environnement, puis .env), pour que le
-# cache suive le .env quand Django tourne hors Docker. Les compose fixent
-# toujours REDIS_URL.
+# Cache Redis : REDIS_CACHE_URL (base 1), lue comme REDIS_URL dans
+# l'environnement puis le .env. Absente, elle reprend REDIS_URL avec la base 1
+# à la place de son chemin, après découpage de l'URL : identifiants, hôte et
+# paramètres ne sont jamais réécrits. Le compose de production fixe les deux.
 REDIS_URL = config('REDIS_URL', default='redis://localhost:6379/0')
+REDIS_CACHE_URL = config('REDIS_CACHE_URL', default=urlunsplit(urlsplit(REDIS_URL)._replace(path='/1')))
 CACHES = {
     'default': {
         'BACKEND': 'django.core.cache.backends.redis.RedisCache',
-        'LOCATION': REDIS_URL.replace('/0', '/1'),
+        'LOCATION': REDIS_CACHE_URL,
         'TIMEOUT': 300,  # 5 minutes
     }
 }

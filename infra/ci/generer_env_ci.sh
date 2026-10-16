@@ -21,10 +21,12 @@ SECRET_KEY="$(openssl rand -hex 32)"
 # Clé Fernet : 32 octets aléatoires en base64 URL.
 FIELD_ENCRYPTION_KEYS="$(python3 -c 'import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())')"
 DB_PASSWORD="$(openssl rand -hex 16)"
+DB_SUPERUSER_PASSWORD="$(openssl rand -hex 16)"
 FASTAPI_DB_PASSWORD="$(openssl rand -hex 16)"
+REDIS_PASSWORD="$(openssl rand -hex 32)"
 BACKUP_PASSWORD="$(openssl rand -hex 32)"
 
-for valeur in "$SECRET_KEY" "$FIELD_ENCRYPTION_KEYS" "$DB_PASSWORD" "$FASTAPI_DB_PASSWORD" "$BACKUP_PASSWORD"; do
+for valeur in "$SECRET_KEY" "$FIELD_ENCRYPTION_KEYS" "$DB_PASSWORD" "$DB_SUPERUSER_PASSWORD" "$FASTAPI_DB_PASSWORD"               "$REDIS_PASSWORD" "$BACKUP_PASSWORD"; do
     masquer "$valeur"
 done
 
@@ -36,9 +38,10 @@ ALLOWED_HOSTS=anitche.com,www.anitche.com,backend-django
 CORS_ALLOWED_ORIGINS=https://anitche.com
 FRONTEND_BASE_URL=https://anitche.com
 DB_NAME=anitche_ci
-DB_USER=anitche_ci
 DB_PASSWORD=$DB_PASSWORD
+DB_SUPERUSER_PASSWORD=$DB_SUPERUSER_PASSWORD
 FASTAPI_DB_PASSWORD=$FASTAPI_DB_PASSWORD
+REDIS_PASSWORD=$REDIS_PASSWORD
 PUBLIC_BASE_URL=https://anitche.com/fast
 MEDIA_BASE_URL=https://anitche.com/media/
 PAIEMENT_FOURNISSEUR=geniuspay

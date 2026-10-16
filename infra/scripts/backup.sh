@@ -31,7 +31,7 @@ cd "$(dirname "$0")/../.."   # racine du dépôt
 COMPOSE_PROD=infra/docker-compose.prod.yml
 JOURNAL=infra/backups/backup.log
 REQUISES=(
-    DB_NAME DB_USER DB_PASSWORD
+    DB_NAME DB_SUPERUSER_PASSWORD
     BACKUP_REPOSITORY BACKUP_PASSWORD BACKUP_S3_ACCESS_KEY_ID BACKUP_S3_SECRET_ACCESS_KEY
 )
 

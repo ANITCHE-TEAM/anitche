@@ -151,6 +151,20 @@ for valeur in True TRUE 1 yes on "" " " "true " " true" False 0 oui; do
     scenario_refuse "$STAGING" "geniuspay, variable staging « $valeur »" "${GP_SANDBOX[@]}" "$STAGING=$valeur"
 done
 
+echo "==> Redis et PostgreSQL : variantes invalides"
+scenario_refuse REDIS_PASSWORD "REDIS_PASSWORD absente" -REDIS_PASSWORD
+scenario_refuse REDIS_PASSWORD "REDIS_PASSWORD vide" REDIS_PASSWORD=
+scenario_refuse REDIS_PASSWORD "REDIS_PASSWORD de 31 caractères" REDIS_PASSWORD=0123456789abcdef0123456789abcde
+scenario_refuse REDIS_PASSWORD "REDIS_PASSWORD avec « / »" REDIS_PASSWORD=0123456789abcdef/0123456789abcdef
+scenario_refuse REDIS_PASSWORD "REDIS_PASSWORD avec « @ »" REDIS_PASSWORD=0123456789abcdef@0123456789abcdef
+scenario_refuse REDIS_PASSWORD "REDIS_PASSWORD avec « : »" REDIS_PASSWORD=0123456789abcdef:0123456789abcdef
+scenario_refuse REDIS_PASSWORD "REDIS_PASSWORD avec une espace" "REDIS_PASSWORD=0123456789abcdef 0123456789abcdef"
+scenario_refuse DB_SUPERUSER_PASSWORD "DB_SUPERUSER_PASSWORD absente" -DB_SUPERUSER_PASSWORD
+scenario_refuse DB_SUPERUSER_PASSWORD "DB_SUPERUSER_PASSWORD courte" DB_SUPERUSER_PASSWORD=court
+scenario_refuse DB_SUPERUSER_PASSWORD "DB_SUPERUSER_PASSWORD « postgres »" DB_SUPERUSER_PASSWORD=postgres
+scenario_refuse DB_SUPERUSER_PASSWORD "DB_SUPERUSER_PASSWORD égal à DB_PASSWORD" DB_SUPERUSER_PASSWORD=identique12345 DB_PASSWORD=identique12345
+scenario_refuse DB_PASSWORD "DB_PASSWORD égal à FASTAPI_DB_PASSWORD" DB_PASSWORD=identique12345 FASTAPI_DB_PASSWORD=identique12345
+
 if [ "$ECHECS" -gt 0 ]; then
     echo "❌ $ECHECS variante(s) mal gérée(s) par check_prod_env.sh." >&2
     exit 1

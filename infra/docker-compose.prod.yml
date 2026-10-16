@@ -52,11 +52,18 @@ x-env-django: &env-django
   # URL de vérification des passeports QR (apps.passeport_qr).
   FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-https://anitche.com}
   DB_NAME: ${DB_NAME}
-  DB_USER: ${DB_USER}
+  # Rôle applicatif, ni superutilisateur ni CREATEDB/CREATEROLE, propriétaire
+  # de la base (infra/scripts/create_app_role.sh, lancé avant les
+  # migrations). Le superutilisateur ne sert qu'aux scripts d'infra/scripts/.
+  DB_USER: anitche_app
   DB_PASSWORD: ${DB_PASSWORD}
   DB_HOST: db
   DB_PORT: 5432
-  REDIS_URL: redis://redis:6379/0
+  # Base 0 : Celery (broker et résultats) ; base 1 : cache Django. Le mot de
+  # passe de Redis (lettres et chiffres, check_prod_env.sh) est inséré tel
+  # quel dans l'URL ; prod.py refuse une URL sans lui.
+  REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+  REDIS_CACHE_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
   # Nombre de workers Gunicorn (backend-django/gunicorn.conf.py) ; seul
   # backend-django le lit, il reste ici pour garder les trois environnements
   # identiques.
@@ -69,12 +76,15 @@ services:
     logging: *logging
     environment:
       POSTGRES_DB: ${DB_NAME}
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      # Superutilisateur : initialisation de la base, rôles (create_app_role.sh,
+      # create_fastapi_readonly_role.sh) et sauvegardes. Ni Django, ni Celery,
+      # ni FastAPI ne le reçoivent.
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_SUPERUSER_PASSWORD}
     volumes:
       - anitche_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER}"]
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -83,6 +93,15 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
     logging: *logging
+    # requirepass dans un fichier de configuration monté (configs, en fin de
+    # fichier) : le mot de passe n'apparaît ni dans la commande ni dans
+    # « docker inspect ». Le healthcheck s'authentifie par REDISCLI_AUTH.
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    configs:
+      - source: redis_conf
+        target: /usr/local/etc/redis/redis.conf
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -188,8 +207,9 @@ services:
       # Rôle en lecture seule, jamais DB_USER. FASTAPI_DB_PASSWORD est inséré
       # tel quel dans l'URL : caractères alphanumériques uniquement.
       DATABASE_URL: postgresql://anitche_fastapi_ro:${FASTAPI_DB_PASSWORD}@db:5432/${DB_NAME}
-      # Base 2 réservée à FastAPI (0 : Celery, 1 : cache Django).
-      REDIS_URL: redis://redis:6379/2
+      # Base 2 réservée à FastAPI (0 : Celery, 1 : cache Django), même mot de
+      # passe que Django.
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/2
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
       FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-https://anitche.com}
       # Un seul proxy de confiance : nginx (comme NUM_PROXIES = 1 côté Django).
@@ -292,14 +312,22 @@ services:
       RESTIC_CACHE_DIR: /cache
       PGHOST: db
       DB_NAME: ${DB_NAME}
-      DB_USER: ${DB_USER}
-      PGPASSWORD: ${DB_PASSWORD}
+      # Superutilisateur : pg_dump lit tout, la restauration crée la base
+      # cible (propriétaire et objets : anitche_app, infra/backup/entrypoint.sh).
+      DB_USER: postgres
+      PGPASSWORD: ${DB_SUPERUSER_PASSWORD}
     volumes:
       # Lecture seule : la sauvegarde ne modifie jamais les médias.
       - anitche_media:/sauvegarde/media:ro
       # Cache de restic (index et métadonnées du dépôt, chiffrés comme
       # lui) : évite de les retélécharger chaque nuit.
       - anitche_backup_cache:/cache
+
+# Configuration de Redis, montée en lecture seule dans le conteneur redis.
+configs:
+  redis_conf:
+    content: |
+      requirepass ${REDIS_PASSWORD}
 
 volumes:
   anitche_pgdata:
