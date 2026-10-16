@@ -109,6 +109,16 @@ services:
       # STATIC_ROOT = /app/staticfiles : collectstatic y écrit au démarrage,
       # nginx le sert sous /static/ (lecture seule).
       - anitche_static:/app/staticfiles
+    # /health/ (apps/core/sante.py) : base et Redis, appelé en HTTP sur
+    # 127.0.0.1 avec le nom de service comme Host (présent dans
+    # ALLOWED_HOSTS). start_period couvre migrate et collectstatic, lancés par
+    # la commande avant Gunicorn.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8000/health/', headers={'Host': 'backend-django'}), timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
     depends_on:
       db:
         condition: service_healthy
@@ -122,6 +132,14 @@ services:
     logging: *logging
     command: celery -A config worker -l info
     environment: *env-django
+    # Ping du worker lui-même (-d celery@<hostname>) : il prouve que le worker
+    # joint le broker et répond, pas seulement que le processus existe.
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A config inspect ping -d celery@$$HOSTNAME --timeout 10"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 40s
     depends_on:
       db:
         condition: service_healthy
@@ -135,6 +153,15 @@ services:
     logging: *logging
     command: celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
     environment: *env-django
+    # Beat n'a ni port ni commande d'inspection : le contrôle vérifie que son
+    # processus (PID 1 du conteneur) tourne toujours. Un beat bloqué sans
+    # sortir n'est pas détecté.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0 if b'beat' in open('/proc/1/cmdline', 'rb').read() else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     depends_on:
       db:
         condition: service_healthy
@@ -212,6 +239,13 @@ services:
       # en lecture seule : nginx ne peut ni modifier ni ajouter un fichier.
       - anitche_static:/srv/static:ro
       - anitche_media:/srv/media:ro
+    # /nginx-health : serveur sur 127.0.0.1:8081 du conteneur (nginx.conf).
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/nginx-health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     depends_on:
       - frontend
       - backend-django

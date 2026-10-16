@@ -3,7 +3,10 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import path, include
 
+from apps.core.sante import sante
+
 urlpatterns = [
+    path('health/', sante, name='sante'),
     path('admin/', admin.site.urls),
     path('api/utilisateurs/', include('apps.utilisateurs.urls')),
     path('api/vendeurs/', include('apps.vendeurs.urls')),
