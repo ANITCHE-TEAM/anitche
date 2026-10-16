@@ -263,15 +263,17 @@ SERVER_EMAIL = DEFAULT_FROM_EMAIL
 CORS_ALLOW_CREDENTIALS = False
 
 SECURE_SSL_REDIRECT = True
-# Seule exception à la redirection HTTPS : la route interne de vérification
+# Exceptions à la redirection HTTPS : la route interne de vérification
 # du jeton, que FastAPI appelle directement sur le réseau Docker
-# (http://backend-django:8000), sans passer par nginx ni TLS. Sans cette
-# ligne, l'appel reçoit un 301 vers https et l'authentification FastAPI
-# échoue. SecurityMiddleware retire le « / » initial du chemin avant de
-# tester ces motifs, d'où « ^api/ » et non « ^/api/ ». Depuis Internet, nginx
-# répond 404 sur ce chemin sans le transmettre à Django (location
-# /api/utilisateurs/jeton/verification dans infra/nginx/nginx.conf).
-SECURE_REDIRECT_EXEMPT = [r'^api/utilisateurs/jeton/verification/$']
+# (http://backend-django:8000), sans passer par nginx ni TLS, et /health/,
+# que le healthcheck du conteneur appelle en HTTP sur 127.0.0.1. Sans ces
+# motifs, l'appel reçoit un 301 vers https et l'authentification FastAPI
+# échoue (le healthcheck aussi). SecurityMiddleware retire le « / » initial
+# du chemin avant de tester ces motifs, d'où « ^api/ » et non « ^/api/ ».
+# Depuis Internet, nginx répond 404 sur ces deux chemins sans les transmettre
+# à Django (locations /api/utilisateurs/jeton/verification et /health/ dans
+# infra/nginx/nginx.conf).
+SECURE_REDIRECT_EXEMPT = [r'^api/utilisateurs/jeton/verification/$', r'^health/$']
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True
 

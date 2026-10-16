@@ -25,7 +25,8 @@ worker_tmp_dir = "/dev/shm"
 
 # Journaux sur la sortie standard et d'erreur, lus par Docker. Le chemin est
 # journalisé sans la chaîne de requête, qui peut contenir un jeton, ni le
-# référent.
+# référent. rid= : X-Request-ID posé par nginx, le même que dans son journal
+# (« - » pour un appel direct, comme celui du healthcheck).
 accesslog = "-"
 errorlog = "-"
-access_log_format = '%(h)s %(t)s "%(m)s %(U)s %(H)s" %(s)s %(b)s %(L)s "%(a)s"'
+access_log_format = '%(h)s %(t)s "%(m)s %(U)s %(H)s" %(s)s %(b)s %(L)s "%(a)s" rid=%({x-request-id}i)s'
