@@ -75,9 +75,17 @@ jobs:
         timeout-minutes: 2
         run: bash infra/ci/etape.sh "docker compose config" bash infra/ci/compose.sh config -q
 
+      - name: Hygiène du compose (avertissements, environnement, journaux, modes)
+        timeout-minutes: 2
+        run: bash infra/ci/etape.sh "Hygiène du compose" bash infra/ci/verifier_compose.sh statique
+
       - name: Construire les images
         timeout-minutes: 15
         run: bash infra/ci/etape.sh "Construction des images" timeout 840 bash infra/ci/compose.sh build
+
+      - name: Réglages de Gunicorn
+        timeout-minutes: 3
+        run: bash infra/ci/etape.sh "Réglages de Gunicorn" bash infra/ci/verifier_compose.sh gunicorn
 
       - name: prod.py refuse un environnement dangereux
         timeout-minutes: 5

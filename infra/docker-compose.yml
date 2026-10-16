@@ -1,5 +1,3 @@
-version: "3.9"
-
 # Environnement de DÉVELOPPEMENT local.
 # Lancer depuis la racine du repo : docker compose -f infra/docker-compose.yml up
 #

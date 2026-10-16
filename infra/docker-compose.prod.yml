@@ -1,5 +1,3 @@
-version: "3.9"
-
 # Environnement de PRODUCTION.
 # Lancer depuis la racine du repo :
 #   docker compose -f infra/docker-compose.prod.yml up -d --build
@@ -11,10 +9,64 @@ version: "3.9"
 #   - Django tourne avec Gunicorn, pas le serveur de dev
 #   - les secrets viennent d'un fichier .env (jamais commité), pas de valeurs par défaut
 
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+# Environnement commun à Django, au worker et à beat : les trois chargent
+# config.settings.prod, qui refuse de démarrer si une variable manque. Une
+# variable ajoutée ici arrive aux trois services.
+x-env-django: &env-django
+  DJANGO_SETTINGS_MODULE: config.settings.prod
+  SECRET_KEY: ${SECRET_KEY}
+  # Clés de chiffrement des données KYC (apps.core.fields), clé active en
+  # premier. Sans elles, prod.py refuse de démarrer (Django et Celery).
+  FIELD_ENCRYPTION_KEYS: ${FIELD_ENCRYPTION_KEYS}
+  # Paiements (apps.paiements) : fournisseur et clés GeniusPay. Sans
+  # elles, prod.py refuse de démarrer (Django et Celery). La variable
+  # de staging absente vaut « false » ; vide, elle reste vide et prod.py
+  # refuse de démarrer (jamais de conversion tolérante).
+  PAIEMENT_FOURNISSEUR: ${PAIEMENT_FOURNISSEUR}
+  GENIUSPAY_API_KEY: ${GENIUSPAY_API_KEY:-}
+  GENIUSPAY_API_SECRET: ${GENIUSPAY_API_SECRET:-}
+  GENIUSPAY_WEBHOOK_SECRET: ${GENIUSPAY_WEBHOOK_SECRET:-}
+  GENIUSPAY_ENVIRONNEMENT: ${GENIUSPAY_ENVIRONNEMENT:-}
+  ANITCHE_STAGING_SANDBOX_PAIEMENT: ${ANITCHE_STAGING_SANDBOX_PAIEMENT-false}
+  BACKEND_BASE_URL: ${BACKEND_BASE_URL}
+  ALLOWED_HOSTS: ${ALLOWED_HOSTS}
+  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+  # Emails (codes OTP, notifications) : serveur SMTP du fournisseur et
+  # expéditeur @anitche.com. Sans eux, prod.py refuse de démarrer
+  # (Django et Celery).
+  EMAIL_BACKEND: ${EMAIL_BACKEND}
+  EMAIL_HOST: ${EMAIL_HOST}
+  EMAIL_PORT: ${EMAIL_PORT:-587}
+  EMAIL_USE_TLS: ${EMAIL_USE_TLS:-True}
+  EMAIL_USE_SSL: ${EMAIL_USE_SSL:-False}
+  EMAIL_TIMEOUT: ${EMAIL_TIMEOUT:-10}
+  EMAIL_HOST_USER: ${EMAIL_HOST_USER}
+  EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD}
+  DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL}
+  # URL de vérification des passeports QR (apps.passeport_qr).
+  FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-https://anitche.com}
+  DB_NAME: ${DB_NAME}
+  DB_USER: ${DB_USER}
+  DB_PASSWORD: ${DB_PASSWORD}
+  DB_HOST: db
+  DB_PORT: 5432
+  REDIS_URL: redis://redis:6379/0
+  # Nombre de workers Gunicorn (backend-django/gunicorn.conf.py) ; seul
+  # backend-django le lit, il reste ici pour garder les trois environnements
+  # identiques.
+  GUNICORN_WORKERS: ${GUNICORN_WORKERS:-3}
+
 services:
   db:
     image: postgres:16-alpine
     restart: unless-stopped
+    logging: *logging
     environment:
       POSTGRES_DB: ${DB_NAME}
       POSTGRES_USER: ${DB_USER}
@@ -30,6 +82,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    logging: *logging
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -40,46 +93,9 @@ services:
     build:
       context: ../backend-django
     restart: unless-stopped
-    command: sh -c "python manage.py migrate && python manage.py collectstatic --noinput && gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3"
-    environment:
-      DJANGO_SETTINGS_MODULE: config.settings.prod
-      SECRET_KEY: ${SECRET_KEY}
-      # Clés de chiffrement des données KYC (apps.core.fields), clé active en
-      # premier. Sans elles, prod.py refuse de démarrer (Django et Celery).
-      FIELD_ENCRYPTION_KEYS: ${FIELD_ENCRYPTION_KEYS}
-      # Paiements (apps.paiements) : fournisseur et clés GeniusPay. Sans
-      # elles, prod.py refuse de démarrer (Django et Celery). La variable
-      # de staging absente vaut « false » ; vide, elle reste vide et prod.py
-      # refuse de démarrer (jamais de conversion tolérante).
-      PAIEMENT_FOURNISSEUR: ${PAIEMENT_FOURNISSEUR}
-      GENIUSPAY_API_KEY: ${GENIUSPAY_API_KEY:-}
-      GENIUSPAY_API_SECRET: ${GENIUSPAY_API_SECRET:-}
-      GENIUSPAY_WEBHOOK_SECRET: ${GENIUSPAY_WEBHOOK_SECRET:-}
-      GENIUSPAY_ENVIRONNEMENT: ${GENIUSPAY_ENVIRONNEMENT:-}
-      ANITCHE_STAGING_SANDBOX_PAIEMENT: ${ANITCHE_STAGING_SANDBOX_PAIEMENT-false}
-      BACKEND_BASE_URL: ${BACKEND_BASE_URL}
-      ALLOWED_HOSTS: ${ALLOWED_HOSTS}
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
-      # Emails (codes OTP, notifications) : serveur SMTP du fournisseur et
-      # expéditeur @anitche.com. Sans eux, prod.py refuse de démarrer
-      # (Django et Celery).
-      EMAIL_BACKEND: ${EMAIL_BACKEND}
-      EMAIL_HOST: ${EMAIL_HOST}
-      EMAIL_PORT: ${EMAIL_PORT:-587}
-      EMAIL_USE_TLS: ${EMAIL_USE_TLS:-True}
-      EMAIL_USE_SSL: ${EMAIL_USE_SSL:-False}
-      EMAIL_TIMEOUT: ${EMAIL_TIMEOUT:-10}
-      EMAIL_HOST_USER: ${EMAIL_HOST_USER}
-      EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD}
-      DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL}
-      # URL de vérification des passeports QR (apps.passeport_qr).
-      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-https://anitche.com}
-      DB_NAME: ${DB_NAME}
-      DB_USER: ${DB_USER}
-      DB_PASSWORD: ${DB_PASSWORD}
-      DB_HOST: db
-      DB_PORT: 5432
-      REDIS_URL: redis://redis:6379/0
+    logging: *logging
+    command: sh -c "python manage.py migrate && python manage.py collectstatic --noinput && gunicorn config.wsgi:application -c gunicorn.conf.py"
+    environment: *env-django
     volumes:
       # MEDIA_ROOT (config/settings/base.py) = BASE_DIR/media = /app/media
       # dans ce conteneur (WORKDIR /app, voir Dockerfile). Sans volume
@@ -103,44 +119,9 @@ services:
     build:
       context: ../backend-django
     restart: unless-stopped
+    logging: *logging
     command: celery -A config worker -l info
-    environment:
-      DJANGO_SETTINGS_MODULE: config.settings.prod
-      SECRET_KEY: ${SECRET_KEY}
-      # Clés de chiffrement des données KYC (apps.core.fields), clé active en
-      # premier. Sans elles, prod.py refuse de démarrer (Django et Celery).
-      FIELD_ENCRYPTION_KEYS: ${FIELD_ENCRYPTION_KEYS}
-      # Paiements (apps.paiements) : fournisseur et clés GeniusPay. Sans
-      # elles, prod.py refuse de démarrer (Django et Celery). La variable
-      # de staging absente vaut « false » ; vide, elle reste vide et prod.py
-      # refuse de démarrer (jamais de conversion tolérante).
-      PAIEMENT_FOURNISSEUR: ${PAIEMENT_FOURNISSEUR}
-      GENIUSPAY_API_KEY: ${GENIUSPAY_API_KEY:-}
-      GENIUSPAY_API_SECRET: ${GENIUSPAY_API_SECRET:-}
-      GENIUSPAY_WEBHOOK_SECRET: ${GENIUSPAY_WEBHOOK_SECRET:-}
-      GENIUSPAY_ENVIRONNEMENT: ${GENIUSPAY_ENVIRONNEMENT:-}
-      ANITCHE_STAGING_SANDBOX_PAIEMENT: ${ANITCHE_STAGING_SANDBOX_PAIEMENT-false}
-      BACKEND_BASE_URL: ${BACKEND_BASE_URL}
-      ALLOWED_HOSTS: ${ALLOWED_HOSTS}
-      # Inutile au worker, mais prod.py refuse de démarrer sans elle.
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
-      # Emails (codes OTP, notifications) : envoyés par ce worker. Sans eux,
-      # prod.py refuse de démarrer (Django et Celery).
-      EMAIL_BACKEND: ${EMAIL_BACKEND}
-      EMAIL_HOST: ${EMAIL_HOST}
-      EMAIL_PORT: ${EMAIL_PORT:-587}
-      EMAIL_USE_TLS: ${EMAIL_USE_TLS:-True}
-      EMAIL_USE_SSL: ${EMAIL_USE_SSL:-False}
-      EMAIL_TIMEOUT: ${EMAIL_TIMEOUT:-10}
-      EMAIL_HOST_USER: ${EMAIL_HOST_USER}
-      EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD}
-      DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL}
-      DB_NAME: ${DB_NAME}
-      DB_USER: ${DB_USER}
-      DB_PASSWORD: ${DB_PASSWORD}
-      DB_HOST: db
-      DB_PORT: 5432
-      REDIS_URL: redis://redis:6379/0
+    environment: *env-django
     depends_on:
       db:
         condition: service_healthy
@@ -151,44 +132,9 @@ services:
     build:
       context: ../backend-django
     restart: unless-stopped
+    logging: *logging
     command: celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
-    environment:
-      DJANGO_SETTINGS_MODULE: config.settings.prod
-      SECRET_KEY: ${SECRET_KEY}
-      # Clés de chiffrement des données KYC (apps.core.fields), clé active en
-      # premier. Sans elles, prod.py refuse de démarrer (Django et Celery).
-      FIELD_ENCRYPTION_KEYS: ${FIELD_ENCRYPTION_KEYS}
-      # Paiements (apps.paiements) : fournisseur et clés GeniusPay. Sans
-      # elles, prod.py refuse de démarrer (Django et Celery). La variable
-      # de staging absente vaut « false » ; vide, elle reste vide et prod.py
-      # refuse de démarrer (jamais de conversion tolérante).
-      PAIEMENT_FOURNISSEUR: ${PAIEMENT_FOURNISSEUR}
-      GENIUSPAY_API_KEY: ${GENIUSPAY_API_KEY:-}
-      GENIUSPAY_API_SECRET: ${GENIUSPAY_API_SECRET:-}
-      GENIUSPAY_WEBHOOK_SECRET: ${GENIUSPAY_WEBHOOK_SECRET:-}
-      GENIUSPAY_ENVIRONNEMENT: ${GENIUSPAY_ENVIRONNEMENT:-}
-      ANITCHE_STAGING_SANDBOX_PAIEMENT: ${ANITCHE_STAGING_SANDBOX_PAIEMENT-false}
-      BACKEND_BASE_URL: ${BACKEND_BASE_URL}
-      ALLOWED_HOSTS: ${ALLOWED_HOSTS}
-      # Inutile à beat, mais prod.py refuse de démarrer sans elle.
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
-      # Emails : beat n'en envoie aucun, mais charge prod.py, qui refuse de
-      # démarrer sans eux (Django et Celery).
-      EMAIL_BACKEND: ${EMAIL_BACKEND}
-      EMAIL_HOST: ${EMAIL_HOST}
-      EMAIL_PORT: ${EMAIL_PORT:-587}
-      EMAIL_USE_TLS: ${EMAIL_USE_TLS:-True}
-      EMAIL_USE_SSL: ${EMAIL_USE_SSL:-False}
-      EMAIL_TIMEOUT: ${EMAIL_TIMEOUT:-10}
-      EMAIL_HOST_USER: ${EMAIL_HOST_USER}
-      EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD}
-      DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL}
-      DB_NAME: ${DB_NAME}
-      DB_USER: ${DB_USER}
-      DB_PASSWORD: ${DB_PASSWORD}
-      DB_HOST: db
-      DB_PORT: 5432
-      REDIS_URL: redis://redis:6379/0
+    environment: *env-django
     depends_on:
       db:
         condition: service_healthy
@@ -199,6 +145,7 @@ services:
     build:
       context: ../backend-fastapi
     restart: unless-stopped
+    logging: *logging
     # --no-proxy-headers : l'IP du client est lue par app/core/network.py
     # (TRUSTED_PROXY_COUNT). --no-access-log : journal d'accès de l'app, sans
     # chaîne de requête. Plusieurs workers : aucun état en mémoire (Redis).
@@ -246,10 +193,12 @@ services:
       context: ../frontend
       dockerfile: Dockerfile.prod
     restart: unless-stopped
+    logging: *logging
 
   nginx:
     image: nginx:alpine
     restart: unless-stopped
+    logging: *logging
     ports:
       - "80:80"
       - "443:443"
@@ -276,6 +225,7 @@ services:
   certbot:
     image: certbot/certbot
     restart: unless-stopped
+    logging: *logging
     volumes:
       - certbot_conf:/etc/letsencrypt
       - certbot_www:/var/www/certbot
@@ -297,6 +247,7 @@ services:
     build:
       context: ./backup
     profiles: ["backup"]
+    logging: *logging
     environment:
       RESTIC_REPOSITORY: ${BACKUP_REPOSITORY}
       RESTIC_PASSWORD: ${BACKUP_PASSWORD}

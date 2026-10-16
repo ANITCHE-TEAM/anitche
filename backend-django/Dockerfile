@@ -20,4 +20,4 @@ EXPOSE 8000
 
 # En dev, docker-compose écrase cette commande par "runserver".
 # En prod, docker-compose.prod.yml utilise celle-ci (gunicorn + réglages prod).
-CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "3"]
+CMD ["gunicorn", "config.wsgi:application", "-c", "gunicorn.conf.py"]
