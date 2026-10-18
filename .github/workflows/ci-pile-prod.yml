@@ -2,21 +2,22 @@ name: CI Pile prod
 
 # Démarre la vraie pile de production (infra/docker-compose.prod.yml) sur le
 # runner et vérifie, par des requêtes à travers nginx, le routage, les
-# statiques et médias, la route interne, les webhooks, la documentation
-# fermée, le refus de démarrer de prod.py, le durcissement (Redis sans mot
-# de passe refusé, rôle PostgreSQL non superutilisateur, conteneurs sans
-# root), /admin/ fermé hors ADMIN_ALLOWED_CIDRS, les Host et SNI inconnus
-# refusés, le rendu de nginx.conf pour un autre domaine, la sauvegarde avant
-# migration (migrer.sh) et le certificat renouvelé servi sans intervention
-# (infra/ci/smoke_prod.sh).
+# statiques et médias, les quatre portails (une image chacune, sur leur
+# sous-domaine : page, URL profonde, cache, CSP, API et médias sur la même
+# origine), la route interne, les webhooks, la documentation fermée, le refus
+# de démarrer de prod.py, le durcissement (Redis sans mot de passe refusé, rôle
+# PostgreSQL non superutilisateur, conteneurs sans root), /admin/ fermé hors
+# ADMIN_ALLOWED_CIDRS, les Host et SNI inconnus refusés, le rendu de nginx.conf
+# pour un autre domaine, la sauvegarde avant migration (migrer.sh) et le
+# certificat renouvelé servi sans intervention (infra/ci/smoke_prod.sh).
 #
 # Toute la pile tourne sur DOMAIN=staging.exemple.test : aucun nom de
 # domaine n'est écrit en dur dans nginx.conf.
 #
+# Les images des portails sont celles de la production (frontend/Dockerfile.prod,
+# une par portail) ; lint, types et tests du frontend relèvent de ci-frontend.yml.
+#
 # Ce que ce job ne teste pas :
-#   - frontend/Dockerfile.prod : le frontend est remplacé par une page statique
-#     (infra/ci/docker-compose.ci.yml) ; le bundle est construit par
-#     ci-frontend.yml ;
 #   - Let's Encrypt, Cloudflare, SMTP, GeniusPay et S3 : le certificat est
 #     autosigné, les fournisseurs sont factices, la sauvegarde avant
 #     migration va dans un dépôt restic local (infra/ci/docker-compose.ci.yml).
@@ -29,12 +30,14 @@ on:
       - "infra/**"
       - "backend-django/**"
       - "backend-fastapi/**"
+      - "frontend/**"
       - ".github/workflows/ci-pile-prod.yml"
   pull_request:
     paths:
       - "infra/**"
       - "backend-django/**"
       - "backend-fastapi/**"
+      - "frontend/**"
       - ".github/workflows/ci-pile-prod.yml"
   workflow_dispatch:
 

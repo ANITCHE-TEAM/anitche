@@ -171,7 +171,10 @@ scenario_accepte "ADMIN_ALLOWED_CIDRS absente" -ADMIN_ALLOWED_CIDRS
 scenario_accepte "ADMIN_ALLOWED_CIDRS : IPv4, IPv6, avec et sans préfixe" \
     "ADMIN_ALLOWED_CIDRS=203.0.113.7, 198.51.100.0/24,2001:db8::/48,2001:db8::1"
 scenario_accepte "sous-domaines des portails explicites" \
-    DOMAIN_VENDEUR=vendeurs.staging.exemple.test DOMAIN_LIVREUR=livraison.exemple.test DOMAIN_ADMIN=gestion.exemple.test
+    DOMAIN_VENDEUR=vendeurs.staging.exemple.test DOMAIN_LIVREUR=livraison.exemple.test DOMAIN_ADMIN=gestion.exemple.test \
+    ALLOWED_HOSTS=staging.exemple.test,vendeurs.staging.exemple.test,livraison.exemple.test,gestion.exemple.test,backend-django
+scenario_accepte "sous-domaines couverts par un joker de ALLOWED_HOSTS (.domaine)" \
+    ALLOWED_HOSTS=.staging.exemple.test,backend-django
 scenario_accepte "NGINX_RELOAD_INTERVAL=12h" NGINX_RELOAD_INTERVAL=12h
 
 echo "==> Domaines et nginx : variantes invalides"
@@ -184,6 +187,9 @@ scenario_refuse DOMAIN "DOMAIN sans point" DOMAIN=localhost
 scenario_refuse DOMAIN "DOMAIN avec « ; » (injection dans nginx)" "DOMAIN=exemple.test;return"
 scenario_refuse DOMAIN "DOMAIN absent de ALLOWED_HOSTS" DOMAIN=autre.exemple.test
 scenario_refuse DOMAIN_VENDEUR "DOMAIN_VENDEUR avec espace" "DOMAIN_VENDEUR=vendeur exemple.test"
+scenario_refuse DOMAIN_VENDEUR "sous-domaine vendeur absent de ALLOWED_HOSTS" \
+    ALLOWED_HOSTS=staging.exemple.test,www.staging.exemple.test,livreur.staging.exemple.test,admin.staging.exemple.test,backend-django
+scenario_refuse DOMAIN_ADMIN "sous-domaine admin explicite absent de ALLOWED_HOSTS" DOMAIN_ADMIN=gestion.staging.exemple.test
 scenario_refuse DOMAIN_ADMIN "DOMAIN_ADMIN avec schéma" DOMAIN_ADMIN=https://admin.exemple.test
 for valeur in all 0.0.0.0/0 ::/0 "203.0.113.7; allow all" 203.0.113 256.1.1.1 203.0.113.0/33 2001:db8::/129 "*"; do
     scenario_refuse ADMIN_ALLOWED_CIDRS "ADMIN_ALLOWED_CIDRS « $valeur »" "ADMIN_ALLOWED_CIDRS=$valeur"
