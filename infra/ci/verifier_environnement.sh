@@ -165,6 +165,33 @@ scenario_refuse DB_SUPERUSER_PASSWORD "DB_SUPERUSER_PASSWORD « postgres »" DB_
 scenario_refuse DB_SUPERUSER_PASSWORD "DB_SUPERUSER_PASSWORD égal à DB_PASSWORD" DB_SUPERUSER_PASSWORD=identique12345 DB_PASSWORD=identique12345
 scenario_refuse DB_PASSWORD "DB_PASSWORD égal à FASTAPI_DB_PASSWORD" DB_PASSWORD=identique12345 FASTAPI_DB_PASSWORD=identique12345
 
+echo "==> Domaines et nginx : configurations valides"
+scenario_accepte "ADMIN_ALLOWED_CIDRS vide (/admin/ fermé à tous)" ADMIN_ALLOWED_CIDRS=
+scenario_accepte "ADMIN_ALLOWED_CIDRS absente" -ADMIN_ALLOWED_CIDRS
+scenario_accepte "ADMIN_ALLOWED_CIDRS : IPv4, IPv6, avec et sans préfixe" \
+    "ADMIN_ALLOWED_CIDRS=203.0.113.7, 198.51.100.0/24,2001:db8::/48,2001:db8::1"
+scenario_accepte "sous-domaines des portails explicites" \
+    DOMAIN_VENDEUR=vendeurs.staging.exemple.test DOMAIN_LIVREUR=livraison.exemple.test DOMAIN_ADMIN=gestion.exemple.test
+scenario_accepte "NGINX_RELOAD_INTERVAL=12h" NGINX_RELOAD_INTERVAL=12h
+
+echo "==> Domaines et nginx : variantes invalides"
+scenario_refuse DOMAIN "DOMAIN absente" -DOMAIN
+scenario_refuse DOMAIN "DOMAIN avec schéma" DOMAIN=https://staging.exemple.test
+scenario_refuse DOMAIN "DOMAIN avec « / » final" DOMAIN=staging.exemple.test/
+scenario_refuse DOMAIN "DOMAIN avec port" DOMAIN=staging.exemple.test:443
+scenario_refuse DOMAIN "DOMAIN en majuscules" DOMAIN=Staging.Exemple.test
+scenario_refuse DOMAIN "DOMAIN sans point" DOMAIN=localhost
+scenario_refuse DOMAIN "DOMAIN avec « ; » (injection dans nginx)" "DOMAIN=exemple.test;return"
+scenario_refuse DOMAIN "DOMAIN absent de ALLOWED_HOSTS" DOMAIN=autre.exemple.test
+scenario_refuse DOMAIN_VENDEUR "DOMAIN_VENDEUR avec espace" "DOMAIN_VENDEUR=vendeur exemple.test"
+scenario_refuse DOMAIN_ADMIN "DOMAIN_ADMIN avec schéma" DOMAIN_ADMIN=https://admin.exemple.test
+for valeur in all 0.0.0.0/0 ::/0 "203.0.113.7; allow all" 203.0.113 256.1.1.1 203.0.113.0/33 2001:db8::/129 "*"; do
+    scenario_refuse ADMIN_ALLOWED_CIDRS "ADMIN_ALLOWED_CIDRS « $valeur »" "ADMIN_ALLOWED_CIDRS=$valeur"
+done
+for valeur in 0 " 6h" "6 h" 6heures -1h 1.5h; do
+    scenario_refuse NGINX_RELOAD_INTERVAL "NGINX_RELOAD_INTERVAL « $valeur »" "NGINX_RELOAD_INTERVAL=$valeur"
+done
+
 if [ "$ECHECS" -gt 0 ]; then
     echo "❌ $ECHECS variante(s) mal gérée(s) par check_prod_env.sh." >&2
     exit 1

@@ -11,6 +11,8 @@
 #   - infra/postgres/app_role.sql : mot de passe du rôle applicatif ;
 #   - infra/scripts/backup.sh : dépôt de sauvegarde hors du serveur, mot de
 #     passe du dépôt ;
+#   - le conteneur nginx (infra/nginx/entrypoint.d/) : domaines, adresses
+#     autorisées sur /admin/, intervalle de rechargement ;
 # plus les valeurs de infra/.env.example laissées telles quelles.
 # Affiche toutes les erreurs, puis sort en 1. N'affiche aucune valeur : le
 # nom de la variable et la règle seulement (un secret ne sort jamais).
@@ -22,6 +24,9 @@
 INFRA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 BACKEND_EMAIL_SMTP='django.core.mail.backends.smtp.EmailBackend'
+# Domaine d'envoi des emails : constante DOMAINE_EXPEDITEUR de prod.py,
+# distincte de DOMAIN (un staging sur un autre domaine envoie toujours
+# depuis le domaine dont le DNS porte SPF, DKIM et DMARC).
 DOMAINE_EXPEDITEUR='anitche.com'
 # Clé Fernet publique de config/settings/prod.py (CLE_DE_DEVELOPPEMENT).
 CLE_DE_DEVELOPPEMENT='mKvbTFkFfRPhMpb4ZJdZfHvz1pgUgx15Xhyn1ahJCiw='
@@ -30,6 +35,10 @@ MOT_DE_PASSE_FASTAPI_DEV='fastapi_ro_dev'
 MOTIF_IPV6='^\[([^]]*)](:(.*))?$'
 MOTIF_NOM_AFFICHE='^[^<>]*<([^<>]*)>$'
 MOTIF_CARACTERES_INTERDITS='[[:space:]<>,"]'
+# Mêmes motifs que infra/nginx/entrypoint.d/40-anitche-config.sh.
+MOTIF_HOTE='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
+MOTIF_CIDR_IPV4='^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})(/([0-9]{1,2}))?$'
+MOTIF_CIDR_IPV6='^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*(/([0-9]{1,3}))?$'
 
 ERREURS=()
 erreur() { ERREURS+=("$1"); }
@@ -134,7 +143,7 @@ verifier_url_publique() {
 
 # --- Variables obligatoires -------------------------------------------------
 REQUIS=(
-    SECRET_KEY FIELD_ENCRYPTION_KEYS ALLOWED_HOSTS CORS_ALLOWED_ORIGINS
+    DOMAIN SECRET_KEY FIELD_ENCRYPTION_KEYS ALLOWED_HOSTS CORS_ALLOWED_ORIGINS
     DB_NAME DB_PASSWORD DB_SUPERUSER_PASSWORD FASTAPI_DB_PASSWORD REDIS_PASSWORD
     PAIEMENT_FOURNISSEUR BACKEND_BASE_URL
     PUBLIC_BASE_URL MEDIA_BASE_URL
@@ -200,6 +209,55 @@ if [ -n "${BACKEND_BASE_URL:-}" ]; then
             erreur "BACKEND_BASE_URL : origine seule, sans chemin ni « / » final (ex. https://anitche.com)."
         fi
     fi
+fi
+
+# --- Domaines et nginx --------------------------------------------------------
+# Recopiés tels quels dans la configuration de nginx : noms d'hôte en
+# minuscules, sans schéma, port ni « / ». Sous-domaines : mêmes valeurs par
+# défaut que docker-compose.prod.yml.
+for var in DOMAIN DOMAIN_VENDEUR DOMAIN_LIVREUR DOMAIN_ADMIN; do
+    valeur="${!var:-}"
+    if [ "$var" != DOMAIN ] && [ -z "$valeur" ] && [ -n "${DOMAIN:-}" ]; then
+        valeur="$(tr '[:upper:]' '[:lower:]' <<<"${var#DOMAIN_}").$DOMAIN"
+    fi
+    [ -n "$valeur" ] || continue
+    [[ "$valeur" =~ $MOTIF_HOTE ]] \
+        || erreur "$var : nom d'hôte en minuscules attendu (ex. anitche.com), sans schéma, port ni « / »."
+done
+# Sans lui, Django répond 400 (DisallowedHost) à toutes les requêtes.
+if [ -n "${DOMAIN:-}" ] && [ "${#HOTES_AUTORISES[@]}" -gt 0 ] && ! hote_autorise "$DOMAIN"; then
+    erreur "DOMAIN : doit figurer dans ALLOWED_HOSTS (sinon Django refuse toutes les requêtes du site)."
+fi
+
+# Adresses autorisées sur /admin/ : vide (par défaut) = fermé à tous.
+# Jamais de préfixe /0 (tout Internet).
+cidr_valide() {
+    local entree="$1" prefixe
+    if [[ "$entree" =~ $MOTIF_CIDR_IPV4 ]]; then
+        local octet
+        for octet in "${BASH_REMATCH[@]:1:4}"; do (( 10#$octet <= 255 )) || return 1; done
+        prefixe="${BASH_REMATCH[6]:-32}"
+        (( 10#$prefixe >= 1 && 10#$prefixe <= 32 ))
+    elif [[ "$entree" =~ $MOTIF_CIDR_IPV6 ]]; then
+        prefixe="${BASH_REMATCH[2]:-128}"
+        (( 10#$prefixe >= 1 && 10#$prefixe <= 128 ))
+    else
+        return 1
+    fi
+}
+if [ -n "${ADMIN_ALLOWED_CIDRS:-}" ]; then
+    IFS=', ' read -r -a entrees <<< "$ADMIN_ALLOWED_CIDRS"
+    n=0
+    for entree in "${entrees[@]}"; do
+        [ -n "$entree" ] || continue
+        n=$((n + 1))
+        cidr_valide "$entree" \
+            || erreur "ADMIN_ALLOWED_CIDRS : l'entrée n°$n n'est pas une adresse IPv4 ou IPv6 valide, avec ou sans /préfixe (1 au moins) ; entrées séparées par des virgules."
+    done
+fi
+
+if [ -n "${NGINX_RELOAD_INTERVAL:-}" ] && [[ ! "$NGINX_RELOAD_INTERVAL" =~ ^[1-9][0-9]*[smhd]?$ ]]; then
+    erreur "NGINX_RELOAD_INTERVAL : nombre entier positif suivi de s, m, h ou d (ex. 6h)."
 fi
 
 # --- Paiements (prod.py) ----------------------------------------------------
@@ -285,7 +343,7 @@ fi
 
 # --- FastAPI : adresses publiques et rôle PostgreSQL en lecture seule -------
 # FRONTEND_BASE_URL : même valeur par défaut que docker-compose.prod.yml.
-verifier_url_publique FRONTEND_BASE_URL "${FRONTEND_BASE_URL:-https://anitche.com}"
+verifier_url_publique FRONTEND_BASE_URL "${FRONTEND_BASE_URL:-https://${DOMAIN:-}}"
 [ -z "${PUBLIC_BASE_URL:-}" ] || verifier_url_publique PUBLIC_BASE_URL "$PUBLIC_BASE_URL"
 [ -z "${MEDIA_BASE_URL:-}" ] || verifier_url_publique MEDIA_BASE_URL "$MEDIA_BASE_URL"
 
