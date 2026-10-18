@@ -12,7 +12,10 @@ from .views import (
     PasserEnPreparationView,
     AnnulerCommandeAdministrationView,
     CommandeAdministrationDetailView,
+    CommandeAdministrationHistoriqueView,
     CommandeAdministrationListView,
+    CommandeHistoriqueView,
+    CommandeVendeurHistoriqueView,
 )
 
 app_name = "commandes"
@@ -25,17 +28,21 @@ urlpatterns = [
     # --- Espace vendeur ---
     path("vendeur/", CommandeVendeurListView.as_view(), name="vendeur-commande-list"),
     path("vendeur/<uuid:pk>/", CommandeVendeurDetailView.as_view(), name="vendeur-commande-detail"),
+    path("vendeur/<uuid:pk>/historique/", CommandeVendeurHistoriqueView.as_view(), name="vendeur-commande-historique"),
     path("vendeur/<uuid:pk>/preparation/", PasserEnPreparationView.as_view(), name="vendeur-commande-preparation"),
 
     # --- Administration ---
     path("administration/", CommandeAdministrationListView.as_view(), name="administration-commande-list"),
     path("administration/<uuid:pk>/", CommandeAdministrationDetailView.as_view(),
          name="administration-commande-detail"),
+    path("administration/<uuid:pk>/historique/", CommandeAdministrationHistoriqueView.as_view(),
+         name="administration-commande-historique"),
     path("administration/<uuid:pk>/annuler/", AnnulerCommandeAdministrationView.as_view(), name="administration-commande-annuler"),
 
     # --- Client ---
     path("", CommandeListView.as_view(), name="commande-list"),
     path("<uuid:pk>/", CommandeDetailView.as_view(), name="commande-detail"),
+    path("<uuid:pk>/historique/", CommandeHistoriqueView.as_view(), name="commande-historique"),
     path("<uuid:pk>/annuler/", AnnulerCommandeView.as_view(), name="commande-annuler"),
     path("<uuid:commande_id>/items/", CommandeItemListView.as_view(), name="commande-items"),
 ]

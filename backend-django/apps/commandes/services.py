@@ -16,6 +16,11 @@ Tout le reste est refusé (TransitionImpossible) : retour arrière, saut
 d'étape, sortie d'un état final. Chaque transition est un UPDATE
 conditionnel sur le statut attendu : deux requêtes simultanées ne peuvent
 pas l'appliquer deux fois (une annulation ne restitue le stock qu'une fois).
+
+`changer_statut_commande` est la seule fonction qui écrit le statut d'une
+commande, et `creer_commande` la seule qui en crée une : toutes deux écrivent
+la ligne CommandeHistorique dans la même transaction. Aucun autre code
+(UPDATE en masse, affectation directe) ne doit toucher `Commande.status`.
 """
 
 import logging
@@ -29,12 +34,13 @@ from django.utils import timezone
 
 from apps.catalogue.models import Stock
 
-from .models import Commande
+from .models import Commande, CommandeHistorique
 
 logger = logging.getLogger(__name__)
 
 Statut = Commande.Status
 Motif = Commande.MotifAnnulation
+Source = CommandeHistorique.Source
 
 TRANSITIONS = {
     Statut.CREEE: {Statut.CONFIRMEE, Statut.ANNULEE},
@@ -52,6 +58,16 @@ ANNULATION_POSSIBLE_DEPUIS = {
     Motif.BOUTIQUE_INDISPONIBLE: {Statut.CREEE},
     Motif.ADMINISTRATION: {Statut.CREEE, Statut.CONFIRMEE, Statut.PREPARATION},
     Motif.LIVRAISON_ECHOUEE: {Statut.EXPEDIEE},
+}
+
+#: Source de l'annulation selon son motif. La livraison définitivement échouée
+#: est décidée par l'administration (apps.livraison.services.abandonner_livraison).
+SOURCE_ANNULATION = {
+    Motif.CLIENT: Source.CLIENT,
+    Motif.ADMINISTRATION: Source.ADMIN,
+    Motif.LIVRAISON_ECHOUEE: Source.ADMIN,
+    Motif.EXPIRATION: Source.SYSTEME,
+    Motif.BOUTIQUE_INDISPONIBLE: Source.SYSTEME,
 }
 
 #: Statut de livraison → statut de commande à atteindre.
@@ -228,15 +244,43 @@ def calculer_checkout(items, adresse, client, coupon=None):
     return checkout
 
 
-def _transitionner(commande, nouveau_statut, depuis, **champs):
-    """UPDATE conditionnel : n'agit que si la commande est encore dans l'un
-    des statuts `depuis` (restreints à ceux que la table autorise)."""
-    autorises = {statut for statut in depuis if nouveau_statut in TRANSITIONS[statut]}
-    lignes = Commande.objects.filter(pk=commande.pk, status__in=autorises).update(
-        status=nouveau_statut, update_at=timezone.now(), **champs,
+def _tracer(commande, ancien_statut, nouveau_statut, source, auteur, motif=""):
+    CommandeHistorique.objects.create(
+        commande=commande, ancien_statut=ancien_statut, nouveau_statut=nouveau_statut,
+        source=source, auteur=auteur, motif=motif,
     )
+
+
+def creer_commande(auteur, **champs):
+    """Crée une commande (statut « créée ») et sa première ligne d'historique,
+    sans ancien statut, dans la même transaction. `auteur` : le client qui valide
+    son panier."""
+    with transaction.atomic():
+        commande = Commande.objects.create(**champs)
+        _tracer(commande, "", commande.status, Source.CLIENT, auteur)
+    return commande
+
+
+def changer_statut_commande(commande, nouveau_statut, depuis, *, source, auteur=None, motif="", **champs):
+    """Seule écriture de `Commande.status` : UPDATE sous verrou qui n'agit que
+    si la commande est encore dans l'un des statuts `depuis` (restreints à
+    ceux que la table autorise), et ligne d'historique dans la même transaction
+    (`source`, `auteur` : compte à l'origine, None pour le système ; `motif` :
+    code court). `champs` : colonnes à écrire en même temps (motif_annulation).
+
+    Lève TransitionImpossible, sans rien écrire, quand la transition n'est pas
+    permise, y compris vers le statut déjà atteint (aucune ligne d'historique)."""
+    autorises = {statut for statut in depuis if nouveau_statut in TRANSITIONS[statut]}
+    with transaction.atomic():
+        # Le statut lu sous verrou est l'ancien statut de la ligne d'historique.
+        ancien_statut = Commande.objects.select_for_update().values_list("status", flat=True).get(pk=commande.pk)
+        if ancien_statut in autorises:
+            Commande.objects.filter(pk=commande.pk).update(
+                status=nouveau_statut, update_at=timezone.now(), **champs,
+            )
+            _tracer(commande, ancien_statut, nouveau_statut, source, auteur, motif)
     commande.refresh_from_db(fields=['status', 'motif_annulation', 'update_at'])
-    if not lignes:
+    if ancien_statut not in autorises:
         raise TransitionImpossible(
             f"Impossible de passer la commande {commande.numero_commande} de "
             f"« {commande.get_status_display()} » à « {Statut(nouveau_statut).label} »."
@@ -250,21 +294,22 @@ def confirmer_commande(commande):
     (déjà confirmée, ou annulée entre-temps) : l'appelant décide alors.
     """
     try:
-        _transitionner(commande, Statut.CONFIRMEE, {Statut.CREEE})
+        changer_statut_commande(commande, Statut.CONFIRMEE, {Statut.CREEE}, source=Source.PAIEMENT)
     except TransitionImpossible:
         return False
     logger.info("Commande %s confirmée.", commande.numero_commande)
     return True
 
 
-def passer_en_preparation(commande):
+def passer_en_preparation(commande, vendeur):
     """confirmee → preparation (vendeur de la boutique)."""
-    _transitionner(commande, Statut.PREPARATION, {Statut.CONFIRMEE})
+    changer_statut_commande(commande, Statut.PREPARATION, {Statut.CONFIRMEE}, source=Source.VENDEUR, auteur=vendeur)
 
 
-def synchroniser_depuis_livraison(commande, statut_livraison):
+def synchroniser_depuis_livraison(commande, statut_livraison, acteur=None):
     """Répercute l'expédition et la livraison sur la commande.
 
+    `acteur` : le livreur ou l'administrateur qui a changé la livraison.
     Les autres statuts de livraison (en cours, échouée) ne changent pas la
     commande. Lève TransitionImpossible si la commande n'est pas prête
     (ex : expédier une commande pas encore en préparation, ou annulée).
@@ -275,7 +320,10 @@ def synchroniser_depuis_livraison(commande, statut_livraison):
     cible = SYNCHRONISATION_LIVRAISON.get(statut_livraison)
     if cible is None:
         return
-    _transitionner(commande, cible, {statut for statut, suivants in TRANSITIONS.items() if cible in suivants})
+    changer_statut_commande(
+        commande, cible, {statut for statut, suivants in TRANSITIONS.items() if cible in suivants},
+        source=Source.LIVRAISON, auteur=acteur,
+    )
     if cible == Statut.LIVREE:
         # Livraison confirmée : le délai de rétractation avant reversement
         # au vendeur commence (apps.paiements.reversements), et les points
@@ -299,7 +347,10 @@ def annuler_commande(commande, motif, acteur=None, commentaire="Commande annulé
         # que les transitions de livraison) : une livraison déjà partie
         # refuse l'annulation, et tout est annulé avec elle.
         livraison = annuler_livraison_de(commande, acteur=acteur, commentaire=commentaire)
-        _transitionner(commande, Statut.ANNULEE, ANNULATION_POSSIBLE_DEPUIS[motif], motif_annulation=motif)
+        changer_statut_commande(
+            commande, Statut.ANNULEE, ANNULATION_POSSIBLE_DEPUIS[motif],
+            source=SOURCE_ANNULATION[motif], auteur=acteur, motif=motif, motif_annulation=motif,
+        )
         if livraison is None:
             # Aucune fiche à la première lecture, mais une validation de
             # paiement concurrente a pu confirmer la commande et en créer une

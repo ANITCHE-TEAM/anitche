@@ -48,7 +48,8 @@ class Commande(models.Model):
         on_delete=models.PROTECT
         )
 
-    # Ne change que par apps.commandes.services (table des transitions).
+    # Ne change que par apps.commandes.services.changer_statut_commande
+    # (table des transitions, ligne CommandeHistorique dans la même transaction).
     status = models.CharField(
         max_length=20,
         choices= Status.choices,
@@ -114,6 +115,54 @@ class Commande(models.Model):
                 if not numero_pris or tentative == TENTATIVES_GENERATION_NUMERO - 1:
                     raise
 
+
+
+class CommandeHistorique(models.Model):
+    """Trace chaque changement de statut d'une commande : qui, quand, depuis
+    quel statut, vers quel statut, pourquoi (règle de gestion §6).
+
+    Écrite uniquement par apps.commandes.services, dans la transaction du
+    changement. Lecture seule : jamais modifiée ni supprimée (sauf avec la
+    commande elle-même). La première ligne d'une commande (création) n'a pas
+    d'ancien statut ; les commandes antérieures à l'historique n'ont aucune
+    ligne tant que leur statut n'a pas changé.
+    """
+
+    class Source(models.TextChoices):
+        """Origine du changement, seule information d'acteur montrée au client."""
+        CLIENT = "client", "Client"
+        VENDEUR = "vendeur", "Vendeur"
+        ADMIN = "admin", "Administration"
+        PAIEMENT = "paiement", "Paiement"
+        LIVRAISON = "livraison", "Livraison"
+        SYSTEME = "systeme", "Système"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    commande = models.ForeignKey(Commande, on_delete=models.CASCADE, related_name="historique")
+    ancien_statut = models.CharField(max_length=20, choices=Commande.Status.choices, blank=True)
+    nouveau_statut = models.CharField(max_length=20, choices=Commande.Status.choices)
+    # Compte à l'origine du changement ; vide quand c'est le système (paiement
+    # confirmé, expiration). Réservé à l'administration : le client et le
+    # vendeur ne voient que `source`.
+    auteur = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="changements_commande",
+    )
+    source = models.CharField(max_length=10, choices=Source.choices)
+    # Code court (motif d'annulation), jamais un texte libre : visible du client.
+    motif = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+        verbose_name = "historique de commande"
+        verbose_name_plural = "historique des commandes"
+
+    def __str__(self):
+        return f"{self.commande_id} : {self.ancien_statut or '∅'} → {self.nouveau_statut}"
 
 
 class GroupeCommande(models.Model):

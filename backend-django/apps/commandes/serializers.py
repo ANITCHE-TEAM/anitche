@@ -5,7 +5,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
-from .models import Commande, GroupeCommande, CommandeItem
+from .models import Commande, CommandeHistorique, GroupeCommande, CommandeItem
 
 # Point de livraison : territoire de la Côte d'Ivoire avec une marge
 # (environ 4,3 à 10,7° N et 8,6 à 2,5° O).
@@ -251,6 +251,22 @@ class CommandeAdministrationSerializer(CommandeVendeurSerializer):
 
     class Meta(CommandeVendeurSerializer.Meta):
         fields = CommandeVendeurSerializer.Meta.fields + ["boutique"]
+        read_only_fields = fields
+
+
+class CommandeHistoriqueSerializer(serializers.ModelSerializer):
+    """Client et vendeur : l'origine du changement (`source`), jamais le compte
+    qui l'a fait."""
+
+    class Meta:
+        model = CommandeHistorique
+        fields = ["id", "ancien_statut", "nouveau_statut", "source", "motif", "created_at"]
+        read_only_fields = fields
+
+
+class CommandeHistoriqueAdministrationSerializer(CommandeHistoriqueSerializer):
+    class Meta(CommandeHistoriqueSerializer.Meta):
+        fields = CommandeHistoriqueSerializer.Meta.fields + ["auteur"]
         read_only_fields = fields
 
 

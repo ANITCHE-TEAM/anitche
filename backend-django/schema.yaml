@@ -1814,6 +1814,55 @@ paths:
                 $ref: '#/components/schemas/Erreur'
           description: 'Limite de débit atteinte : réessayer après le délai indiqué
             par l''en-tête Retry-After.'
+  /api/commandes/{id}/historique/:
+    get:
+      operationId: commandes_historique_list
+      description: 'Origine du changement (`source`) seulement : jamais le compte
+        qui l''a fait. 404 pour la commande d''un autre client.'
+      summary: Historique des statuts d'une commande (client)
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - Commandes
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedCommandeHistoriqueList'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
   /api/commandes/administration/:
     get:
       operationId: commandes_administration_list
@@ -1996,6 +2045,61 @@ paths:
                 $ref: '#/components/schemas/Erreur'
           description: 'Conflit : l''état actuel de la ressource ne permet pas cette
             action.'
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/commandes/administration/{id}/historique/:
+    get:
+      operationId: commandes_administration_historique_list
+      description: 'Comme pour le client, plus `auteur` : identifiant du compte à
+        l''origine du changement (vide pour le système).'
+      summary: Historique des statuts d'une commande (administration)
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - Commandes
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedCommandeHistoriqueAdministrationList'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
         '429':
           content:
             application/json:
@@ -2223,6 +2327,61 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CommandeVendeur'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/commandes/vendeur/{id}/historique/:
+    get:
+      operationId: commandes_vendeur_historique_list
+      description: Origine du changement (`source`) seulement. 404 pour la commande
+        d'une autre boutique.
+      summary: Historique des statuts d'une commande (vendeur)
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - Commandes
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedCommandeHistoriqueList'
           description: ''
         '401':
           content:
@@ -9237,6 +9396,84 @@ components:
       - numero_commande
       - status
       - update_at
+    CommandeHistorique:
+      type: object
+      description: |-
+        Client et vendeur : l'origine du changement (`source`), jamais le compte
+        qui l'a fait.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        ancien_statut:
+          allOf:
+          - $ref: '#/components/schemas/StatutCommandeEnum'
+          readOnly: true
+        nouveau_statut:
+          allOf:
+          - $ref: '#/components/schemas/StatutCommandeEnum'
+          readOnly: true
+        source:
+          allOf:
+          - $ref: '#/components/schemas/SourceEnum'
+          readOnly: true
+        motif:
+          type: string
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - ancien_statut
+      - created_at
+      - id
+      - motif
+      - nouveau_statut
+      - source
+    CommandeHistoriqueAdministration:
+      type: object
+      description: |-
+        Client et vendeur : l'origine du changement (`source`), jamais le compte
+        qui l'a fait.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        ancien_statut:
+          allOf:
+          - $ref: '#/components/schemas/StatutCommandeEnum'
+          readOnly: true
+        nouveau_statut:
+          allOf:
+          - $ref: '#/components/schemas/StatutCommandeEnum'
+          readOnly: true
+        source:
+          allOf:
+          - $ref: '#/components/schemas/SourceEnum'
+          readOnly: true
+        motif:
+          type: string
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        auteur:
+          type:
+          - integer
+          - 'null'
+          readOnly: true
+      required:
+      - ancien_statut
+      - auteur
+      - created_at
+      - id
+      - motif
+      - nouveau_statut
+      - source
     CommandeItem:
       type: object
       properties:
@@ -11198,6 +11435,52 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/CommandeAdministration'
+    PaginatedCommandeHistoriqueAdministrationList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/CommandeHistoriqueAdministration'
+    PaginatedCommandeHistoriqueList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/CommandeHistorique'
     PaginatedCommandeItemList:
       type: object
       required:
@@ -13964,6 +14247,22 @@ components:
           maxLength: 30
       required:
       - adresse_livraison
+    SourceEnum:
+      enum:
+      - client
+      - vendeur
+      - admin
+      - paiement
+      - livraison
+      - systeme
+      type: string
+      description: |-
+        * `client` - Client
+        * `vendeur` - Vendeur
+        * `admin` - Administration
+        * `paiement` - Paiement
+        * `livraison` - Livraison
+        * `systeme` - Système
     SousCategorie:
       type: object
       properties:

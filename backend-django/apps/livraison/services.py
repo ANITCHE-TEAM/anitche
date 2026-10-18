@@ -242,7 +242,7 @@ def changer_statut(livraison, nouveau, acteur, commentaire="", code=""):
                 champs.append("date_expedition")
             # Expédiée / livrée se répercutent sur la commande (livrée ouvre
             # le délai de rétractation du reversement).
-            synchroniser_depuis_livraison(livraison.commande, nouveau)
+            synchroniser_depuis_livraison(livraison.commande, nouveau, acteur)
             _appliquer(livraison, nouveau, acteur, commentaire, champs)
 
     if code_refuse:

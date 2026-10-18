@@ -403,6 +403,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/commandes/{id}/historique/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Historique des statuts d'une commande (client)
+         * @description Origine du changement (`source`) seulement : jamais le compte qui l'a fait. 404 pour la commande d'un autre client.
+         */
+        get: operations["commandes_historique_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/commandes/administration/": {
         parameters: {
             query?: never;
@@ -453,6 +473,26 @@ export interface paths {
          * @description Jusqu'à la préparation incluse (409 au-delà).
          */
         post: operations["commandes_administration_annuler_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/commandes/administration/{id}/historique/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Historique des statuts d'une commande (administration)
+         * @description Comme pour le client, plus `auteur` : identifiant du compte à l'origine du changement (vide pour le système).
+         */
+        get: operations["commandes_administration_historique_list"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -544,6 +584,26 @@ export interface paths {
             cookie?: never;
         };
         get: operations["commandes_vendeur_retrieve"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/commandes/vendeur/{id}/historique/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Historique des statuts d'une commande (vendeur)
+         * @description Origine du changement (`source`) seulement. 404 pour la commande d'une autre boutique.
+         */
+        get: operations["commandes_vendeur_historique_list"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2755,6 +2815,35 @@ export interface components {
             readonly articles: components["schemas"]["CommandeItem"][];
             readonly adresse_livraison: components["schemas"]["AdresseLivraisonAvecPositionLecture"] | null;
         };
+        /**
+         * @description Client et vendeur : l'origine du changement (`source`), jamais le compte
+         *     qui l'a fait.
+         */
+        CommandeHistorique: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly ancien_statut: components["schemas"]["StatutCommandeEnum"];
+            readonly nouveau_statut: components["schemas"]["StatutCommandeEnum"];
+            readonly source: components["schemas"]["SourceEnum"];
+            readonly motif: string;
+            /** Format: date-time */
+            readonly created_at: string;
+        };
+        /**
+         * @description Client et vendeur : l'origine du changement (`source`), jamais le compte
+         *     qui l'a fait.
+         */
+        CommandeHistoriqueAdministration: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly ancien_statut: components["schemas"]["StatutCommandeEnum"];
+            readonly nouveau_statut: components["schemas"]["StatutCommandeEnum"];
+            readonly source: components["schemas"]["SourceEnum"];
+            readonly motif: string;
+            /** Format: date-time */
+            readonly created_at: string;
+            readonly auteur: number | null;
+        };
         CommandeItem: {
             /** Format: uuid */
             readonly id: string;
@@ -3615,6 +3704,36 @@ export interface components {
              */
             previous?: string | null;
             results: components["schemas"]["CommandeAdministration"][];
+        };
+        PaginatedCommandeHistoriqueAdministrationList: {
+            /** @example 123 */
+            count: number;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=4
+             */
+            next?: string | null;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=2
+             */
+            previous?: string | null;
+            results: components["schemas"]["CommandeHistoriqueAdministration"][];
+        };
+        PaginatedCommandeHistoriqueList: {
+            /** @example 123 */
+            count: number;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=4
+             */
+            next?: string | null;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=2
+             */
+            previous?: string | null;
+            results: components["schemas"]["CommandeHistorique"][];
         };
         PaginatedCommandeItemList: {
             /** @example 123 */
@@ -5025,6 +5144,16 @@ export interface components {
             adresse_livraison: components["schemas"]["AdresseLivraisonRequest"];
             coupon_code?: string;
         };
+        /**
+         * @description * `client` - Client
+         *     * `vendeur` - Vendeur
+         *     * `admin` - Administration
+         *     * `paiement` - Paiement
+         *     * `livraison` - Livraison
+         *     * `systeme` - Système
+         * @enum {string}
+         */
+        SourceEnum: "client" | "vendeur" | "admin" | "paiement" | "livraison" | "systeme";
         SousCategorie: {
             readonly id: number;
             nom: string;
@@ -7753,6 +7882,57 @@ export interface operations {
             };
         };
     };
+    commandes_historique_list: {
+        parameters: {
+            query?: {
+                /** @description Un numéro de page de l'ensemble des résultats. */
+                page?: number;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaginatedCommandeHistoriqueList"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
     commandes_administration_list: {
         parameters: {
             query?: {
@@ -7927,6 +8107,66 @@ export interface operations {
             };
             /** @description Conflit : l'état actuel de la ressource ne permet pas cette action. */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    commandes_administration_historique_list: {
+        parameters: {
+            query?: {
+                /** @description Un numéro de page de l'ensemble des résultats. */
+                page?: number;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaginatedCommandeHistoriqueAdministrationList"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Action non autorisée pour ce compte. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -8182,6 +8422,66 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CommandeVendeur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Action non autorisée pour ce compte. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    commandes_vendeur_historique_list: {
+        parameters: {
+            query?: {
+                /** @description Un numéro de page de l'ensemble des résultats. */
+                page?: number;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaginatedCommandeHistoriqueList"];
                 };
             };
             /** @description Authentification absente, jeton invalide ou expiré. */

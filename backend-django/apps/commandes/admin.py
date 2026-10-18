@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Commande, GroupeCommande, CommandeItem
+from .models import Commande, CommandeHistorique, GroupeCommande, CommandeItem
 
 
 class SansSuppressionAdmin(admin.ModelAdmin):
@@ -20,6 +20,35 @@ class CommandeItemInline(admin.TabularInline):
     can_delete = False
 
 
+class LectureSeuleMixin:
+    """Historique : écrit par apps.commandes.services seulement, jamais modifié
+    ni supprimé depuis l'admin."""
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+class CommandeHistoriqueInline(LectureSeuleMixin, admin.TabularInline):
+    model = CommandeHistorique
+    extra = 0
+    fields = ("created_at", "ancien_statut", "nouveau_statut", "source", "auteur", "motif")
+    readonly_fields = fields
+
+
+@admin.register(CommandeHistorique)
+class CommandeHistoriqueAdmin(LectureSeuleMixin, admin.ModelAdmin):
+    list_display = ("commande", "ancien_statut", "nouveau_statut", "source", "auteur", "created_at")
+    list_filter = ("nouveau_statut", "source")
+    search_fields = ("commande__numero_commande",)
+    readonly_fields = ("id", "commande", "ancien_statut", "nouveau_statut", "source", "auteur", "motif", "created_at")
+
+
 @admin.register(Commande)
 class CommandeAdmin(SansSuppressionAdmin):
     list_display = ("numero_commande", "client", "boutique", "status", "montant_total", "created_at")
@@ -37,7 +66,7 @@ class CommandeAdmin(SansSuppressionAdmin):
         "id", "numero_commande", "status", "montant_total", "frais_livraison", "livraison_offerte",
         "frais_livraison_vendeur", "created_at", "update_at",
     )
-    inlines = [CommandeItemInline]
+    inlines = [CommandeItemInline, CommandeHistoriqueInline]
 
 
 @admin.register(GroupeCommande)
