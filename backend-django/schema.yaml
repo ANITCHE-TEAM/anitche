@@ -6848,6 +6848,88 @@ paths:
                 $ref: '#/components/schemas/Erreur'
           description: 'Limite de débit atteinte : réessayer après le délai indiqué
             par l''en-tête Retry-After.'
+  /api/utilisateurs/administration/connexions/:
+    get:
+      operationId: utilisateurs_administration_connexions_list
+      description: 'Toutes les tentatives de connexion, les plus récentes d''abord.
+        Filtres combinables ; une valeur invalide est refusée (400). `email` : égalité
+        exacte, casse ignorée, y compris pour un email sans compte. `date_debut` et
+        `date_fin` sont inclusives (jour entier).'
+      summary: Journal des connexions (administration)
+      parameters:
+      - in: query
+        name: date_debut
+        schema:
+          type: string
+          format: date
+        description: AAAA-MM-JJ, inclus.
+      - in: query
+        name: date_fin
+        schema:
+          type: string
+          format: date
+        description: AAAA-MM-JJ, inclus.
+      - in: query
+        name: email
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 254
+        description: Email tenté, égalité exacte.
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      - in: query
+        name: reussie
+        schema:
+          type: boolean
+        description: '`true` : réussies ; `false` : refusées.'
+      - in: query
+        name: utilisateur
+        schema:
+          type: integer
+          minimum: 1
+        description: Identifiant du compte.
+      tags:
+      - Utilisateurs
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedJournalConnexionAdministrationList'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
   /api/utilisateurs/changement-contact/:
     post:
       operationId: utilisateurs_changement_contact_create
@@ -6909,7 +6991,8 @@ paths:
         Notifie le titulaire du compte à chaque connexion réussie,
         uniquement en cas de succès (jamais sur un
         échec, pour ne pas alerter à tort sur une simple faute de frappe
-        de mot de passe ni révéler qu'un email existe).
+        de mot de passe ni révéler qu'un email existe). Chaque tentative,
+        réussie ou refusée, est inscrite au journal des connexions.
       summary: Connexion (email + mot de passe)
       tags:
       - Utilisateurs
@@ -7049,6 +7132,45 @@ paths:
                 $ref: '#/components/schemas/Erreur'
           description: Requête invalide (erreurs par champ dans `errors`) ou refus
             métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/utilisateurs/connexions/:
+    get:
+      operationId: utilisateurs_connexions_list
+      description: 'Tentatives de connexion à mon compte (réussies et refusées), les
+        plus récentes d''abord : date, méthode, adresse IP et appareil. Permet de
+        repérer une connexion que je n''ai pas faite. Les lignes sont conservées `JOURNAL_CONNEXIONS_RETENTION_JOURS`
+        jours (180 par défaut).'
+      summary: Mes connexions
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - Utilisateurs
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedJournalConnexionList'
+          description: ''
         '401':
           content:
             application/json:
@@ -10603,6 +10725,96 @@ components:
       required:
       - access
       - refresh
+    JournalConnexion:
+      type: object
+      description: |-
+        Connexion vue par son titulaire : date, résultat, méthode, IP et
+        appareil. Aucun secret n'est enregistré dans le journal.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        date_creation:
+          type: string
+          format: date-time
+          readOnly: true
+        reussie:
+          type: boolean
+          readOnly: true
+        motif_echec:
+          allOf:
+          - $ref: '#/components/schemas/MotifEchecEnum'
+          readOnly: true
+        methode:
+          allOf:
+          - $ref: '#/components/schemas/MethodeConnexionEnum'
+          readOnly: true
+        adresse_ip:
+          type:
+          - string
+          - 'null'
+          readOnly: true
+        user_agent:
+          type: string
+          readOnly: true
+      required:
+      - adresse_ip
+      - date_creation
+      - id
+      - methode
+      - motif_echec
+      - reussie
+      - user_agent
+    JournalConnexionAdministration:
+      type: object
+      description: |-
+        Connexion vue par l'administration : ajoute le compte visé (vide si
+        l'email tenté est inconnu) et l'email tenté.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        utilisateur:
+          type:
+          - integer
+          - 'null'
+          readOnly: true
+        email_tente:
+          type: string
+          readOnly: true
+        date_creation:
+          type: string
+          format: date-time
+          readOnly: true
+        reussie:
+          type: boolean
+          readOnly: true
+        motif_echec:
+          allOf:
+          - $ref: '#/components/schemas/MotifEchecEnum'
+          readOnly: true
+        methode:
+          allOf:
+          - $ref: '#/components/schemas/MethodeConnexionEnum'
+          readOnly: true
+        adresse_ip:
+          type:
+          - string
+          - 'null'
+          readOnly: true
+        user_agent:
+          type: string
+          readOnly: true
+      required:
+      - adresse_ip
+      - date_creation
+      - email_tente
+      - id
+      - methode
+      - motif_echec
+      - reussie
+      - user_agent
+      - utilisateur
     LigneReversement:
       type: object
       description: Article vendu et frais figés au moment de l'achat.
@@ -11131,6 +11343,14 @@ components:
           type: string
       required:
       - message
+    MethodeConnexionEnum:
+      enum:
+      - mot_de_passe
+      - google
+      type: string
+      description: |-
+        * `mot_de_passe` - Email et mot de passe
+        * `google` - Google
     MethodeEnum:
       enum:
       - wave
@@ -11159,6 +11379,22 @@ components:
         * `administration` - Annulée par l'administration
         * `boutique_indisponible` - Boutique indisponible
         * `livraison_echouee` - Livraison échouée
+    MotifEchecEnum:
+      enum:
+      - email_inconnu
+      - mot_de_passe_incorrect
+      - compte_desactive
+      - google_jeton_invalide
+      - google_infos_incompletes
+      - google_liaison_refusee
+      type: string
+      description: |-
+        * `email_inconnu` - Email inconnu
+        * `mot_de_passe_incorrect` - Mot de passe incorrect
+        * `compte_desactive` - Compte désactivé
+        * `google_jeton_invalide` - Jeton Google invalide
+        * `google_infos_incompletes` - Informations Google incomplètes
+        * `google_liaison_refusee` - Liaison Google refusée
     MotifRemboursementEnum:
       enum:
       - commande_annulee
@@ -11688,6 +11924,52 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ImageProduit'
+    PaginatedJournalConnexionAdministrationList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/JournalConnexionAdministration'
+    PaginatedJournalConnexionList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/JournalConnexion'
     PaginatedLivraisonHistoriqueList:
       type: object
       required:

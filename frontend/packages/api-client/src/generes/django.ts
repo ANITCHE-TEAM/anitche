@@ -1832,6 +1832,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/utilisateurs/administration/connexions/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Journal des connexions (administration)
+         * @description Toutes les tentatives de connexion, les plus récentes d'abord. Filtres combinables ; une valeur invalide est refusée (400). `email` : égalité exacte, casse ignorée, y compris pour un email sans compte. `date_debut` et `date_fin` sont inclusives (jour entier).
+         */
+        get: operations["utilisateurs_administration_connexions_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/utilisateurs/changement-contact/": {
         parameters: {
             query?: never;
@@ -1866,7 +1886,8 @@ export interface paths {
          * @description Notifie le titulaire du compte à chaque connexion réussie,
          *     uniquement en cas de succès (jamais sur un
          *     échec, pour ne pas alerter à tort sur une simple faute de frappe
-         *     de mot de passe ni révéler qu'un email existe).
+         *     de mot de passe ni révéler qu'un email existe). Chaque tentative,
+         *     réussie ou refusée, est inscrite au journal des connexions.
          */
         post: operations["utilisateurs_connexion_create"];
         delete?: never;
@@ -1915,6 +1936,26 @@ export interface paths {
          * @description Renvoie un nouvel `access` et un nouveau `refresh` (rotation) ; l'ancien refresh devient inutilisable.
          */
         post: operations["utilisateurs_connexion_rafraichir_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/utilisateurs/connexions/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Mes connexions
+         * @description Tentatives de connexion à mon compte (réussies et refusées), les plus récentes d'abord : date, méthode, adresse IP et appareil. Permet de repérer une connexion que je n'ai pas faite. Les lignes sont conservées `JOURNAL_CONNEXIONS_RETENTION_JOURS` jours (180 par défaut).
+         */
+        get: operations["utilisateurs_connexions_list"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -3340,6 +3381,36 @@ export interface components {
             /** @description Jeton de rafraîchissement (7 jours, à usage unique). */
             refresh: string;
         };
+        /**
+         * @description Connexion vue par son titulaire : date, résultat, méthode, IP et
+         *     appareil. Aucun secret n'est enregistré dans le journal.
+         */
+        JournalConnexion: {
+            readonly id: number;
+            /** Format: date-time */
+            readonly date_creation: string;
+            readonly reussie: boolean;
+            readonly motif_echec: components["schemas"]["MotifEchecEnum"];
+            readonly methode: components["schemas"]["MethodeConnexionEnum"];
+            readonly adresse_ip: string | null;
+            readonly user_agent: string;
+        };
+        /**
+         * @description Connexion vue par l'administration : ajoute le compte visé (vide si
+         *     l'email tenté est inconnu) et l'email tenté.
+         */
+        JournalConnexionAdministration: {
+            readonly id: number;
+            readonly utilisateur: number | null;
+            readonly email_tente: string;
+            /** Format: date-time */
+            readonly date_creation: string;
+            readonly reussie: boolean;
+            readonly motif_echec: components["schemas"]["MotifEchecEnum"];
+            readonly methode: components["schemas"]["MethodeConnexionEnum"];
+            readonly adresse_ip: string | null;
+            readonly user_agent: string;
+        };
         /** @description Article vendu et frais figés au moment de l'achat. */
         LigneReversement: {
             nom_produit: string;
@@ -3538,6 +3609,12 @@ export interface components {
             message: string;
         };
         /**
+         * @description * `mot_de_passe` - Email et mot de passe
+         *     * `google` - Google
+         * @enum {string}
+         */
+        MethodeConnexionEnum: "mot_de_passe" | "google";
+        /**
          * @description * `wave` - Wave
          *     * `orange_money` - Orange Money
          *     * `mtn_money` - MTN Mobile Money
@@ -3555,6 +3632,16 @@ export interface components {
          * @enum {string}
          */
         MotifAnnulationEnum: "client" | "expiration" | "administration" | "boutique_indisponible" | "livraison_echouee";
+        /**
+         * @description * `email_inconnu` - Email inconnu
+         *     * `mot_de_passe_incorrect` - Mot de passe incorrect
+         *     * `compte_desactive` - Compte désactivé
+         *     * `google_jeton_invalide` - Jeton Google invalide
+         *     * `google_infos_incompletes` - Informations Google incomplètes
+         *     * `google_liaison_refusee` - Liaison Google refusée
+         * @enum {string}
+         */
+        MotifEchecEnum: "email_inconnu" | "mot_de_passe_incorrect" | "compte_desactive" | "google_jeton_invalide" | "google_infos_incompletes" | "google_liaison_refusee";
         /**
          * @description * `commande_annulee` - Commande annulée après paiement
          *     * `paiement_en_double` - Commande déjà payée par un autre paiement
@@ -3869,6 +3956,36 @@ export interface components {
              */
             previous?: string | null;
             results: components["schemas"]["ImageProduit"][];
+        };
+        PaginatedJournalConnexionAdministrationList: {
+            /** @example 123 */
+            count: number;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=4
+             */
+            next?: string | null;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=2
+             */
+            previous?: string | null;
+            results: components["schemas"]["JournalConnexionAdministration"][];
+        };
+        PaginatedJournalConnexionList: {
+            /** @example 123 */
+            count: number;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=4
+             */
+            next?: string | null;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=2
+             */
+            previous?: string | null;
+            results: components["schemas"]["JournalConnexion"][];
         };
         PaginatedLivraisonHistoriqueList: {
             /** @example 123 */
@@ -13319,6 +13436,74 @@ export interface operations {
             };
         };
     };
+    utilisateurs_administration_connexions_list: {
+        parameters: {
+            query?: {
+                /** @description AAAA-MM-JJ, inclus. */
+                date_debut?: string;
+                /** @description AAAA-MM-JJ, inclus. */
+                date_fin?: string;
+                /** @description Email tenté, égalité exacte. */
+                email?: string;
+                /** @description Un numéro de page de l'ensemble des résultats. */
+                page?: number;
+                /** @description `true` : réussies ; `false` : refusées. */
+                reussie?: boolean;
+                /** @description Identifiant du compte. */
+                utilisateur?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaginatedJournalConnexionAdministrationList"];
+                };
+            };
+            /** @description Requête invalide (erreurs par champ dans `errors`) ou refus métier (message dans `detail`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Action non autorisée pour ce compte. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
     utilisateurs_changement_contact_create: {
         parameters: {
             query?: never;
@@ -13523,6 +13708,46 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    utilisateurs_connexions_list: {
+        parameters: {
+            query?: {
+                /** @description Un numéro de page de l'ensemble des résultats. */
+                page?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaginatedJournalConnexionList"];
                 };
             };
             /** @description Authentification absente, jeton invalide ou expiré. */

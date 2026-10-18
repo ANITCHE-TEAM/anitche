@@ -1,3 +1,6 @@
+from datetime import datetime, time, timedelta
+
+from django.utils import timezone
 from rest_framework import generics, status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -29,6 +32,8 @@ logger_securite = logging.getLogger('securite')
 
 from .tasks import envoyer_code_otp_email, envoyer_notification_connexion
 from .services import (
+    enregistrer_connexion,
+    enregistrer_echec_mot_de_passe,
     resoudre_utilisateur_google,
     revoquer_tokens_actifs,
     InfosGoogleIncompletes,
@@ -39,13 +44,16 @@ from .services import (
 
 from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import AuthenticationFailed, PermissionDenied, ValidationError
 
 from .models import (
     Utilisateur,
     CodeOTP,
     TypeUsageOTP,
     DocumentKYC,
+    JournalConnexion,
+    MethodeConnexion,
+    MotifEchecConnexion,
     Role,
 )
 
@@ -58,6 +66,9 @@ from .serializers import (
     DemandeMotDePasseOublieSerializer,
     ConfirmationMotDePasseOublieSerializer,
     ConnexionGoogleSerializer,
+    FiltreJournalConnexionSerializer,
+    JournalConnexionAdministrationSerializer,
+    JournalConnexionSerializer,
     UtilisateurAdministrationSerializer,
 )
 
@@ -108,18 +119,28 @@ class LoginThrottleView(TokenObtainPairView):
         """Notifie le titulaire du compte à chaque connexion réussie,
         uniquement en cas de succès (jamais sur un
         échec, pour ne pas alerter à tort sur une simple faute de frappe
-        de mot de passe ni révéler qu'un email existe)."""
-        response = super().post(request, *args, **kwargs)
+        de mot de passe ni révéler qu'un email existe). Chaque tentative,
+        réussie ou refusée, est inscrite au journal des connexions."""
+        email = request.data.get('email')
+        try:
+            response = super().post(request, *args, **kwargs)
+        except AuthenticationFailed:
+            # Le refus est une exception que DRF transforme en 401 après cette
+            # méthode : relayée telle quelle, la réponse ne dépend pas du journal.
+            enregistrer_echec_mot_de_passe(request, email)
+            raise
 
-        if response.status_code == status.HTTP_200_OK:
-            email = request.data.get('email')
-            utilisateur = Utilisateur.objects.avec_email(email).first()
-            if utilisateur:
-                envoyer_notification_connexion.delay(
-                    utilisateur.email,
-                    adresse_ip_client(request) or 'inconnue',
-                    request.META.get('HTTP_USER_AGENT', 'inconnu'),
-                )
+        utilisateur = Utilisateur.objects.avec_email(email).first()
+        enregistrer_connexion(
+            request, methode=MethodeConnexion.MOT_DE_PASSE, reussie=True,
+            utilisateur=utilisateur, email=email,
+        )
+        if utilisateur:
+            envoyer_notification_connexion.delay(
+                utilisateur.email,
+                adresse_ip_client(request) or 'inconnue',
+                request.META.get('HTTP_USER_AGENT', 'inconnu'),
+            )
 
         return response
 
@@ -511,6 +532,65 @@ class UtilisateurAdministrationListView(generics.ListAPIView):
 
 
 # =====================================================
+# JOURNAL DES CONNEXIONS
+# =====================================================
+
+@extend_schema(
+    summary="Mes connexions",
+    description=(
+        "Tentatives de connexion à mon compte (réussies et refusées), les plus récentes d'abord : "
+        "date, méthode, adresse IP et appareil. Permet de repérer une connexion que je n'ai pas faite. "
+        "Les lignes sont conservées `JOURNAL_CONNEXIONS_RETENTION_JOURS` jours (180 par défaut)."
+    ),
+    responses={200: JournalConnexionSerializer(many=True), **erreurs(401)},
+)
+class MesConnexionsListView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = JournalConnexionSerializer
+
+    def get_queryset(self):
+        return JournalConnexion.objects.filter(utilisateur=self.request.user)
+
+
+@extend_schema(
+    summary="Journal des connexions (administration)",
+    description=(
+        "Toutes les tentatives de connexion, les plus récentes d'abord. Filtres combinables ; "
+        "une valeur invalide est refusée (400). `email` : égalité exacte, casse ignorée, y compris "
+        "pour un email sans compte. `date_debut` et `date_fin` sont inclusives (jour entier)."
+    ),
+    parameters=[FiltreJournalConnexionSerializer],
+    responses={200: JournalConnexionAdministrationSerializer(many=True), **erreurs(400, 401, 403)},
+)
+class JournalConnexionAdministrationListView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated, EstAdministrateur]
+    serializer_class = JournalConnexionAdministrationSerializer
+
+    def get_queryset(self):
+        filtres = FiltreJournalConnexionSerializer(data=self.request.query_params)
+        filtres.is_valid(raise_exception=True)
+        valeurs = filtres.validated_data
+
+        queryset = JournalConnexion.objects.all()
+        if 'utilisateur' in valeurs:
+            queryset = queryset.filter(utilisateur_id=valeurs['utilisateur'])
+        if valeurs.get('email'):
+            queryset = queryset.filter(email_tente=valeurs['email'].strip().lower())
+        if valeurs.get('reussie') is not None:
+            queryset = queryset.filter(reussie=valeurs['reussie'])
+        if 'date_debut' in valeurs:
+            queryset = queryset.filter(date_creation__gte=_debut_du_jour(valeurs['date_debut']))
+        if 'date_fin' in valeurs:
+            queryset = queryset.filter(date_creation__lt=_debut_du_jour(valeurs['date_fin'] + timedelta(days=1)))
+        return queryset
+
+
+def _debut_du_jour(jour):
+    """Minuit (heure du serveur) du jour donné."""
+    return timezone.make_aware(datetime.combine(jour, time.min))
+
+
+# =====================================================
 # MOT DE PASSE OUBLIÉ
 # =====================================================
 
@@ -656,6 +736,13 @@ class ConnexionGoogleView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'login'
 
+    @staticmethod
+    def _journaliser_refus(request, motif, *, email='', utilisateur=None):
+        enregistrer_connexion(
+            request, methode=MethodeConnexion.GOOGLE, reussie=False,
+            utilisateur=utilisateur, email=email, motif_echec=motif,
+        )
+
     def post(self, request):
         serializer = ConnexionGoogleSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -667,15 +754,24 @@ class ConnexionGoogleView(APIView):
                 settings.GOOGLE_OAUTH_CLIENT_ID,
             )
         except ValueError:
+            self._journaliser_refus(request, MotifEchecConnexion.GOOGLE_JETON_INVALIDE)
             raise ValidationError({"id_token": ["Token Google invalide."]})
 
+        email = infos.get('email')
         try:
             utilisateur = resoudre_utilisateur_google(infos)
         except InfosGoogleIncompletes as erreur:
+            self._journaliser_refus(request, MotifEchecConnexion.GOOGLE_INFOS_INCOMPLETES, email=email)
             raise ErreurMetier(str(erreur))
-        except CompteDesactive:
+        except CompteDesactive as erreur:
+            self._journaliser_refus(
+                request, MotifEchecConnexion.COMPTE_DESACTIVE, email=email, utilisateur=erreur.utilisateur,
+            )
             raise PermissionDenied("Ce compte a été désactivé.")
-        except LiaisonGoogleRefusee:
+        except LiaisonGoogleRefusee as erreur:
+            self._journaliser_refus(
+                request, MotifEchecConnexion.GOOGLE_LIAISON_REFUSEE, email=email, utilisateur=erreur.utilisateur,
+            )
             raise ErreurMetier(
                 "Un compte existe déjà avec cet email mais n'a "
                 "pas été vérifié. Réinitialisez le mot de passe "
@@ -685,6 +781,11 @@ class ConnexionGoogleView(APIView):
             )
 
         refresh = RefreshToken.for_user(utilisateur)
+
+        enregistrer_connexion(
+            request, methode=MethodeConnexion.GOOGLE, reussie=True,
+            utilisateur=utilisateur, email=utilisateur.email,
+        )
 
         # Même notification de connexion que le
         # flux classique, uniquement en cas de succès.

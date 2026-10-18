@@ -1,11 +1,12 @@
 import smtplib
+from datetime import timedelta
 
 from celery import Task, shared_task
 from django.utils import timezone
 from django.core.mail import send_mail
 from django.conf import settings
 
-from .models import CodeOTP
+from .models import CodeOTP, JournalConnexion
 
 ARGUMENTS_MASQUES = '[masqués]'
 
@@ -72,6 +73,24 @@ def nettoyer_otp_expires():
 
     # Retourne un résumé utile pour les logs ou le monitoring.
     return f"{supprimes} codes OTP supprimés."
+
+
+@shared_task
+def purger_journal_connexions():
+    """
+    Tâche asynchrone exécutée par Celery.
+
+    Supprime les lignes du journal des connexions plus anciennes que
+    JOURNAL_CONNEXIONS_RETENTION_JOURS jours : adresses IP et appareils sont
+    des données personnelles, conservées le temps utile à la sécurité.
+
+    Planifiée quotidiennement via CELERY_BEAT_SCHEDULE (config/settings/
+    base.py).
+    """
+    seuil = timezone.now() - timedelta(days=settings.JOURNAL_CONNEXIONS_RETENTION_JOURS)
+    supprimes, _ = JournalConnexion.objects.filter(date_creation__lt=seuil).delete()
+
+    return f"{supprimes} connexions du journal supprimées."
 
 
 @shared_task(
