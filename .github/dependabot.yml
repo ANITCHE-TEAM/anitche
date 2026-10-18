@@ -99,6 +99,24 @@ updates:
         patterns:
           - "*"
 
+  # Images de base du Dockerfile de production des portails (node et
+  # nginx-unprivileged, épinglés sur des versions exactes).
+  - package-ecosystem: docker
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: UTC
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 3
+    labels:
+      - dependencies
+      - docker
+    commit-message:
+      prefix: "build(deps)"
+
   # Correctifs de sécurité seulement : une limite à 0 désactive les mises à
   # jour de version, pas les PR de sécurité. Les mises à jour de version
   # s'activent avec le monorepo pnpm.
