@@ -7,8 +7,18 @@ livraison confirmée et délai de rétractation, frais déduits.
     suspendu             → en_retractation / disponible   retour clos (et aucune contestation de livraison ouverte)
     disponible           → en_cours → verse  transfert par le fournisseur
     disponible           → verse             versement manuel (référence saisie)
-    en_cours             → disponible        transfert échoué
-    tout sauf verse      → annule            commande annulée
+    en_cours             → disponible        refus certain ou échec confirmé par le fournisseur
+    en_cours             → disponible / verse   résolution manuelle (commande resoudre_reversement)
+    tout sauf verse      → annule            commande annulée (sauf en_cours)
+
+Un transfert dont l'issue est incertaine (délai dépassé, panne ou réponse
+illisible après l'envoi) reste en_cours : l'argent a pu partir, le
+reversement ne redevient jamais disponible sans confirmation du fournisseur,
+et ni nouveau transfert ni versement manuel ne sont possibles entre-temps.
+Tout état renvoyé par le fournisseur passe par appliquer_etat_transfert.
+La réconciliation (tâche planifiée, commande reconcilier_reversements)
+redemande l'état des transferts en cours dont la notification n'arrive pas,
+et alerte l'administration pour ceux qui restent bloqués.
 
 Frais de livraison : jamais dans le reversement (ils reviennent à ANITCHE).
 Livraison offerte par la boutique : son tarif est déduit du net, plafonné
@@ -19,12 +29,14 @@ Canal : mobile money uniquement, sur le numéro du dossier KYC du vendeur.
 
 import logging
 import re
+from dataclasses import dataclass
 from datetime import timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import F, Q, Sum
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from .fournisseurs import FournisseurInconnu, fournisseur_actif, obtenir_fournisseur
@@ -32,8 +44,11 @@ from .fournisseurs.base import (
     ECHEC,
     SUCCES,
     ErreurFournisseur,
+    MontantHorsLimites,
     NotificationInvalide,
     OperationNonSupportee,
+    TransactionIntrouvable,
+    TransfertRefuse,
     hacher_jeton,
 )
 from .models import AjustementVendeur, JournalWebhook, Reversement
@@ -49,6 +64,22 @@ PREFIXES_OPERATEURS = {"07": "orange_money", "05": "mtn_money", "01": "moov_mone
 #: Devise des transferts (mobile money ivoirien) : celle que le fournisseur
 #: doit confirmer pour qu'un transfert réussi soit appliqué.
 DEVISE_TRANSFERT = "XOF"
+#: Erreurs de transferer qui garantissent qu'aucun transfert n'a été créé :
+#: seules à rendre le reversement disponible. Toute autre ErreurFournisseur
+#: laisse l'issue incertaine (fermé par défaut).
+REFUS_CERTAINS = (TransfertRefuse, MontantHorsLimites, OperationNonSupportee)
+#: Issue d'un état de transfert refusé (succès non conforme), en plus de
+#: SUCCES, ECHEC et EN_ATTENTE.
+REFUSE = "refuse"
+#: Issues de reconcilier_reversement en plus des précédentes.
+INJOIGNABLE = "injoignable"
+INTROUVABLE = "introuvable"
+NON_DISPONIBLE = "non_disponible"
+#: Une alerte sur un reversement en cours (bloqué, succès non conforme) se
+#: répète au plus une fois par période tant qu'il le reste.
+REPETITION_ALERTE = timedelta(hours=24)
+#: Libellé de la source d'un état de transfert dans les journaux.
+SOURCES = {"immediat": "immédiat", "notification": "notifié", "reconciliation": "constaté par réconciliation"}
 
 
 class ErreurVersement(Exception):
@@ -343,6 +374,7 @@ def verser_manuellement(reversement, administrateur, reference_externe):
 
 
 def _revenir_disponible(reversement_id, motif):
+    """Refus certain de transferer (rien n'a été créé chez le fournisseur)."""
     with transaction.atomic():
         verrouille = Reversement.objects.select_for_update().get(pk=reversement_id)
         if verrouille.statut != Statut.EN_COURS:
@@ -350,19 +382,130 @@ def _revenir_disponible(reversement_id, motif):
         _liberer_ajustements(verrouille)
         verrouille.statut = Statut.DISPONIBLE
         verrouille.save()
-    logger.warning("Transfert du reversement %s échoué : %s", verrouille.reference, motif)
+    logger.warning("Transfert du reversement %s refusé : %s", verrouille.reference, motif)
     return verrouille
+
+
+def alerter_administration_reversement(reversement, raison):
+    """Journal de sécurité + notification de chaque administrateur actif
+    (même mécanisme que services.alerter_administration). Jamais de numéro
+    de téléphone dans le message."""
+    from apps.notifications import liens
+    from apps.notifications.models import Notification
+    from apps.notifications.services import ServiceNotification
+
+    message = (
+        f"Reversement {reversement.reference} ({int(reversement.montant_a_verser)} FCFA à verser, "
+        f"fournisseur {reversement.fournisseur or 'aucun'}) : {raison} Diagnostic : python manage.py "
+        f"reconcilier_reversements --reference {reversement.reference} --lecture-seule, puis, si le "
+        f"fournisseur ne tranche pas, resoudre_reversement."
+    )
+    logger_securite.error("ALERTE ADMINISTRATION — %s", message)
+    ServiceNotification.notifier_administration(
+        titre="Reversement à vérifier",
+        message=message,
+        type_notification=Notification.TypeNotification.PAIEMENT,
+        lien_redirection=liens.lien_reversements_administration(),
+        metadata={"reversement": str(reversement.pk)},
+    )
+
+
+@dataclass(frozen=True)
+class EtatApplique:
+    """Résultat de appliquer_etat_transfert."""
+
+    reversement: Reversement
+    issue: str  # SUCCES, ECHEC, EN_ATTENTE ou REFUSE
+    change: bool  # le statut du reversement a changé
+    motif: str = ""  # motif d'un REFUSE
+
+
+def _deja_verse_par(reversement, etat):
+    """Reversement versé par CE transfert : un nouveau succès n'en est que la
+    confirmation répétée. Un versement manuel (fournisseur vide) ou un autre
+    transfert (autre référence du fournisseur) ne l'est pas."""
+    if reversement.statut != Statut.VERSE or not reversement.fournisseur:
+        return False
+    return (not etat.identifiant_externe or not reversement.reference_externe
+            or etat.identifiant_externe == reversement.reference_externe)
+
+
+def appliquer_etat_transfert(reversement_id, etat, source):
+    """Seul endroit qui applique un état de transfert renvoyé par le
+    fournisseur : réponse immédiate de transferer, notification vérifiée,
+    réconciliation (`source` : clé de SOURCES). Sous verrou de ligne, statut
+    relu : seul un reversement « en cours » change, une seule fois.
+
+        SUCCES conforme      → verse, vendeur notifié une fois
+        SUCCES non conforme  → reste en_cours (REFUSE), alerte : l'argent a pu
+                               partir avec un autre montant
+        ECHEC                → disponible, ajustements libérés
+        EN_ATTENTE           → rien
+
+    Conforme : montant entier égal au montant_a_verser lu sous verrou, devise
+    XOF (services.controler_montant_et_devise). Un SUCCES reçu pour un
+    reversement qui n'est plus en cours ne change rien et alerte (double
+    paiement possible), sauf s'il confirme le transfert qui l'a versé ; un
+    ECHEC ou une attente y sont sans effet. Renvoie un EtatApplique."""
+    from .services import IncoherenceTransaction, controler_montant_et_devise
+
+    issue, change, motif, alerte = etat.statut, False, "", ""
+    with transaction.atomic():
+        verrouille = (Reversement.objects.select_for_update().select_related("boutique__proprietaire", "commande")
+                      .get(pk=reversement_id))
+        if verrouille.statut != Statut.EN_COURS:
+            if etat.statut == SUCCES and not _deja_verse_par(verrouille, etat):
+                alerte = (
+                    f"succès d'un transfert confirmé par le fournisseur (référence "
+                    f"{etat.identifiant_externe or 'absente'}, {etat.montant} {etat.devise}) alors que le "
+                    f"reversement est « {verrouille.get_statut_display()} » : double paiement possible."
+                )
+        elif etat.statut == SUCCES:
+            try:
+                controler_montant_et_devise(etat, verrouille.montant_a_verser, DEVISE_TRANSFERT)
+            except IncoherenceTransaction as erreur:
+                issue, motif = REFUSE, str(erreur)
+                alerte = f"succès du transfert non appliqué, reversement laissé en cours ({erreur})."
+            else:
+                if not verrouille.reference_externe:
+                    verrouille.reference_externe = etat.identifiant_externe
+                _finaliser(verrouille)
+                verrouille.save()
+                change = True
+        elif etat.statut == ECHEC:
+            _liberer_ajustements(verrouille)
+            verrouille.statut = Statut.DISPONIBLE
+            verrouille.save()
+            change = True
+
+    if change and verrouille.statut == Statut.VERSE:
+        logger_securite.info("Reversement %s : en_cours → verse (source=%s).", verrouille.reference, source)
+        _notifier_vendeur(verrouille)
+    elif change:
+        logger_securite.warning("Reversement %s : en_cours → disponible, échec confirmé (source=%s).",
+                                verrouille.reference, source)
+    if issue == REFUSE:
+        logger_securite.error("Transfert %s : succès %s non appliqué, reversement laissé en cours (%s).",
+                              verrouille.reference, SOURCES[source], motif)
+    elif alerte:
+        logger_securite.error("Transfert %s : succès %s pour un reversement « %s », aucune transition.",
+                              verrouille.reference, SOURCES[source], verrouille.statut)
+    # Succès non conforme : alerte dédupliquée (la réconciliation le revoit
+    # à chaque passage). Double paiement possible : toujours.
+    if alerte and (issue != REFUSE or _reserver_alerte(verrouille.pk, timezone.now())):
+        alerter_administration_reversement(verrouille, alerte)
+    return EtatApplique(verrouille, issue, change, motif)
 
 
 def transferer_reversement(reversement, administrateur, operateur=None):
     """Versement par l'API de transfert du fournisseur actif.
 
-    Un SUCCES immédiat n'est appliqué que s'il confirme le montant à verser
-    et la devise, comme une notification de transfert. Sinon le reversement
-    reste « en cours » (l'argent a pu partir : il ne redevient pas
-    disponible) et son état final vient de la notification."""
-    from .services import IncoherenceTransaction, controler_montant_et_devise
-
+    Le reversement passe « en cours » avant l'appel. Seul un refus certain
+    (REFUS_CERTAINS : rien n'a été créé chez le fournisseur) le rend
+    disponible (ErreurVersement). Toute autre erreur du fournisseur laisse
+    l'issue incertaine : le reversement reste « en cours », montant et
+    ajustements figés, jusqu'à la notification ou la réconciliation. La
+    réponse du fournisseur est appliquée par appliquer_etat_transfert."""
     fournisseur = fournisseur_actif()
     with transaction.atomic():
         verrouille = Reversement.objects.select_for_update().select_related("boutique__proprietaire").get(pk=reversement.pk)
@@ -380,49 +523,36 @@ def transferer_reversement(reversement, administrateur, operateur=None):
         verrouille.operateur = operateur
         verrouille.fournisseur = fournisseur.code
         verrouille.verse_par = administrateur
+        verrouille.date_debut_transfert = timezone.now()
+        verrouille.date_derniere_reconciliation = None
+        verrouille.date_derniere_alerte = None
         verrouille.save()
 
     # Appel réseau hors transaction.
     try:
         resultat = fournisseur.transferer(verrouille, numero, operateur)
-    except (ErreurFournisseur, OperationNonSupportee) as erreur:
+    except REFUS_CERTAINS as erreur:
         _revenir_disponible(verrouille.pk, str(erreur))
         raise ErreurVersement(f"Transfert refusé : {erreur}")
-
-    with transaction.atomic():
-        verrouille = Reversement.objects.select_for_update().select_related("boutique__proprietaire").get(pk=verrouille.pk)
-        verrouille.reference_externe = resultat.identifiant_externe
-        verrouille.hash_jeton_notification = hacher_jeton(resultat.jeton_notification)
-        incoherence = None
-        if resultat.statut == SUCCES and verrouille.statut == Statut.EN_COURS:
-            try:
-                controler_montant_et_devise(resultat, verrouille.montant_a_verser, DEVISE_TRANSFERT)
-            except IncoherenceTransaction as erreur:
-                incoherence = erreur
-            else:
-                _finaliser(verrouille)
-        verrouille.save()
-    if incoherence is not None:
-        logger_securite.error("Transfert %s : succès immédiat non appliqué, reversement laissé en cours (%s).",
-                              verrouille.reference, incoherence)
-    if resultat.statut == ECHEC:
-        verrouille = _revenir_disponible(verrouille.pk, "refus immédiat du fournisseur")
-    elif verrouille.statut == Statut.VERSE:
-        _notifier_vendeur(verrouille)
+    except ErreurFournisseur as erreur:
+        logger_securite.error("Transfert %s : issue incertaine (%s), reversement laissé en cours jusqu'à la "
+                              "confirmation du fournisseur.", verrouille.reference, erreur)
+        verrouille = Reversement.objects.get(pk=verrouille.pk)
+    else:
+        Reversement.objects.filter(pk=verrouille.pk, statut=Statut.EN_COURS).update(
+            reference_externe=resultat.identifiant_externe,
+            hash_jeton_notification=hacher_jeton(resultat.jeton_notification),
+        )
+        verrouille = appliquer_etat_transfert(verrouille.pk, resultat, "immediat").reversement
     logger_securite.info("Transfert du reversement %s lancé par admin_id=%s (%s)",
                          verrouille.reference, administrateur.id, verrouille.statut)
     return verrouille
 
 
 def traiter_notification_transfert(code, request):
-    """Notification de transfert : même chaîne que pour les paiements."""
-    from .services import (
-        IncoherenceTransaction,
-        ResultatNotification,
-        _journaliser,
-        _ouvrir_journal,
-        controler_montant_et_devise,
-    )
+    """Notification de transfert : même chaîne que pour les paiements,
+    l'état vérifié est appliqué par appliquer_etat_transfert."""
+    from .services import ResultatNotification, _journaliser, _ouvrir_journal
 
     try:
         fournisseur = obtenir_fournisseur(code)
@@ -433,7 +563,9 @@ def traiter_notification_transfert(code, request):
         logger_securite.warning("Notification de transfert %s refusée : %s", code, erreur)
         return ResultatNotification(401, "Notification non authentique.")
 
-    reversement = Reversement.objects.filter(reference=notification.reference, fournisseur=code).first()
+    # Fournisseur vide : reversement versé à la main après un transfert
+    # incertain ; un succès tardif doit encore l'atteindre (alerte).
+    reversement = Reversement.objects.filter(reference=notification.reference, fournisseur__in=(code, "")).first()
     if reversement is None:
         return ResultatNotification(404, "Reversement inconnu.")
     try:
@@ -454,28 +586,205 @@ def traiter_notification_transfert(code, request):
         _journaliser(journal, JournalWebhook.StatutTraitement.ERREUR, str(erreur))
         return ResultatNotification(400, "Notification incohérente.")
 
-    if etat.statut == SUCCES:
-        try:
-            controler_montant_et_devise(etat, reversement.montant_a_verser, DEVISE_TRANSFERT)
-        except IncoherenceTransaction as erreur:
-            _journaliser(journal, JournalWebhook.StatutTraitement.ERREUR, str(erreur))
-            logger_securite.error("Transfert %s rejeté : %s", reversement.reference, erreur)
-            return ResultatNotification(400, "Transfert incohérent avec le reversement.")
-        with transaction.atomic():
-            verrouille = Reversement.objects.select_for_update().select_related("boutique__proprietaire").get(pk=reversement.pk)
-            vient_d_etre_verse = verrouille.statut == Statut.EN_COURS
-            if vient_d_etre_verse:
-                _finaliser(verrouille)
-                verrouille.save()
-        if vient_d_etre_verse:
-            _notifier_vendeur(verrouille)
-    elif etat.statut == ECHEC:
-        _revenir_disponible(reversement.pk, "échec confirmé par le fournisseur")
-    else:
+    applique = appliquer_etat_transfert(reversement.pk, etat, "notification")
+    if applique.issue == REFUSE:
+        _journaliser(journal, JournalWebhook.StatutTraitement.ERREUR, applique.motif)
+        return ResultatNotification(400, "Transfert incohérent avec le reversement.")
+    if applique.issue not in (SUCCES, ECHEC):
         _journaliser(journal, JournalWebhook.StatutTraitement.IGNORE)
         return ResultatNotification(200, "Transfert non finalisé.")
     _journaliser(journal, JournalWebhook.StatutTraitement.TRAITE)
     return ResultatNotification(200, f"Reversement {reversement.reference} traité.")
+
+
+# =====================================================================
+# RÉCONCILIATION DES TRANSFERTS (notification perdue, issue incertaine)
+# =====================================================================
+
+def _marquer_reconcilie(reversement):
+    # update() : ni date_mise_a_jour ni aucun autre champ ne change.
+    Reversement.objects.filter(pk=reversement.pk).update(date_derniere_reconciliation=timezone.now())
+
+
+def reconcilier_reversement(reversement, indisponibles=None, non_disponibles=None):
+    """Redemande au fournisseur l'état réel du transfert, HORS transaction
+    (aucun verrou tenu pendant l'appel réseau), puis l'applique par
+    appliquer_etat_transfert, sous verrou, comme une notification. Idempotent
+    et sûr face à une notification ou une autre réconciliation simultanées.
+
+    Renvoie (issue, change). issue : SUCCES, ECHEC, EN_ATTENTE, REFUSE
+    (succès non conforme, réponse incohérente, fournisseur inconnu),
+    INTROUVABLE, INJOIGNABLE ou NON_DISPONIBLE (pas de transferts par API
+    chez ce fournisseur : aucun appel réseau). Seuls un succès conforme et un
+    échec confirmé changent le statut ; un transfert introuvable reste en
+    cours (un « inconnu » ne prouve pas que rien n'est parti), l'alerte par
+    l'âge prend le relais. `indisponibles` / `non_disponibles` (codes
+    fournisseur) évitent de rappeler, dans la même exécution, un fournisseur
+    injoignable ou sans transferts par API."""
+    code = reversement.fournisseur
+    if indisponibles is not None and code in indisponibles:
+        return INJOIGNABLE, False
+    if non_disponibles is not None and code in non_disponibles:
+        _marquer_reconcilie(reversement)
+        return NON_DISPONIBLE, False
+    try:
+        etat = obtenir_fournisseur(code).verifier_transfert(reversement)
+    except FournisseurInconnu:
+        logger_securite.error("Réconciliation du reversement %s impossible : fournisseur %r inconnu.",
+                              reversement.reference, code)
+        _marquer_reconcilie(reversement)
+        return REFUSE, False
+    except OperationNonSupportee as erreur:
+        # Daté : passe après les autres au prochain lot, sans les bloquer.
+        logger.warning("Réconciliation du reversement %s : %s", reversement.reference, erreur)
+        if non_disponibles is not None:
+            non_disponibles.add(code)
+        _marquer_reconcilie(reversement)
+        return NON_DISPONIBLE, False
+    except ErreurFournisseur as erreur:
+        logger.warning("Réconciliation du reversement %s : fournisseur %s injoignable (%s).",
+                       reversement.reference, code, erreur)
+        if indisponibles is not None:
+            indisponibles.add(code)
+        return INJOIGNABLE, False
+    except TransactionIntrouvable as erreur:
+        logger_securite.error("Réconciliation du reversement %s : transfert introuvable chez %s (%s), "
+                              "reversement laissé en cours.", reversement.reference, code, erreur)
+        _marquer_reconcilie(reversement)
+        return INTROUVABLE, False
+    except NotificationInvalide as erreur:
+        logger_securite.error("Réconciliation du reversement %s : réponse incohérente du fournisseur (%s).",
+                              reversement.reference, erreur)
+        _marquer_reconcilie(reversement)
+        return REFUSE, False
+    applique = appliquer_etat_transfert(reversement.pk, etat, "reconciliation")
+    _marquer_reconcilie(reversement)
+    return applique.issue, applique.change
+
+
+def _en_cours_depuis(seuil):
+    """Reversements en cours dont le transfert a commencé avant `seuil`
+    (annotation `debut`). Sans date de début, la dernière mise à jour en
+    tient lieu."""
+    return (
+        Reversement.objects.filter(statut=Statut.EN_COURS)
+        .annotate(debut=Coalesce("date_debut_transfert", "date_mise_a_jour"))
+        .filter(debut__lt=seuil)
+    )
+
+
+def reconcilier_reversements_en_cours(maintenant=None):
+    """Tâche planifiée (tasks.reconcilier_reversements) : vérifie chez le
+    fournisseur les reversements en cours depuis plus de
+    REVERSEMENT_RECONCILIATION_AGE_MINUTES (en deçà, la notification arrive
+    normalement).
+
+    Au plus REVERSEMENT_RECONCILIATION_LOT reversements par exécution, les
+    moins récemment vérifiés d'abord ; arrêt dès qu'un fournisseur est
+    injoignable (un refus, un transfert introuvable ou un fournisseur sans
+    transferts par API n'arrêtent rien). Renvoie (vérifiés, changés,
+    interrompu)."""
+    maintenant = maintenant or timezone.now()
+    lot = list(
+        _en_cours_depuis(maintenant - timedelta(minutes=settings.REVERSEMENT_RECONCILIATION_AGE_MINUTES))
+        .order_by(F("date_derniere_reconciliation").asc(nulls_first=True), "debut")
+        [:settings.REVERSEMENT_RECONCILIATION_LOT]
+    )
+    verifies = changes = 0
+    indisponibles, non_disponibles = set(), set()
+    for reversement in lot:
+        issue, change = reconcilier_reversement(reversement, indisponibles, non_disponibles)
+        if issue == INJOIGNABLE:
+            logger.warning("Réconciliation des reversements interrompue : fournisseur %s injoignable.",
+                           reversement.fournisseur)
+            return verifies, changes, True
+        verifies += 1
+        changes += change
+    return verifies, changes, False
+
+
+def _reserver_alerte(reversement_id, maintenant):
+    """True si une alerte peut partir pour ce reversement en cours (aucune
+    depuis REPETITION_ALERTE). La date est posée par le même UPDATE
+    conditionnel : deux exécutions simultanées n'alertent qu'une fois."""
+    return bool(
+        Reversement.objects.filter(pk=reversement_id, statut=Statut.EN_COURS)
+        .filter(Q(date_derniere_alerte__isnull=True) | Q(date_derniere_alerte__lte=maintenant - REPETITION_ALERTE))
+        .update(date_derniere_alerte=maintenant)
+    )
+
+
+def alerter_reversements_bloques(maintenant=None):
+    """Alerte l'administration pour chaque reversement en cours depuis plus
+    de REVERSEMENT_ALERTE_BLOCAGE_HEURES : une fois, puis toutes les 24 h
+    tant qu'il le reste. Ne dépend pas du fournisseur (s'exécute même s'il
+    est injoignable). Renvoie le nombre d'alertes envoyées."""
+    maintenant = maintenant or timezone.now()
+    bloques = (
+        _en_cours_depuis(maintenant - timedelta(hours=settings.REVERSEMENT_ALERTE_BLOCAGE_HEURES))
+        .filter(Q(date_derniere_alerte__isnull=True) | Q(date_derniere_alerte__lte=maintenant - REPETITION_ALERTE))
+        .order_by("debut")
+    )
+    alertes = 0
+    for reversement in bloques:
+        if not _reserver_alerte(reversement.pk, maintenant):
+            continue
+        heures = int((maintenant - reversement.debut).total_seconds() // 3600)
+        alerter_administration_reversement(
+            reversement, f"transfert en cours depuis {heures} h sans confirmation du fournisseur.",
+        )
+        alertes += 1
+    return alertes
+
+
+#: Décisions de resoudre_transfert_incertain.
+NON_PARTI = "non-parti"
+VERSE_CONFIRME = "verse"
+
+
+def resoudre_transfert_incertain(reversement, administrateur, decision, motif, reference_externe=""):
+    """Sortie manuelle d'un reversement en cours que le fournisseur ne
+    tranche pas (transfert introuvable, bloqué) : l'administration a vérifié
+    le transfert dans le tableau de bord du fournisseur. Jamais automatique.
+
+        non-parti → disponible, ajustements libérés : aucun argent n'est parti
+        verse     → versé (référence du fournisseur obligatoire), vendeur notifié
+
+    Administrateur actif de l'administration et motif obligatoires, journal
+    de sécurité. Le fournisseur du transfert est conservé : un succès tardif
+    de ce même transfert reste silencieux, un autre alerte. Lève
+    ErreurVersement."""
+    from apps.vendeurs.permissions import ROLES_ADMINISTRATION
+
+    motif, reference_externe = (motif or "").strip(), (reference_externe or "").strip()
+    if decision not in (NON_PARTI, VERSE_CONFIRME):
+        raise ErreurVersement(f"Décision inconnue : {decision}.")
+    if administrateur is None or not administrateur.is_active or administrateur.role not in ROLES_ADMINISTRATION:
+        raise ErreurVersement("Seul un administrateur actif peut résoudre un transfert.")
+    if not motif:
+        raise ErreurVersement("Le motif est obligatoire.")
+    if decision == VERSE_CONFIRME and not reference_externe:
+        raise ErreurVersement("La référence du transfert chez le fournisseur est obligatoire.")
+    if len(reference_externe) > Reversement._meta.get_field("reference_externe").max_length:
+        raise ErreurVersement("Référence du fournisseur trop longue.")
+    with transaction.atomic():
+        verrouille = (Reversement.objects.select_for_update().select_related("boutique__proprietaire", "commande")
+                      .get(pk=reversement.pk))
+        if verrouille.statut != Statut.EN_COURS:
+            raise ErreurVersement("Seul un reversement en cours peut être résolu.")
+        if decision == NON_PARTI:
+            _liberer_ajustements(verrouille)
+            verrouille.statut = Statut.DISPONIBLE
+        else:
+            verrouille.reference_externe = reference_externe
+            verrouille.verse_par = administrateur
+            _finaliser(verrouille)
+        verrouille.save()
+    logger_securite.warning("Reversement %s : en_cours → %s (source=admin, admin_id=%s, décision=%s, motif=%r).",
+                            verrouille.reference, verrouille.statut, administrateur.id, decision, motif)
+    if verrouille.statut == Statut.VERSE:
+        _notifier_vendeur(verrouille)
+    return verrouille
 
 
 # =====================================================================

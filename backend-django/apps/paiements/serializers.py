@@ -167,7 +167,7 @@ class ReversementAdminSerializer(ReversementVendeurSerializer):
 
     class Meta(ReversementVendeurSerializer.Meta):
         fields = ReversementVendeurSerializer.Meta.fields + ["boutique", "boutique_nom", "operateur",
-                                                             "fournisseur", "verse_par"]
+                                                             "fournisseur", "verse_par", "date_debut_transfert"]
         read_only_fields = fields
 
 

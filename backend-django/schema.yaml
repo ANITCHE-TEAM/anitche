@@ -10987,8 +10987,9 @@ components:
             : /commandes, /commandes/{uuid}, /livraisons/{uuid}, /retours/{uuid},
             /paiements/{uuid}, /fidelite/mon-compte, /support/tickets/{uuid}, /vendeur/commandes/{uuid},
             /vendeur/produits/{id}, /vendeur/retours/{uuid}, /vendeur/reversements,
-            /administration/retours/{uuid}, /administration/remboursements, /administration/livraisons/{uuid}.
-            Un préfixe inconnu mène au centre de notifications.'
+            /administration/retours/{uuid}, /administration/remboursements, /administration/reversements,
+            /administration/livraisons/{uuid}. Un préfixe inconnu mène au centre de
+            notifications.'
         metadata:
           readOnly: true
           description: Données contextuelles additionnelles (IDs techniques, totaux,
@@ -13712,11 +13713,18 @@ components:
           - integer
           - 'null'
           readOnly: true
+        date_debut_transfert:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          readOnly: true
       required:
       - boutique
       - boutique_nom
       - canal
       - commande
+      - date_debut_transfert
       - date_disponibilite
       - date_livraison
       - date_versement
