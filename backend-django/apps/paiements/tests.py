@@ -14,6 +14,7 @@ from datetime import timedelta
 from decimal import Decimal
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 from urllib.parse import unquote
 
@@ -25,7 +26,7 @@ from django.core.cache import cache
 from django.core.management import CommandError, call_command
 from django.db import IntegrityError, connection, transaction
 from django.db.migrations.executor import MigrationExecutor
-from django.test import TransactionTestCase, override_settings
+from django.test import SimpleTestCase, TransactionTestCase, override_settings
 from django.urls import Resolver404, clear_url_caches, resolve
 from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
@@ -56,10 +57,20 @@ from .fournisseurs.base import (
     NotificationInvalide,
     OperationNonSupportee,
     TransactionIntrouvable,
+    TransfertRefuse,
     hacher_jeton,
 )
 from .fournisseurs.geniuspay import FournisseurGeniusPay
-from .fournisseurs.simule import EN_TETE_SIGNATURE, FournisseurSimule, definir_etat_distant, signer
+from .fournisseurs.simule import (
+    DELAI_APRES_ENVOI,
+    EN_TETE_SIGNATURE,
+    PANNE_AVANT_ENVOI,
+    REFUS_CERTAIN,
+    FournisseurSimule,
+    definir_comportement_transfert,
+    definir_etat_distant,
+    signer,
+)
 from .frais import bareme_en_vigueur, calculer_frais_ligne
 from .management.commands import essai_geniuspay
 from .models import AjustementVendeur, BaremeFrais, JournalWebhook, Paiement, Remboursement, Reversement
@@ -2033,6 +2044,80 @@ class ReversementTests(Donnees, APITestCase):
         # count + page (commande jointe) + articles : constant, sans N+1.
         with self.assertNumQueries(3):
             self.assertEqual(api.get("/api/paiements/vendeur/reversements/").data["count"], 2)
+
+
+class FournisseurSimuleTransfertTests(SimpleTestCase):
+    """Le transfert simulé tient un état « côté fournisseur », relu par
+    verifier_transfert sans notification (réconciliation), et répond comme
+    programmé : délai dépassé après exécution, refus certain, panne avant
+    envoi."""
+
+    def setUp(self):
+        cache.clear()
+        self.fournisseur = FournisseurSimule()
+        self.reversement = SimpleNamespace(reference=f"REV-SIM-{uuid.uuid4().hex[:8]}",
+                                           montant_a_verser=Decimal("8200"), reference_externe="")
+
+    def transferer(self):
+        return self.fournisseur.transferer(self.reversement, "+2250707070707", "orange_money")
+
+    def etat(self):
+        return self.fournisseur.verifier_transfert(self.reversement)
+
+    def test_transfert_refuse_est_une_erreur_fournisseur(self):
+        self.assertTrue(issubclass(TransfertRefuse, ErreurFournisseur))
+
+    def test_transfert_execute_retrouve_par_la_verification(self):
+        resultat = self.transferer()
+        etat = self.etat()
+        self.assertEqual((etat.statut, etat.montant, etat.devise, etat.identifiant_externe),
+                         (SUCCES, 8200, "XOF", resultat.identifiant_externe))
+
+    def test_transfert_inconnu_en_attente(self):
+        self.reversement.reference_externe = "T-CONNU"
+        etat = self.etat()
+        self.assertEqual((etat.statut, etat.identifiant_externe, etat.montant), (EN_ATTENTE, "T-CONNU", None))
+
+    def test_delai_apres_envoi_erreur_incertaine_transfert_execute(self):
+        definir_comportement_transfert(self.reversement.reference, DELAI_APRES_ENVOI)
+        with self.assertRaises(ErreurFournisseur) as erreur:
+            self.transferer()
+        self.assertNotIsInstance(erreur.exception, TransfertRefuse)
+        etat = self.etat()
+        self.assertEqual((etat.statut, etat.montant, etat.devise), (SUCCES, 8200, "XOF"))
+        # Programmé pour un seul transfert : le suivant répond normalement.
+        self.assertEqual(self.transferer().statut, SUCCES)
+
+    def test_refus_certain_et_panne_avant_envoi_ne_creent_rien(self):
+        for comportement, exception in ((REFUS_CERTAIN, TransfertRefuse), (PANNE_AVANT_ENVOI, ErreurFournisseur)):
+            with self.subTest(comportement):
+                cache.clear()
+                definir_comportement_transfert(self.reversement.reference, comportement)
+                with self.assertRaises(exception) as erreur:
+                    self.transferer()
+                if comportement == PANNE_AVANT_ENVOI:
+                    self.assertNotIsInstance(erreur.exception, TransfertRefuse)
+                self.assertEqual(self.etat().statut, EN_ATTENTE)
+
+    def test_panne_et_transfert_introuvable_a_la_verification(self):
+        definir_etat_distant(self.reversement.reference, "injoignable")
+        with self.assertRaises(ErreurFournisseur):
+            self.etat()
+        definir_etat_distant(self.reversement.reference, "introuvable")
+        with self.assertRaises(TransactionIntrouvable):
+            self.etat()
+
+    def test_notification_devient_l_etat_distant(self):
+        from .fournisseurs.base import Notification as NotificationFournisseur
+
+        notification = NotificationFournisseur(reference=self.reversement.reference, identifiant_externe="T9",
+                                               cle_idempotence="evt-1", donnees={"statut": ECHEC})
+        self.assertEqual(self.fournisseur.verifier_transfert(self.reversement, notification).statut, ECHEC)
+        self.assertEqual((self.etat().statut, self.etat().identifiant_externe), (ECHEC, "T9"))
+
+    def test_comportement_inconnu_refuse(self):
+        with self.assertRaises(ValueError):
+            definir_comportement_transfert(self.reversement.reference, "succes")
 
 
 # =====================================================================

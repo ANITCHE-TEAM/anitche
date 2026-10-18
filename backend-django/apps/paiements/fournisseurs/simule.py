@@ -19,6 +19,13 @@ definir_etat_distant (tests, commande `simuler_etat_paiement` en dev), est
 gardé dans le cache. verifier_transaction sans notification le renvoie ;
 sans état connu, la transaction est « en attente » (le client n'a pas payé).
 
+Transferts : même état distant, par la référence du reversement. Un
+transfert exécuté l'enregistre (SUCCES, montant envoyé) ; verifier_transfert
+sans notification le renvoie, « en attente » s'il est inconnu.
+definir_comportement_transfert programme la réponse du prochain transfert
+d'un reversement : délai dépassé après exécution, refus certain, panne
+avant envoi.
+
 Refusé en production (config/settings/prod.py).
 """
 
@@ -43,6 +50,7 @@ from .base import (
     ResultatTransfert,
     SessionPaiement,
     TransactionIntrouvable,
+    TransfertRefuse,
 )
 
 EN_TETE_SIGNATURE = "X-Signature-Simulation"
@@ -54,10 +62,30 @@ STATUTS = {SUCCES, ECHEC, EN_ATTENTE}
 INJOIGNABLE = "injoignable"
 INTROUVABLE = "introuvable"
 DUREE_ETAT_DISTANT = 3 * 24 * 3600  # au-delà de la fenêtre de réconciliation (24 h)
+# Réponses programmables du prochain transfert d'un reversement :
+# exécuté puis réponse perdue (ErreurFournisseur, l'argent est parti), refus
+# certain (TransfertRefuse, rien n'est créé), panne avant tout envoi
+# (ErreurFournisseur, rien n'est créé).
+DELAI_APRES_ENVOI = "delai_apres_envoi"
+REFUS_CERTAIN = "refus_certain"
+PANNE_AVANT_ENVOI = "panne_avant_envoi"
+COMPORTEMENTS_TRANSFERT = (DELAI_APRES_ENVOI, REFUS_CERTAIN, PANNE_AVANT_ENVOI)
 
 
 def _cle_etat(reference):
     return f"paiement_simule:etat:{reference}"
+
+
+def _cle_comportement(reference):
+    return f"paiement_simule:transfert:{reference}"
+
+
+def definir_comportement_transfert(reference, comportement):
+    """Programme la réponse du prochain transfert du reversement `reference`
+    (une seule fois)."""
+    if comportement not in COMPORTEMENTS_TRANSFERT:
+        raise ValueError(f"Comportement de transfert simulé inconnu : {comportement}")
+    cache.set(_cle_comportement(reference), comportement, DUREE_ETAT_DISTANT)
 
 
 def definir_etat_distant(reference, statut, montant=None, devise="XOF", identifiant_externe=""):
@@ -155,35 +183,47 @@ class FournisseurSimule(FournisseurPaiement):
             devise=donnees.get("devise"),
         )
 
-    def verifier_transaction(self, paiement, notification=None):
+    def _verifier(self, reference, notification, identifiant_connu):
         if notification is not None:
             # Pas de serveur distant : la notification signée fait foi, et
             # devient l'état connu du « fournisseur » pour la réconciliation.
             etat = self._etat(notification)
-            definir_etat_distant(paiement.reference, etat.statut, etat.montant, etat.devise or "XOF",
+            definir_etat_distant(reference, etat.statut, etat.montant, etat.devise or "XOF",
                                  etat.identifiant_externe)
             return etat
-        connu = cache.get(_cle_etat(paiement.reference))
+        connu = cache.get(_cle_etat(reference))
         if connu is None:
-            return EtatTransaction(statut=EN_ATTENTE, identifiant_externe=paiement.transaction_id_externe or "")
+            return EtatTransaction(statut=EN_ATTENTE, identifiant_externe=identifiant_connu or "")
         if connu["statut"] == INJOIGNABLE:
             raise ErreurFournisseur("Fournisseur simulé injoignable.")
         if connu["statut"] == INTROUVABLE:
             raise TransactionIntrouvable("Transaction inconnue du fournisseur simulé.")
         return EtatTransaction(
             statut=connu["statut"],
-            identifiant_externe=connu["identifiant_externe"] or paiement.transaction_id_externe or "",
+            identifiant_externe=connu["identifiant_externe"] or identifiant_connu or "",
             montant=connu["montant"],
             devise=connu["devise"],
         )
 
+    def verifier_transaction(self, paiement, notification=None):
+        return self._verifier(paiement.reference, notification, paiement.transaction_id_externe)
+
     def transferer(self, reversement, telephone, operateur):
         self._secret()
-        # Pas de serveur distant : le transfert simulé confirme ce qui est demandé.
-        return ResultatTransfert(
-            statut=SUCCES, identifiant_externe=f"SIMT-{uuid.uuid4().hex[:16].upper()}",
-            montant=int(reversement.montant_a_verser), devise="XOF",
-        )
+        comportement = cache.get(_cle_comportement(reversement.reference))
+        cache.delete(_cle_comportement(reversement.reference))
+        if comportement == REFUS_CERTAIN:
+            raise TransfertRefuse("Solde marchand insuffisant (simulé) : aucun transfert créé.")
+        if comportement == PANNE_AVANT_ENVOI:
+            raise ErreurFournisseur("Fournisseur simulé injoignable : transfert non envoyé.")
+        # Pas de serveur distant : le transfert simulé exécute ce qui est
+        # demandé, et son état devient celui que la réconciliation retrouvera.
+        identifiant = f"SIMT-{uuid.uuid4().hex[:16].upper()}"
+        montant = int(reversement.montant_a_verser)
+        definir_etat_distant(reversement.reference, SUCCES, montant, "XOF", identifiant)
+        if comportement == DELAI_APRES_ENVOI:
+            raise ErreurFournisseur("Délai dépassé (simulé) : réponse du fournisseur perdue.")
+        return ResultatTransfert(statut=SUCCES, identifiant_externe=identifiant, montant=montant, devise="XOF")
 
     def verifier_transfert(self, reversement, notification=None):
-        return self._etat(notification)
+        return self._verifier(reversement.reference, notification, reversement.reference_externe)

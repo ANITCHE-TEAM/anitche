@@ -37,6 +37,17 @@ class MontantHorsLimites(ErreurFournisseur):
     """Le montant sort des limites acceptées par le fournisseur."""
 
 
+class TransfertRefuse(ErreurFournisseur):
+    """Refus certain d'un transfert : le fournisseur garantit qu'aucun
+    transfert n'a été créé (solde insuffisant, numéro refusé...).
+
+    Seuls ce refus, MontantHorsLimites et OperationNonSupportee rendent un
+    reversement disponible après l'appel à transferer. Toute autre
+    ErreurFournisseur (délai dépassé, 5xx, réponse illisible) laisse l'issue
+    incertaine : l'argent a pu partir, le reversement reste « en cours »
+    jusqu'à la réconciliation."""
+
+
 class TransactionIntrouvable(Exception):
     """Le fournisseur répond, mais refuse de renvoyer l'état de CETTE
     transaction : inconnue (404) ou référence refusée (400).
@@ -170,12 +181,30 @@ class FournisseurPaiement:
 
     def transferer(self, reversement, telephone, operateur):
         """Envoie reversement.montant_a_verser sur le mobile money du vendeur
-        → ResultatTransfert (l'état final peut arriver par notification)."""
+        → ResultatTransfert (l'état final peut arriver par notification).
+
+        reversement.reference est envoyée comme référence marchand (clé
+        d'idempotence quand le fournisseur en accepte une). Lève
+        TransfertRefuse ou MontantHorsLimites seulement si le fournisseur
+        garantit qu'aucun transfert n'a été créé ; tout autre échec est une
+        ErreurFournisseur, traitée comme une issue incertaine. Un
+        ResultatTransfert ECHEC ne traduit qu'un statut final explicite du
+        fournisseur : un statut inconnu ou non final vaut EN_ATTENTE."""
         raise OperationNonSupportee(f"Transfert par API non disponible chez {self.code}.")
 
     def lire_notification_transfert(self, request):
         return self.lire_notification(request)
 
     def verifier_transfert(self, reversement, notification=None):
-        """État réel du transfert → EtatTransaction."""
+        """État réel du transfert → EtatTransaction, avec le montant (int) et
+        la devise confirmés pour un SUCCES.
+
+        Sans notification (réconciliation), interroge le fournisseur sur CE
+        reversement par sa référence ANITCHE (reversement.reference), ou par
+        reversement.reference_externe si elle est connue. ECHEC seulement
+        pour un statut final explicite. Lève OperationNonSupportee (pas de
+        transferts par API chez ce fournisseur, aucun appel réseau),
+        ErreurFournisseur (panne, délai dépassé), TransactionIntrouvable
+        (transfert inconnu du fournisseur) ou NotificationInvalide (réponse
+        qui ne désigne pas ce reversement)."""
         raise OperationNonSupportee(f"Transfert par API non disponible chez {self.code}.")
