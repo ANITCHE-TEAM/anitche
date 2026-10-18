@@ -77,7 +77,7 @@ from .management.commands import essai_geniuspay
 from .models import AjustementVendeur, BaremeFrais, JournalWebhook, Paiement, Remboursement, Reversement
 from .services import reconcilier_paiement, reconcilier_paiements_en_suspens
 from .signals import paiement_valide
-from .tasks import reconcilier_paiements
+from .tasks import reconcilier_paiements, reconcilier_reversements
 
 URL_INITIER = "/api/paiements/initier/"
 URL_VALIDER_PANIER = "/api/commandes/valider-panier/"
@@ -1055,13 +1055,9 @@ class ReconciliationPlanifieeTests(DonneesReconciliation, APITestCase):
         self.assertEqual(verifies, [self.paiement.pk, autre_paiement.pk, self.paiement.pk])
 
 
-class ReconciliationConcurrenceTests(DonneesReconciliation, TransactionTestCase):
-    """PostgreSQL : vraies transactions concurrentes (fils d'exécution)."""
-
-    def setUp(self):
-        recreer_bareme_plateforme()
-        recreer_tarifs_initiaux()
-        self.preparer()
+class FilsConcurrents:
+    """Pour un TransactionTestCase sur PostgreSQL : fonctions exécutées en
+    même temps, chacune dans son fil et sa connexion."""
 
     def lancer(self, *fonctions, entre=None):
         """Exécute chaque fonction dans son fil (sa connexion). `entre` :
@@ -1087,6 +1083,15 @@ class ReconciliationConcurrenceTests(DonneesReconciliation, TransactionTestCase)
         self.assertFalse(any(fil.is_alive() for fil in fils), "Fil bloqué : interblocage probable.")
         self.assertEqual(erreurs, [])
         return [resultats[i] for i in range(len(fonctions))]
+
+
+class ReconciliationConcurrenceTests(FilsConcurrents, DonneesReconciliation, TransactionTestCase):
+    """PostgreSQL : vraies transactions concurrentes (fils d'exécution)."""
+
+    def setUp(self):
+        recreer_bareme_plateforme()
+        recreer_tarifs_initiaux()
+        self.preparer()
 
     def verifier_invariant(self):
         """Webhook de succès reçu (argent encaissé) : paiement validé, et
@@ -1801,6 +1806,12 @@ class DonneesReversement(Donnees):
         with mock.patch.object(FournisseurSimule, "transferer", return_value=reponse):
             return self.api(self.admin).post(self.URL_TRANSFERER.format(self.reversement.pk), {"operateur": "wave"})
 
+    def versements_notifies(self):
+        return Notification.objects.filter(destinataire=self.vendeur1, titre="Reversement effectué").count()
+
+    def alertes(self, administrateur=None):
+        return Notification.objects.filter(destinataire=administrateur or self.admin, titre="Reversement à vérifier")
+
 
 class ReversementTests(DonneesReversement, APITestCase):
     def retour(self, statut=DemandeRetour.Statut.DEMANDE, quantite=1):
@@ -2080,12 +2091,6 @@ class TransfertIncertainTests(DonneesReversement, APITestCase):
     def disponible_libere(self):
         return ("disponible", Decimal("0"), Decimal("0"), None)
 
-    def versements_notifies(self):
-        return Notification.objects.filter(destinataire=self.vendeur1, titre="Reversement effectué").count()
-
-    def alertes(self):
-        return Notification.objects.filter(destinataire=self.admin, titre="Reversement à vérifier")
-
     def test_delai_depasse_apres_envoi_reste_en_cours(self):
         definir_comportement_transfert(self.reversement.reference, DELAI_APRES_ENVOI)
         with self.assertLogs("securite", "ERROR") as journaux:
@@ -2275,6 +2280,367 @@ class MigrationSuiviTransfertTests(Donnees, TransactionTestCase):
         self.migrer(self.AVANT)
         self.migrer()
         self.assertEqual(Reversement.objects.get(statut="en_cours").date_debut_transfert, dates["en_cours"])
+
+
+def compter_verifications_de_transfert():
+    """Le vrai verifier_transfert du fournisseur simulé, appels comptés."""
+    return mock.patch.object(FournisseurSimule, "verifier_transfert", autospec=True,
+                             side_effect=FournisseurSimule.verifier_transfert)
+
+
+def transferts_verifies(verifier):
+    return [appel.args[1].reference for appel in verifier.call_args_list]
+
+
+class DonneesReconciliationReversement(DonneesReversement):
+    """Reversement livré puis transféré : le fournisseur a répondu « en
+    attente » (référence T1) il y a 30 minutes, la notification n'est
+    jamais arrivée."""
+
+    def setUp(self):
+        super().setUp()
+        self.livrer(il_y_a_jours=8)
+        self.mettre_en_cours(self.reversement)
+
+    def mettre_en_cours(self, reversement, minutes=30, identifiant="T1"):
+        from .fournisseurs.base import ResultatTransfert
+
+        with mock.patch.object(FournisseurSimule, "transferer",
+                               return_value=ResultatTransfert(statut=EN_ATTENTE, identifiant_externe=identifiant)):
+            r = self.api(self.admin).post(self.URL_TRANSFERER.format(reversement.pk), {"operateur": "wave"})
+        assert (r.status_code, r.data["statut"]) == (200, "en_cours"), r.data
+        Reversement.objects.filter(pk=reversement.pk).update(
+            date_debut_transfert=timezone.now() - timedelta(minutes=minutes))
+        reversement.refresh_from_db()
+        return reversement
+
+    def autre_reversement(self, minutes=30):
+        """Autre commande de la boutique 1 (net 4 100), transférée et en cours."""
+        (commande,) = self.commander((self.variante1, 1))
+        self.notifier_succes(self.payer(commande))
+        self.livrer(commande, il_y_a_jours=8)
+        return self.mettre_en_cours(Reversement.objects.get(commande=commande), minutes)
+
+    def distant(self, statut, reversement=None, montant=None, devise="XOF", identifiant="T1"):
+        """État du transfert « chez le fournisseur » (simulé)."""
+        reversement = reversement or self.reversement
+        definir_etat_distant(reversement.reference, statut,
+                             int(reversement.montant_a_verser) if montant is None else montant, devise, identifiant)
+
+
+class ReconciliationReversementTests(DonneesReconciliationReversement, APITestCase):
+    """Un reversement « en cours » dont la notification se perd est
+    redemandé au fournisseur ; l'état est appliqué par la même règle que la
+    notification. Seuls un succès conforme et un échec confirmé changent le
+    statut."""
+
+    def test_succes_conforme_verse_une_seule_fois(self):
+        self.distant(SUCCES)
+        with self.assertLogs("securite", "INFO") as journaux:
+            self.assertEqual(reversements.reconcilier_reversements_en_cours(), (1, 1, False))
+        self.reversement.refresh_from_db()
+        self.assertEqual((self.reversement.statut, self.reversement.reference_externe), ("verse", "T1"))
+        self.assertIsNotNone(self.reversement.date_versement)
+        self.assertIsNotNone(self.reversement.date_derniere_reconciliation)
+        self.assertEqual(self.versements_notifies(), 1)
+        self.assertEqual(self.alertes().count(), 0)
+        self.assertIn(f"Reversement {self.reversement.reference} : en_cours → verse (source=reconciliation)",
+                      "\n".join(journaux.output))
+
+    def test_succes_renseigne_la_reference_du_fournisseur_si_elle_manque(self):
+        Reversement.objects.filter(pk=self.reversement.pk).update(reference_externe="")
+        self.distant(SUCCES, identifiant="T-RECONCILIE")
+        self.assertEqual(reversements.reconcilier_reversement(self.reversement), (SUCCES, True))
+        self.reversement.refresh_from_db()
+        self.assertEqual((self.reversement.statut, self.reversement.reference_externe), ("verse", "T-RECONCILIE"))
+
+    def test_succes_non_conforme_refuse(self):
+        du = int(self.reversement.montant_a_verser)
+        confirmations = {
+            "montant et devise absents": (None, None),
+            "montant absent": (None, "XOF"),
+            "devise absente": (du, None),
+            "devise vide": (du, ""),
+            "montant fractionnaire": (du + 0.5, "XOF"),
+            "montant fractionnaire décimal": (Decimal(f"{du}.50"), "XOF"),
+            "montant en texte": (str(du), "XOF"),
+            "montant flottant": (float(du), "XOF"),
+            "montant booléen": (True, "XOF"),
+            "devise différente": (du, "EUR"),
+            "montant inférieur": (du - 1, "XOF"),
+            "montant supérieur": (du + 1, "XOF"),
+        }
+        for libelle, (montant, devise) in confirmations.items():
+            with self.subTest(libelle):
+                Reversement.objects.filter(pk=self.reversement.pk).update(date_derniere_alerte=None)
+                avant = self.alertes().count()
+                definir_etat_distant(self.reversement.reference, SUCCES, montant, devise, "T1")
+                with self.assertLogs("securite", "ERROR") as journaux:
+                    self.assertEqual(reversements.reconcilier_reversement(self.reversement), (reversements.REFUSE, False))
+                self.reversement.refresh_from_db()
+                self.assertEqual((self.reversement.statut, self.reversement.date_versement), ("en_cours", None))
+                self.assertIn(f"Transfert {self.reversement.reference} : succès constaté par réconciliation non "
+                              "appliqué", journaux.output[0])
+                self.assertEqual(self.alertes().count(), avant + 1)
+                self.assertEqual(self.versements_notifies(), 0)
+
+    def test_echec_confirme_rend_disponible(self):
+        ajustement = AjustementVendeur.objects.create(boutique=self.boutique1, montant=Decimal("-1000"),
+                                                      motif="Retour remboursé après versement")
+        autre = self.autre_reversement()
+        self.assertEqual((autre.montant_a_verser, AjustementVendeur.objects.get(pk=ajustement.pk).reversement_impute),
+                         (Decimal("3100"), autre))
+        self.distant(ECHEC, autre)
+        with self.assertLogs("securite", "WARNING") as journaux:
+            self.assertEqual(reversements.reconcilier_reversement(autre), (ECHEC, True))
+        autre.refresh_from_db()
+        self.assertEqual((autre.statut, autre.montant_a_verser, autre.montant_ajustements),
+                         ("disponible", Decimal("0"), Decimal("0")))
+        self.assertIsNone(AjustementVendeur.objects.get(pk=ajustement.pk).reversement_impute)
+        self.assertIn("en_cours → disponible, échec confirmé (source=reconciliation)", "\n".join(journaux.output))
+
+    def test_introuvable_ne_rend_jamais_disponible(self):
+        suivant = self.autre_reversement(minutes=20)
+        self.distant("introuvable")
+        self.distant(SUCCES, suivant)
+        with self.assertLogs("securite", "ERROR"), compter_verifications_de_transfert() as verifier:
+            self.assertEqual(reversements.reconcilier_reversements_en_cours(), (2, 1, False))
+        self.assertEqual(transferts_verifies(verifier), [self.reversement.reference, suivant.reference])
+        self.reversement.refresh_from_db()
+        suivant.refresh_from_db()
+        self.assertEqual((self.reversement.statut, self.reversement.montant_a_verser), ("en_cours", Decimal("8200")))
+        self.assertIsNotNone(self.reversement.date_derniere_reconciliation)
+        self.assertEqual(suivant.statut, "verse")
+
+    def test_en_attente_inchange_et_date(self):
+        mise_a_jour = self.reversement.date_mise_a_jour
+        self.assertEqual(reversements.reconcilier_reversements_en_cours(), (1, 0, False))
+        self.reversement.refresh_from_db()
+        self.assertEqual((self.reversement.statut, self.reversement.date_mise_a_jour), ("en_cours", mise_a_jour))
+        self.assertIsNotNone(self.reversement.date_derniere_reconciliation)
+
+    def test_fournisseur_injoignable_arret_propre(self):
+        suivant = self.autre_reversement(minutes=20)
+        self.distant("injoignable")
+        self.distant(SUCCES, suivant)
+        with compter_verifications_de_transfert() as verifier:
+            self.assertEqual(reconcilier_reversements(), "0 reversement(s) vérifié(s), 0 statut(s) changé(s), "
+                                                         "0 alerte(s). Interrompue : fournisseur injoignable.")
+        self.assertEqual(transferts_verifies(verifier), [self.reversement.reference])
+        self.reversement.refresh_from_db()
+        suivant.refresh_from_db()
+        self.assertEqual((self.reversement.statut, suivant.statut), ("en_cours", "en_cours"))
+        self.assertIsNone(self.reversement.date_derniere_reconciliation)
+
+    def test_fournisseur_inconnu_ou_reponse_incoherente_reste_en_cours(self):
+        with self.subTest("fournisseur inconnu"):
+            Reversement.objects.filter(pk=self.reversement.pk).update(fournisseur="ancien_fournisseur")
+            self.reversement.refresh_from_db()
+            with self.assertLogs("securite", "ERROR"):
+                self.assertEqual(reversements.reconcilier_reversement(self.reversement), (reversements.REFUSE, False))
+        with self.subTest("réponse incohérente"):
+            Reversement.objects.filter(pk=self.reversement.pk).update(fournisseur="simule",
+                                                                       date_derniere_reconciliation=None)
+            self.reversement.refresh_from_db()
+            with mock.patch.object(FournisseurSimule, "verifier_transfert",
+                                   side_effect=NotificationInvalide("Réponse pour un autre reversement")), \
+                    self.assertLogs("securite", "ERROR"):
+                self.assertEqual(reversements.reconcilier_reversement(self.reversement), (reversements.REFUSE, False))
+        self.reversement.refresh_from_db()
+        self.assertEqual(self.reversement.statut, "en_cours")
+        self.assertIsNotNone(self.reversement.date_derniere_reconciliation)
+
+    def test_seuls_les_en_cours_assez_anciens_sont_verifies(self):
+        recent = self.autre_reversement(minutes=5)
+        autre = self.autre_reversement(minutes=30)
+        for statut in ("disponible", "verse", "suspendu", "annule", "en_retractation", "en_attente_livraison"):
+            with self.subTest(statut):
+                Reversement.objects.filter(pk=autre.pk).update(statut=statut)
+                with compter_verifications_de_transfert() as verifier:
+                    reversements.reconcilier_reversements_en_cours()
+                self.assertEqual(transferts_verifies(verifier), [self.reversement.reference])
+        recent.refresh_from_db()
+        self.assertIsNone(recent.date_derniere_reconciliation)
+
+    @override_settings(REVERSEMENT_RECONCILIATION_LOT=2)
+    def test_lot_et_ordre_jamais_verifies_d_abord(self):
+        Reversement.objects.filter(pk=self.reversement.pk).update(
+            date_debut_transfert=timezone.now() - timedelta(minutes=60),
+            date_derniere_reconciliation=timezone.now() - timedelta(minutes=1))
+        deuxieme = self.autre_reversement(minutes=30)
+        troisieme = self.autre_reversement(minutes=20)
+        with compter_verifications_de_transfert() as verifier:
+            self.assertEqual(reversements.reconcilier_reversements_en_cours(), (2, 0, False))
+        self.assertEqual(transferts_verifies(verifier), [deuxieme.reference, troisieme.reference])
+
+    def test_reconciliation_idempotente(self):
+        self.distant(SUCCES)
+        self.assertEqual(reversements.reconcilier_reversement(self.reversement), (SUCCES, True))
+        self.reversement.refresh_from_db()
+        date_versement = self.reversement.date_versement
+        self.assertEqual(reversements.reconcilier_reversement(self.reversement), (SUCCES, False))
+        self.reversement.refresh_from_db()
+        self.assertEqual((self.reversement.statut, self.reversement.date_versement), ("verse", date_versement))
+        self.assertEqual(self.versements_notifies(), 1)
+        self.assertEqual(self.alertes().count(), 0)
+
+    def test_commande_de_developpement_pour_un_transfert(self):
+        sortie = StringIO()
+        call_command("simuler_etat_paiement", self.reversement.reference, "succes", stdout=sortie)
+        self.assertIn("état simulé « succes » (8200 XOF)", sortie.getvalue())
+        self.assertEqual(reversements.reconcilier_reversements_en_cours(), (1, 1, False))
+        Reversement.objects.filter(pk=self.reversement.pk).update(fournisseur="")
+        with self.assertRaises(CommandError):
+            call_command("simuler_etat_paiement", self.reversement.reference, "echec")
+
+    # --- Tâche planifiée et commande d'exploitation ---------------------------
+
+    def test_tache_planifiee_enregistree(self):
+        from django.utils.module_loading import import_string
+
+        entree = settings.CELERY_BEAT_SCHEDULE["paiements-reconcilier-reversements"]
+        self.assertEqual(entree["task"], "apps.paiements.tasks.reconcilier_reversements")
+        self.assertEqual(entree["schedule"].minute, set(range(5, 60, 10)))
+        self.assertEqual((settings.REVERSEMENT_RECONCILIATION_AGE_MINUTES, settings.REVERSEMENT_RECONCILIATION_LOT,
+                          settings.REVERSEMENT_ALERTE_BLOCAGE_HEURES), (10, 50, 2))
+        tache = import_string(entree["task"])
+        self.distant(SUCCES)
+        self.assertEqual(tache(), "1 reversement(s) vérifié(s), 1 statut(s) changé(s), 0 alerte(s).")
+
+    def test_commande_reconcilier_reversements(self):
+        recent = self.autre_reversement(minutes=1)
+        self.distant(SUCCES, recent)
+        # --reference : un seul reversement, sans condition d'âge.
+        sortie = StringIO()
+        call_command("reconcilier_reversements", "--reference", recent.reference, stdout=sortie)
+        self.assertIn(f"{recent.reference} : issue « succes », statut verse (changé).", sortie.getvalue())
+        self.reversement.refresh_from_db()
+        self.assertIsNone(self.reversement.date_derniere_reconciliation)
+        # Sans argument : le travail de la tâche planifiée.
+        sortie = StringIO()
+        call_command("reconcilier_reversements", stdout=sortie)
+        self.assertIn("1 reversement(s) vérifié(s), 0 statut(s) changé(s), 0 alerte(s).", sortie.getvalue())
+        for arguments in (("--reference", "REV-INCONNU"), ("--reference", recent.reference), ("--lecture-seule",)):
+            with self.subTest(arguments), self.assertRaises(CommandError):
+                call_command("reconcilier_reversements", *arguments, stdout=StringIO())
+
+    def test_lecture_seule_n_ecrit_rien(self):
+        self.distant(SUCCES)
+        avant = Reversement.objects.filter(pk=self.reversement.pk).values().get()
+        notifications = Notification.objects.count()
+        sortie = StringIO()
+        call_command("reconcilier_reversements", "--reference", self.reversement.reference, "--lecture-seule",
+                     stdout=sortie)
+        self.assertIn(f"{self.reversement.reference} (simule) : succes, montant confirmé 8200 XOF (à verser : 8200 XOF)",
+                      sortie.getvalue())
+        self.assertIn("Rien n'a été écrit.", sortie.getvalue())
+        self.assertEqual(Reversement.objects.filter(pk=self.reversement.pk).values().get(), avant)
+        self.assertEqual(Notification.objects.count(), notifications)
+        self.distant("introuvable")
+        sortie = StringIO()
+        call_command("reconcilier_reversements", "--reference", self.reversement.reference, "--lecture-seule",
+                     stdout=sortie)
+        self.assertIn("TransactionIntrouvable", sortie.getvalue())
+
+    # --- Alertes ------------------------------------------------------------
+
+    def test_alerte_bloque_apres_le_seuil(self):
+        creer = Utilisateur.objects.create_user
+        admin2 = creer(email="admin2@pay.ci", password="x", nom="A", prenom="E", role=Role.ADMIN)
+        inactif = creer(email="admin3@pay.ci", password="x", nom="A", prenom="F", role=Role.ADMIN, is_active=False)
+        debut = self.reversement.date_debut_transfert
+        self.assertEqual(reversements.alerter_reversements_bloques(debut + timedelta(hours=2, minutes=-1)), 0)
+        with self.assertLogs("securite", "ERROR") as journaux:
+            self.assertEqual(reversements.alerter_reversements_bloques(debut + timedelta(hours=2, minutes=1)), 1)
+        self.assertIn("ALERTE ADMINISTRATION", journaux.output[0])
+        self.assertEqual((self.alertes().count(), self.alertes(admin2).count(), self.alertes(inactif).count()),
+                         (1, 1, 0))
+        alerte = self.alertes().get()
+        self.assertEqual(alerte.lien_redirection, "/administration/reversements")
+        for attendu in (self.reversement.reference, "en cours depuis 2 h",
+                        f"reconcilier_reversements --reference {self.reversement.reference} --lecture-seule"):
+            self.assertIn(attendu, alerte.message)
+        self.assertNotIn("0707070707", alerte.message)
+
+    def test_alerte_non_repetee_avant_24h_puis_repetee(self):
+        debut = self.reversement.date_debut_transfert
+        with self.assertLogs("securite", "ERROR"):
+            self.assertEqual(reversements.alerter_reversements_bloques(debut + timedelta(hours=3)), 1)
+        self.assertEqual(reversements.alerter_reversements_bloques(debut + timedelta(hours=26, minutes=59)), 0)
+        with self.assertLogs("securite", "ERROR"):
+            self.assertEqual(reversements.alerter_reversements_bloques(debut + timedelta(hours=27)), 1)
+        self.assertEqual(self.alertes().count(), 2)
+
+    def test_alerte_sur_succes_non_conforme_non_repetee_par_la_reconciliation(self):
+        self.distant(SUCCES, montant=8199)
+        for _ in range(2):
+            with self.assertLogs("securite", "ERROR"):
+                reversements.reconcilier_reversement(self.reversement)
+        self.assertEqual(self.alertes().count(), 1)
+        # Même compteur que l'alerte de blocage : une alerte par 24 h et par reversement.
+        self.assertEqual(reversements.alerter_reversements_bloques(timezone.now() + timedelta(hours=3)), 0)
+
+
+class ReconciliationReversementConcurrenceTests(FilsConcurrents, DonneesReconciliationReversement,
+                                                TransactionTestCase):
+    """PostgreSQL : la réconciliation, une autre réconciliation et la
+    notification appliquent l'état sous le même verrou ; une seule transition,
+    un seul message au vendeur."""
+
+    def setUp(self):
+        recreer_bareme_plateforme()
+        recreer_tarifs_initiaux()
+        super().setUp()
+
+    def bloquer_premiere_finalisation(self):
+        """Le premier fil qui verse attend, verrou tenu, que l'autre soit
+        bloqué sur ce verrou."""
+        vraie = reversements._finaliser
+        premiere = threading.Event()
+
+        def finaliser(reversement):
+            if not premiere.is_set():
+                premiere.set()
+                if not attendre_transactions_bloquees():
+                    raise AssertionError("Aucune transaction n'attend le verrou du reversement.")
+            return vraie(reversement)
+
+        return mock.patch.object(reversements, "_finaliser", side_effect=finaliser)
+
+    def test_deux_reconciliations_simultanees(self):
+        self.distant(SUCCES)
+        with self.bloquer_premiere_finalisation():
+            resultats = self.lancer(lambda: reversements.reconcilier_reversement(self.reversement),
+                                    lambda: reversements.reconcilier_reversement(self.reversement))
+        self.assertEqual(sorted(resultats), [(SUCCES, False), (SUCCES, True)])
+        self.reversement.refresh_from_db()
+        self.assertEqual(self.reversement.statut, "verse")
+        self.assertEqual((self.versements_notifies(), self.alertes().count()), (1, 0))
+
+    def test_reconciliation_pendant_une_notification(self):
+        self.distant(SUCCES)
+        with self.bloquer_premiere_finalisation():
+            code_http, (issue, _) = self.lancer(
+                lambda: self.notifier(self.reversement.reference, montant=8200, transfert=True, transaction_id="T1",
+                                      evenement_id="evt-concurrent").status_code,
+                lambda: reversements.reconcilier_reversement(self.reversement),
+            )
+        self.assertEqual((code_http, issue), (200, SUCCES))
+        self.reversement.refresh_from_db()
+        self.assertEqual(self.reversement.statut, "verse")
+        self.assertEqual(JournalWebhook.objects.get(evenement_id="evt-concurrent").statut_traitement, "traite")
+        self.assertEqual((self.versements_notifies(), self.alertes().count()), (1, 0))
+
+    def test_echec_reconcilie_puis_succes_notifie(self):
+        self.distant(ECHEC)
+        self.assertEqual(reversements.reconcilier_reversement(self.reversement), (ECHEC, True))
+        with self.assertLogs("securite", "ERROR"):
+            r = self.notifier(self.reversement.reference, montant=8200, transfert=True, transaction_id="T1")
+        self.assertEqual(r.status_code, 200)
+        self.reversement.refresh_from_db()
+        self.assertEqual(self.reversement.statut, "disponible")
+        self.assertEqual(self.versements_notifies(), 0)
+        self.assertIn("double paiement possible", self.alertes().get().message)
 
 
 class FournisseurSimuleTransfertTests(SimpleTestCase):
@@ -3196,6 +3562,37 @@ class GeniusPayTests(DonneesGeniusPay, APITestCase):
                 self.assertEqual(self.poster(self.evenement(evenement), transfert=True).status_code, 401)
         with self.assertRaises(NotificationInvalide):
             self.adaptateur.lire_notification_transfert(None)
+
+
+class ReconciliationGeniusPayTests(DonneesGeniusPay, DonneesReconciliationReversement, APITestCase):
+    """GeniusPay n'a pas de transferts par API : la réconciliation d'un
+    reversement en cours chez lui est « non disponible », sans appel réseau
+    ni changement d'état, et n'arrête pas le lot."""
+
+    def setUp(self):
+        super().setUp()
+        self.chez_geniuspay = self.autre_reversement(minutes=60)  # premier du lot
+        Reversement.objects.filter(pk=self.chez_geniuspay.pk).update(fournisseur="geniuspay")
+        self.chez_geniuspay.refresh_from_db()
+        self.distant(SUCCES)  # le reversement du fournisseur simulé, derrière
+        self.configurer_geniuspay()
+
+    def test_reconciliation_geniuspay_non_disponible(self):
+        with self.assertLogs("apps.paiements.reversements", "WARNING") as journaux, \
+                compter_verifications_de_transfert() as verifier:
+            self.assertEqual(reversements.reconcilier_reversements_en_cours(), (2, 1, False))
+        self.assertEqual(self.faux.appels, [])
+        self.assertEqual(transferts_verifies(verifier), [self.reversement.reference])
+        self.assertIn("Transfert par API non disponible chez geniuspay", "\n".join(journaux.output))
+        self.chez_geniuspay.refresh_from_db()
+        self.assertEqual((self.chez_geniuspay.statut, self.chez_geniuspay.montant_a_verser),
+                         ("en_cours", Decimal("4100")))
+        self.assertIsNotNone(self.chez_geniuspay.date_derniere_reconciliation)
+        self.reversement.refresh_from_db()
+        self.assertEqual(self.reversement.statut, "verse")
+        self.assertEqual(reversements.reconcilier_reversement(self.chez_geniuspay),
+                         (reversements.NON_DISPONIBLE, False))
+        self.assertEqual(self.faux.appels, [])
 
 
 class GeniusPayInactifParDefautTests(Donnees, APITestCase):

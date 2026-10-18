@@ -394,6 +394,13 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'apps.paiements.tasks.reconcilier_paiements',
         'schedule': crontab(minute='*/10'),
     },
+    # Notifications de transfert perdues : état des reversements en cours
+    # redemandé au fournisseur, alertes de blocage. Décalée de 5 minutes de
+    # la réconciliation des paiements.
+    'paiements-reconcilier-reversements': {
+        'task': 'apps.paiements.tasks.reconcilier_reversements',
+        'schedule': crontab(minute='5-59/10'),
+    },
     # Délai de rétractation écoulé : reversements aux vendeurs disponibles.
     'paiements-rendre-reversements-disponibles': {
         'task': 'apps.paiements.tasks.rendre_reversements_disponibles',
@@ -507,6 +514,15 @@ PAIEMENT_RECONCILIATION_FENETRE_HEURES = config('PAIEMENT_RECONCILIATION_FENETRE
 # Paiements vérifiés au plus par exécution (un appel au fournisseur chacun,
 # GENIUSPAY_TIMEOUT au plus) : 50 x 10 s reste sous l'intervalle de 10 minutes.
 PAIEMENT_RECONCILIATION_LOT = config('PAIEMENT_RECONCILIATION_LOT', default=50, cast=int)
+
+# Réconciliation des reversements (apps.paiements.reversements) : transferts
+# « en cours » dont la notification n'arrive pas. Vérifiés après N minutes...
+REVERSEMENT_RECONCILIATION_AGE_MINUTES = config('REVERSEMENT_RECONCILIATION_AGE_MINUTES', default=10, cast=int)
+# ... au plus N par exécution (50 x GENIUSPAY_TIMEOUT reste sous l'intervalle de 10 minutes)...
+REVERSEMENT_RECONCILIATION_LOT = config('REVERSEMENT_RECONCILIATION_LOT', default=50, cast=int)
+# ... et alerte de l'administration pour un reversement encore en cours après
+# N heures (répétée toutes les 24 h tant qu'il le reste).
+REVERSEMENT_ALERTE_BLOCAGE_HEURES = config('REVERSEMENT_ALERTE_BLOCAGE_HEURES', default=2, cast=int)
 
 FRONTEND_BASE_URL = config('FRONTEND_BASE_URL', default='http://localhost:5173')
 
