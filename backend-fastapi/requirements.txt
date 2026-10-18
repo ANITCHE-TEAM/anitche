@@ -2,10 +2,10 @@
 # Outils de test : requirements-dev.txt.
 fastapi==0.143.1
 # Dépendance de fastapi, épinglée pour des builds reproductibles.
-starlette==1.7.0
+starlette==1.8.0
 uvicorn[standard]==0.54.0
 pydantic==2.13.5
-pydantic-settings==2.15.0
+pydantic-settings==2.16.0
 httpx==0.28.1
 asyncpg==0.32.0
 redis==8.1.0
@@ -19,7 +19,7 @@ certifi==2026.7.22
 click==8.5.0
 h11==0.16.0
 httpcore==1.0.9
-httptools==0.8.0
+httptools==0.9.0
 idna==3.20
 pydantic_core==2.46.5
 python-dotenv==1.2.4
