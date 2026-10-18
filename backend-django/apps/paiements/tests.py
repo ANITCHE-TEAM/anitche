@@ -2092,6 +2092,8 @@ class TransfertIncertainTests(DonneesReversement, APITestCase):
             r = self.transferer()
         self.assertEqual((r.status_code, r.data["statut"]), (200, "en_cours"))
         self.assertEqual(self.etat(), self.en_cours_fige())
+        self.assertIsNotNone(self.reversement.date_debut_transfert)
+        self.assertIsNotNone(r.data["date_debut_transfert"])  # vu par l'administration
         self.assertIn(f"Transfert {self.reversement.reference} : issue incertaine", journaux.output[0])
         self.assertEqual(self.versements_notifies(), 0)
         # Le transfert est bien parti chez le fournisseur.
@@ -2151,6 +2153,19 @@ class TransfertIncertainTests(DonneesReversement, APITestCase):
             self.assertEqual(r.status_code, 409)
         self.assertEqual(transferer.call_count, 1)
         self.assertEqual(self.etat(), self.en_cours_fige())
+
+    def test_nouveau_transfert_remet_le_suivi_a_zero(self):
+        ancien = timezone.now() - timedelta(days=3)
+        Reversement.objects.filter(pk=self.reversement.pk).update(
+            date_debut_transfert=ancien, date_derniere_reconciliation=ancien, date_derniere_alerte=ancien)
+        definir_comportement_transfert(self.reversement.reference, DELAI_APRES_ENVOI)
+        avant = timezone.now()
+        with self.assertLogs("securite", "ERROR"):
+            self.transferer()
+        self.reversement.refresh_from_db()
+        self.assertGreaterEqual(self.reversement.date_debut_transfert, avant)
+        self.assertEqual((self.reversement.date_derniere_reconciliation, self.reversement.date_derniere_alerte),
+                         (None, None))
 
     def test_rendre_disponibles_ne_touche_que_en_retractation(self):
         for statut in ("en_cours", "verse", "suspendu", "annule", "en_attente_livraison"):
@@ -2215,6 +2230,51 @@ class TransfertIncertainTests(DonneesReversement, APITestCase):
         self.assertNotIn("0707070707", alerte.message)
         self.assertIn("ALERTE ADMINISTRATION", "\n".join(journaux.output))
         self.assertEqual(self.versements_notifies(), 0)
+
+
+class MigrationSuiviTransfertTests(Donnees, TransactionTestCase):
+    """Migration 0010 : seuls les reversements « en cours » reçoivent une date
+    de début de transfert (leur dernière mise à jour), les autres restent
+    NULL ; retour arrière et nouvel aller sans erreur."""
+
+    AVANT = [("paiements", "0009_paiement_date_derniere_reconciliation")]
+
+    def setUp(self):
+        recreer_bareme_plateforme()
+        recreer_tarifs_initiaux()
+        self.creer_donnees()
+
+    def tearDown(self):
+        self.migrer()
+
+    def migrer(self, cible=None):
+        executeur = MigrationExecutor(connection)
+        executeur.migrate(cible or executeur.loader.graph.leaf_nodes())
+
+    def test_rattrapage_des_seuls_reversements_en_cours(self):
+        dates = {}
+        for jours, statut in enumerate(Reversement.Statut.values, start=1):
+            (commande,) = self.commander((self.variante1, 1))
+            self.notifier_succes(self.payer(commande))
+            dates[statut] = timezone.now() - timedelta(days=jours)
+            Reversement.objects.filter(commande=commande).update(statut=statut, date_mise_a_jour=dates[statut])
+
+        self.migrer(self.AVANT)
+        self.migrer()
+        self.assertEqual(Reversement.objects.count(), len(Reversement.Statut.values))
+        for reversement in Reversement.objects.all():
+            with self.subTest(reversement.statut):
+                attendu = dates["en_cours"] if reversement.statut == "en_cours" else None
+                self.assertEqual(
+                    (reversement.date_debut_transfert, reversement.date_derniere_reconciliation,
+                     reversement.date_derniere_alerte),
+                    (attendu, None, None),
+                )
+
+        # Retour arrière (colonnes retirées), puis de nouveau vers l'avant.
+        self.migrer(self.AVANT)
+        self.migrer()
+        self.assertEqual(Reversement.objects.get(statut="en_cours").date_debut_transfert, dates["en_cours"])
 
 
 class FournisseurSimuleTransfertTests(SimpleTestCase):

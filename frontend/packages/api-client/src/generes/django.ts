@@ -4925,6 +4925,8 @@ export interface components {
             readonly operateur: string;
             readonly fournisseur: string;
             readonly verse_par: number | null;
+            /** Format: date-time */
+            readonly date_debut_transfert: string | null;
         };
         ReversementVendeur: {
             /** Format: uuid */

@@ -372,6 +372,13 @@ class Reversement(models.Model):
     verse_par = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="+",
     )
+    # Suivi d'un transfert « en cours » (apps.paiements.reversements) : début
+    # du dernier transfert (âge d'un reversement bloqué), dernière
+    # vérification chez le fournisseur (réconciliation), dernière alerte de
+    # l'administration. Remis à zéro à chaque nouveau transfert.
+    date_debut_transfert = models.DateTimeField(null=True, blank=True)
+    date_derniere_reconciliation = models.DateTimeField(null=True, blank=True)
+    date_derniere_alerte = models.DateTimeField(null=True, blank=True)
 
     date_creation = models.DateTimeField(auto_now_add=True)
     date_mise_a_jour = models.DateTimeField(auto_now=True)

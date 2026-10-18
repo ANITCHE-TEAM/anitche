@@ -506,6 +506,9 @@ def transferer_reversement(reversement, administrateur, operateur=None):
         verrouille.operateur = operateur
         verrouille.fournisseur = fournisseur.code
         verrouille.verse_par = administrateur
+        verrouille.date_debut_transfert = timezone.now()
+        verrouille.date_derniere_reconciliation = None
+        verrouille.date_derniere_alerte = None
         verrouille.save()
 
     # Appel réseau hors transaction.
