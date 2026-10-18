@@ -556,7 +556,7 @@ def test_django_and_fastapi_read_the_same_frontend_base_url():
     assert (
         prod["backend-django"]["environment"]["FRONTEND_BASE_URL"]
         == prod["backend-fastapi"]["environment"]["FRONTEND_BASE_URL"]
-        == "${FRONTEND_BASE_URL:-https://anitche.com}"
+        == "${FRONTEND_BASE_URL:-https://${DOMAIN}}"
     )
     dev = yaml.safe_load((REPO / "infra" / "docker-compose.yml").read_text(encoding="utf-8"))["services"]
     django_base = (REPO / "backend-django" / "config" / "settings" / "base.py").read_text(encoding="utf-8")
