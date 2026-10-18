@@ -451,6 +451,92 @@ class PanierProtectionsTestCase(PanierBaseTestCase):
                 self.assertNotIn("seuil_alerte", response.content.decode())
 
 
+class PanierAutoAchatTestCase(PanierBaseTestCase):
+    """Un vendeur n'achète pas les articles de sa propre boutique : refus 400
+    avec le code machine `auto_achat_interdit` (errors.code[0]). Les articles
+    des autres boutiques restent achetables, et un compte sans boutique n'est
+    pas concerné."""
+
+    def setUp(self):
+        super().setUp()
+        self.url_items = reverse("panier:panier-items")
+
+        self.autre_vendeur = self._create_user("autre-vendeur@test.com", Role.VENDEUR, statut_kyc=StatutKYC.VALIDE)
+        autre_boutique = Boutique.objects.create(proprietaire=self.autre_vendeur, nom="Autre Boutique", est_active=True)
+        autre_produit = Produit.objects.create(boutique=autre_boutique, nom="Casque", prix_base=Decimal("8000.00"))
+        self.variante_autre_boutique = VarianteProduit.objects.create(
+            produit=autre_produit, nom="Standard", prix=Decimal("8000.00"),
+        )
+        self.variante_autre_boutique.stock.quantite_disponible = 10
+        self.variante_autre_boutique.stock.save()
+
+    def _ligne_du_vendeur(self, quantite=2):
+        """Ligne de sa propre boutique posée directement en base, sans passer
+        par l'ajout : un panier peut en contenir (données existantes)."""
+        panier, _ = Panier.objects.get_or_create(utilisateur=self.vendeur)
+        return PanierItem.objects.create(panier=panier, variante=self.variante, quantite=quantite)
+
+    def _verifier_refus(self, response):
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["errors"]["code"], ["auto_achat_interdit"])
+        self.assertIn("propre boutique", response.data["detail"])
+
+    def test_vendeur_ne_peut_pas_ajouter_un_article_de_sa_boutique(self):
+        self.client.force_authenticate(user=self.vendeur)
+
+        response = self.client.post(self.url_items, {"variante": self.variante.id, "quantite": 1})
+
+        self._verifier_refus(response)
+        self.assertIn("variante", response.data["errors"])
+        self.assertFalse(PanierItem.objects.exists())
+
+    def test_vendeur_peut_ajouter_un_article_d_une_autre_boutique(self):
+        self.client.force_authenticate(user=self.vendeur)
+
+        response = self.client.post(self.url_items, {"variante": self.variante_autre_boutique.id, "quantite": 2})
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(PanierItem.objects.get().variante, self.variante_autre_boutique)
+
+    def test_vendeur_ne_peut_pas_augmenter_la_quantite_d_une_ligne_de_sa_boutique(self):
+        ligne = self._ligne_du_vendeur(quantite=2)
+        self.client.force_authenticate(user=self.vendeur)
+        url_ligne = reverse("panier:panier-item-detail", args=[ligne.id])
+
+        self._verifier_refus(self.client.patch(url_ligne, {"quantite": 3}))
+        ligne.refresh_from_db()
+        self.assertEqual(ligne.quantite, 2)
+
+    def test_vendeur_peut_baisser_et_supprimer_une_ligne_de_sa_boutique(self):
+        ligne = self._ligne_du_vendeur(quantite=3)
+        self.client.force_authenticate(user=self.vendeur)
+        url_ligne = reverse("panier:panier-item-detail", args=[ligne.id])
+
+        self.assertEqual(self.client.patch(url_ligne, {"quantite": 1}).status_code, status.HTTP_200_OK)
+        ligne.refresh_from_db()
+        self.assertEqual(ligne.quantite, 1)
+
+        self.assertEqual(self.client.delete(url_ligne).status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(PanierItem.objects.filter(pk=ligne.pk).exists())
+
+    def test_comptes_sans_boutique_peuvent_ajouter(self):
+        for role in (Role.CLIENT, Role.ADMIN, Role.LIVREUR):
+            with self.subTest(role=role):
+                compte = self._create_user(f"sans-boutique-{role}@test.com", role)
+                self.client.force_authenticate(user=compte)
+                response = self.client.post(self.url_items, {"variante": self.variante.id, "quantite": 1})
+                self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_vendeur_dont_le_role_a_change_reste_refuse_sur_sa_boutique(self):
+        Utilisateur.objects.filter(pk=self.vendeur.pk).update(role=Role.CLIENT)
+        self.vendeur.refresh_from_db()
+        self.client.force_authenticate(user=self.vendeur)
+
+        response = self.client.post(self.url_items, {"variante": self.variante.id, "quantite": 1})
+
+        self._verifier_refus(response)
+
+
 class PanierLimiteTestCase(PanierBaseTestCase):
     """Le panier n'a que sa limite 'panier' : ni 'anon' (par IP, partagée
     derrière un CGNAT) ni 'user'."""

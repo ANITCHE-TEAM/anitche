@@ -1502,3 +1502,84 @@ class CommandesAdministrationTests(DonneesCycleDeVie, APITestCase):
         with CaptureQueriesContext(connection) as apres:
             self.assertEqual(self.client.get(URL_ADMIN_COMMANDES).data["count"], 7)
         self.assertEqual(len(avant.captured_queries), len(apres.captured_queries))
+
+
+class AutoAchatVendeurTests(DonneesCycleDeVie, APITestCase):
+    """Un vendeur n'achète pas les articles de sa propre boutique. Le panier
+    refuse l'ajout (apps/panier/tests.py) : ici, des lignes posées directement
+    en base ne passent ni la simulation ni la validation, qui sont les seules
+    créations de commande."""
+
+    def setUp(self):
+        self.creer_donnees()
+
+    def verifier_refus(self, reponse):
+        self.assertEqual(reponse.status_code, 400, reponse.data)
+        self.assertEqual(reponse.data["errors"]["code"], ["auto_achat_interdit"])
+        self.assertIn("propre boutique", reponse.data["detail"])
+        self.assertIn("Produit A", reponse.data["detail"])
+
+    def verifier_rien_ecrit(self, *variantes_stock):
+        self.assertFalse(GroupeCommande.objects.exists())
+        self.assertFalse(Commande.objects.exists())
+        self.assertFalse(CommandeItem.objects.exists())
+        for variante, stock in variantes_stock:
+            self.assertEqual(self.stock(variante), stock)
+
+    def test_validation_refusee_pour_un_article_de_sa_boutique(self):
+        reponse = self.commander((self.variante1, 2), client=self.vendeur1)
+
+        self.verifier_refus(reponse)
+        self.verifier_rien_ecrit((self.variante1, 10))
+        self.assertEqual(PanierItem.objects.filter(panier__utilisateur=self.vendeur1).count(), 1)
+
+    def test_panier_mixte_refuse_en_entier(self):
+        reponse = self.commander((self.variante1, 1), (self.variante2, 1), client=self.vendeur1)
+
+        self.verifier_refus(reponse)
+        self.verifier_rien_ecrit((self.variante1, 10), (self.variante2, 10))
+
+    def test_article_d_une_autre_boutique_reste_achetable(self):
+        reponse = self.commander((self.variante2, 2), client=self.vendeur1)
+
+        self.assertEqual(reponse.status_code, 201, reponse.data)
+        self.assertEqual(Commande.objects.get().boutique, self.boutique2)
+        self.assertEqual(self.stock(self.variante2), 8)
+
+    def test_simulation_refusee_pour_un_article_de_sa_boutique(self):
+        panier, _ = Panier.objects.get_or_create(utilisateur=self.vendeur1)
+        PanierItem.objects.create(panier=panier, variante=self.variante1, quantite=1)
+        self.en_tant_que(self.vendeur1)
+
+        self.verifier_refus(self.client.post(URL_SIMULER, {"adresse_livraison": ADRESSE_LIVRAISON}, format="json"))
+
+    def test_coupon_non_consomme_quand_la_validation_est_refusee(self):
+        coupon = CouponReduction.objects.create(code="AUTO", type_reduction="pourcentage", valeur=Decimal("10"))
+
+        reponse = self.commander((self.variante1, 1), client=self.vendeur1, coupon_code="AUTO")
+
+        self.verifier_refus(reponse)
+        coupon.refresh_from_db()
+        self.assertFalse(coupon.est_utilise)
+        self.assertEqual(coupon.nombre_utilisations, 0)
+        self.verifier_rien_ecrit((self.variante1, 10))
+
+    def test_comptes_sans_boutique_commandent_normalement(self):
+        comptes = [
+            Utilisateur.objects.create_user(
+                email=f"{role}-sans-boutique@cmd.ci", password="x", nom="S", prenom="B", role=role, email_verifie=True,
+            )
+            for role in (Role.ADMIN, Role.LIVREUR)
+        ]
+        for compte in comptes:
+            with self.subTest(role=compte.role):
+                reponse = self.commander((self.variante1, 1), client=compte)
+                self.assertEqual(reponse.status_code, 201, reponse.data)
+
+    def test_aucune_creation_de_commande_hors_validation_du_panier(self):
+        self.en_tant_que(self.vendeur1)
+
+        reponse = self.client.post(reverse("commandes:commande-list"), {"boutique": self.boutique1.pk}, format="json")
+
+        self.assertEqual(reponse.status_code, 405)
+        self.assertFalse(Commande.objects.exists())

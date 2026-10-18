@@ -148,13 +148,38 @@ def calculer_checkout(items, adresse, client, coupon=None):
       zone est déduite par le serveur (apps.livraison.frais), payés par le
       client ou offerts par la boutique.
 
-    Lève CheckoutRefuse (panier vide, articles indisponibles, coupon non
-    valable) ou apps.livraison.frais.TarifIntrouvable (configuration).
+    Lève CheckoutRefuse (panier vide, article de sa propre boutique, articles
+    indisponibles, coupon non valable) ou apps.livraison.frais.TarifIntrouvable
+    (configuration).
+
+    La validation appelle cette fonction dans sa transaction, panier verrouillé
+    et avant les verrous de stock : le refus de l'auto-achat y est donc pris
+    sur l'état verrouillé du panier, et la simulation répond comme la validation.
     """
     from apps.livraison.frais import frais_de_la_commande, tarif_applicable
+    from apps.panier.services import (
+        CODE_AUTO_ACHAT_INTERDIT,
+        est_article_de_sa_boutique,
+    )
 
     if not items:
         raise CheckoutRefuse("Le panier est vide.")
+
+    # Un vendeur ne commande pas dans sa propre boutique (ventes, avis et
+    # niveau vendeur gonflés). Même règle et même code qu'à l'ajout au panier ;
+    # toutes les lignes concernées sont listées pour être retirées en une fois.
+    items_propre_boutique = [item for item in items if est_article_de_sa_boutique(item.variante, client.pk)]
+    if items_propre_boutique:
+        libelles = ", ".join(
+            f"{item.variante.produit.nom} ({item.variante.nom})" for item in items_propre_boutique
+        )
+        raise CheckoutRefuse({
+            "detail": (
+                f"Vous ne pouvez pas acheter les articles de votre propre boutique : {libelles}. "
+                "Retirez-les du panier pour valider la commande."
+            ),
+            "code": CODE_AUTO_ACHAT_INTERDIT,
+        })
 
     # Une variante retirée de la vente, un produit désactivé, ou une
     # boutique suspendue entre l'ajout au panier et le paiement ne peuvent

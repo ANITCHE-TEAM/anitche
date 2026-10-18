@@ -62,7 +62,8 @@ class ServiceIndisponible(APIException):
     description=(
         "Crée une commande par boutique (statut `creee`, à payer sous 30 minutes), décrémente le stock "
         "et vide le panier. Mêmes montants que `simuler-frais/`. Stock insuffisant ou panier vide : "
-        "400 (`errors.non_field_errors`)."
+        "400 (`errors.non_field_errors`). Panier contenant un article de la boutique du client : 400, "
+        "`errors.code = [\"auto_achat_interdit\"]`, aucune commande créée."
     ),
     request=SimulerFraisSerializer,
     responses={201: CommandeSerializer(many=True), **erreurs(503)},
@@ -222,7 +223,10 @@ class ValiderPanierView(APIView):
 
 @extend_schema(
     summary="Simuler les montants du checkout",
-    description="Aucune écriture : montants par commande (une par boutique) et totaux, recalculés à l'identique à la validation.",
+    description=(
+        "Aucune écriture : montants par commande (une par boutique) et totaux, recalculés à l'identique à la validation. "
+        "Mêmes refus que la validation, dont `errors.code = [\"auto_achat_interdit\"]` (article de la boutique du client)."
+    ),
     request=SimulerFraisSerializer,
     responses={200: SimulationCheckoutSerializer, **erreurs(503)},
 )
