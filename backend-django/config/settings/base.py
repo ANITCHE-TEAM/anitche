@@ -234,6 +234,9 @@ REST_FRAMEWORK = {
         # suivantes (modification, suppression).
         'avis_creation': '10/hour',
         'avis_ecriture': '30/hour',
+        # Signalement d'avis, par utilisateur : une lecture attentive en
+        # produit quelques-uns, au-delà c'est du harcèlement de la modération.
+        'avis_signalement': '20/hour',
         # Support, par utilisateur : tickets, messages d'un fil de discussion
         # et pièces jointes (5 par message au plus).
         'support_ticket': '10/hour',
@@ -337,6 +340,9 @@ SPECTACULAR_SETTINGS = {
         'StatutGainFideliteEnum': 'apps.fidelite.models.GainFidelite.Statut',
         'StatutTicketEnum': 'apps.support.models.SupportTicket.Status',
         'CanalNotificationEnum': 'apps.notifications.models.Notification.Canal',
+        'AvisStatutEnum': 'apps.avis.models.Avis.Statut',
+        'StatutSignalementAvisEnum': 'apps.avis.models.SignalementAvis.Statut',
+        'MotifSignalementAvisEnum': 'apps.avis.models.SignalementAvis.Motif',
         'MethodeEnum': 'apps.paiements.models.Paiement.Methode',
         'MethodeConnexionEnum': 'apps.utilisateurs.models.MethodeConnexion',
     },

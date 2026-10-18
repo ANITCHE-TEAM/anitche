@@ -238,6 +238,224 @@ paths:
                 $ref: '#/components/schemas/Erreur'
           description: 'Limite de débit atteinte : réessayer après le délai indiqué
             par l''en-tête Retry-After.'
+  /api/avis/{id}/reponse/:
+    post:
+      operationId: avis_reponse_create
+      description: 'Réservé au propriétaire de la boutique de l''avis. Une seule réponse
+        par avis (409 ensuite : la modifier). Avis d''une autre boutique ou boutique
+        suspendue : 403 ; avis introuvable, masqué ou supprimé : 404.'
+      summary: Répondre à un avis
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Avis
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContenuReponseRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ContenuReponseRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ContenuReponseRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReponseVendeur'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Conflit : l''état actuel de la ressource ne permet pas cette
+            action.'
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+    patch:
+      operationId: avis_reponse_partial_update
+      description: Sans limite de durée ; `date_modification` est mise à jour.
+      summary: Modifier ma réponse à un avis
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Avis
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedContenuReponseRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedContenuReponseRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedContenuReponseRequest'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReponseVendeur'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/avis/{id}/signaler/:
+    post:
+      operationId: avis_signaler_create
+      description: 'Tout compte connecté. `motif` parmi une liste fermée, `commentaire`
+        facultatif (500 caractères). Un signalement par utilisateur et par avis (409
+        ensuite). Son propre avis : 403 ; avis introuvable, masqué ou supprimé : 404.
+        Le signalement ne masque rien : la modération décide.'
+      summary: Signaler un avis
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Avis
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignalerAvisRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/SignalerAvisRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/SignalerAvisRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Signalement'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Conflit : l''état actuel de la ressource ne permet pas cette
+            action.'
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
   /api/avis/a-noter/:
     get:
       operationId: avis_a_noter_list
@@ -304,6 +522,392 @@ paths:
               schema:
                 $ref: '#/components/schemas/Erreur'
           description: Authentification absente, jeton invalide ou expiré.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/avis/moderation/avis/{id}/masquer/:
+    post:
+      operationId: avis_moderation_avis_masquer_create
+      description: 'Modérateur, admin, super_admin. `motif` obligatoire. L''avis sort
+        du public et des moyennes (recalculées) ; son auteur le voit `masque`. Ses
+        signalements ouverts sont acceptés. Avis non publié : 409.'
+      summary: Masquer un avis (modération)
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Avis
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MotifModerationRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/MotifModerationRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/MotifModerationRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionModeration'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Conflit : l''état actuel de la ressource ne permet pas cette
+            action.'
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/avis/moderation/avis/{id}/retablir/:
+    post:
+      operationId: avis_moderation_avis_retablir_create
+      description: 'Modérateur, admin, super_admin. `motif` obligatoire. L''avis revient
+        dans le public et les moyennes. Avis non masqué : 409.'
+      summary: Rétablir un avis masqué (modération)
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Avis
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MotifModerationRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/MotifModerationRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/MotifModerationRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionModeration'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Conflit : l''état actuel de la ressource ne permet pas cette
+            action.'
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/avis/moderation/signalements/:
+    get:
+      operationId: avis_moderation_signalements_list
+      description: 'Modérateur, admin, super_admin. File des signalements `ouvert`
+        (défaut) dont l''avis est encore publié, les plus anciens d''abord ; `statut=accepte`
+        ou `rejete` consulte les signalements traités. Valeur invalide : 400.'
+      summary: Signalements d'avis (modération)
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      - in: query
+        name: statut
+        schema:
+          enum:
+          - ouvert
+          - accepte
+          - rejete
+          type: string
+          default: ouvert
+          minLength: 1
+        description: |-
+          Défaut `ouvert`. `accepte` retrouve les avis masqués à la suite d'un signalement.
+
+          * `ouvert` - Ouvert
+          * `accepte` - Accepté (avis masqué)
+          * `rejete` - Rejeté
+      tags:
+      - Avis
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedSignalementModerationList'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/avis/moderation/signalements/{id}/rejeter/:
+    post:
+      operationId: avis_moderation_signalements_rejeter_create
+      description: 'Modérateur, admin, super_admin. `motif` obligatoire. L''avis reste
+        publié. Signalement déjà traité : 409.'
+      summary: Rejeter un signalement (modération)
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        required: true
+      tags:
+      - Avis
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MotifModerationRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/MotifModerationRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/MotifModerationRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionModeration'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Conflit : l''état actuel de la ressource ne permet pas cette
+            action.'
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/avis/produit/{produit_id}/:
+    get:
+      operationId: avis_produit_list
+      description: 'Public. Seuls les avis publiés figurent ici, les plus récents
+        d''abord, avec la réponse de la boutique. Un avis masqué par la modération
+        ou supprimé par son auteur n''y est plus. Produit inconnu ou non visible au
+        public : 404.'
+      summary: Avis publiés d'un produit
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      - in: path
+        name: produit_id
+        schema:
+          type: integer
+        required: true
+      tags:
+      - Avis
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedAvisPublicList'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/avis/recus/:
+    get:
+      operationId: avis_recus_list
+      description: Avis publiés sur les produits de ma boutique, les plus récents
+        d'abord, avec ma réponse. `sans_reponse=true` ne garde que ceux auxquels je
+        n'ai pas encore répondu.
+      summary: Avis reçus par ma boutique
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      - in: query
+        name: sans_reponse
+        schema:
+          type: boolean
+        description: '`true` : avis sans réponse de la boutique.'
+      tags:
+      - Avis
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedAvisRecuList'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
         '429':
           content:
             application/json:
@@ -8691,6 +9295,11 @@ components:
           type: string
           readOnly: true
           description: Fin du délai de modification par l'auteur (ISO 8601).
+        reponse_vendeur:
+          oneOf:
+          - $ref: '#/components/schemas/ReponseVendeur'
+          - type: 'null'
+          readOnly: true
       required:
       - boutique_nom
       - commande_item_id
@@ -8704,7 +9313,131 @@ components:
       - produit_id
       - produit_nom
       - produit_slug
+      - reponse_vendeur
       - statut
+    AvisModeration:
+      type: object
+      description: Avis signalé, tel que la modération le lit.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        produit_id:
+          type: integer
+          readOnly: true
+        produit_nom:
+          type: string
+          readOnly: true
+        boutique_nom:
+          type: string
+          readOnly: true
+        client_id:
+          type: integer
+          readOnly: true
+        note:
+          type: integer
+          readOnly: true
+        commentaire:
+          type: string
+          readOnly: true
+        statut:
+          allOf:
+          - $ref: '#/components/schemas/AvisStatutEnum'
+          readOnly: true
+      required:
+      - boutique_nom
+      - client_id
+      - commentaire
+      - id
+      - note
+      - produit_id
+      - produit_nom
+      - statut
+    AvisPublic:
+      type: object
+      description: |-
+        Un avis publié tel que le public le voit : prénom et initiale du nom
+        seulement, jamais l'email ni l'identifiant du client.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        auteur:
+          type: string
+          readOnly: true
+        note:
+          type: integer
+          readOnly: true
+        commentaire:
+          type: string
+          readOnly: true
+        est_modifie:
+          type: boolean
+          readOnly: true
+        date_creation:
+          type: string
+          format: date-time
+          readOnly: true
+        reponse_vendeur:
+          oneOf:
+          - $ref: '#/components/schemas/ReponseVendeur'
+          - type: 'null'
+          readOnly: true
+      required:
+      - auteur
+      - commentaire
+      - date_creation
+      - est_modifie
+      - id
+      - note
+      - reponse_vendeur
+    AvisRecu:
+      type: object
+      description: Un avis reçu par la boutique, vu par son propriétaire.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        produit_id:
+          type: integer
+          readOnly: true
+        produit_nom:
+          type: string
+          readOnly: true
+        auteur:
+          type: string
+          readOnly: true
+        note:
+          type: integer
+          readOnly: true
+        commentaire:
+          type: string
+          readOnly: true
+        est_modifie:
+          type: boolean
+          readOnly: true
+        date_creation:
+          type: string
+          format: date-time
+          readOnly: true
+        reponse_vendeur:
+          oneOf:
+          - $ref: '#/components/schemas/ReponseVendeur'
+          - type: 'null'
+          readOnly: true
+      required:
+      - auteur
+      - commentaire
+      - date_creation
+      - est_modifie
+      - id
+      - note
+      - produit_id
+      - produit_nom
+      - reponse_vendeur
     AvisStatutEnum:
       enum:
       - publie
@@ -9814,6 +10547,16 @@ components:
           minLength: 1
       required:
       - id_token
+    ContenuReponseRequest:
+      type: object
+      description: Corps de la réponse du vendeur (création et modification).
+      properties:
+        contenu:
+          type: string
+          minLength: 1
+          maxLength: 2000
+      required:
+      - contenu
     Contestation:
       type: object
       properties:
@@ -10065,6 +10808,38 @@ components:
           default: standard
       required:
       - produit_id
+    DecisionModeration:
+      type: object
+      description: 'Décision de modération : qui, quand, quoi, pourquoi.'
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        avis_id:
+          type: string
+          format: uuid
+          readOnly: true
+        moderateur_id:
+          type: integer
+          readOnly: true
+        type_decision:
+          allOf:
+          - $ref: '#/components/schemas/TypeDecisionEnum'
+          readOnly: true
+        motif:
+          type: string
+          readOnly: true
+        date_creation:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - avis_id
+      - date_creation
+      - id
+      - moderateur_id
+      - motif
+      - type_decision
     DecisionVendeurReponse:
       type: object
       description: Réponse des décisions sur une demande vendeur (documentation OpenAPI).
@@ -11395,6 +12170,16 @@ components:
         * `google_jeton_invalide` - Jeton Google invalide
         * `google_infos_incompletes` - Informations Google incomplètes
         * `google_liaison_refusee` - Liaison Google refusée
+    MotifModerationRequest:
+      type: object
+      description: 'Corps d''une décision de modération : le motif est obligatoire.'
+      properties:
+        motif:
+          type: string
+          minLength: 1
+          maxLength: 1000
+      required:
+      - motif
     MotifRemboursementEnum:
       enum:
       - commande_annulee
@@ -11423,6 +12208,22 @@ components:
         * `article_manquant` - Article manquant dans le colis
         * `changement_avis` - Changement d'avis (droit de rétractation)
         * `autre` - Autre motif
+    MotifSignalementAvisEnum:
+      enum:
+      - spam
+      - injurieux
+      - hors_sujet
+      - faux_avis
+      - donnees_personnelles
+      - autre
+      type: string
+      description: |-
+        * `spam` - Publicité ou spam
+        * `injurieux` - Propos injurieux ou haineux
+        * `hors_sujet` - Hors sujet
+        * `faux_avis` - Avis non authentique
+        * `donnees_personnelles` - Données personnelles
+        * `autre` - Autre
     NommerLivreurRequest:
       type: object
       properties:
@@ -11579,6 +12380,52 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Avis'
+    PaginatedAvisPublicList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/AvisPublic'
+    PaginatedAvisRecuList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/AvisRecu'
     PaginatedBaremeFraisList:
       type: object
       required:
@@ -12292,6 +13139,29 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ReversementVendeur'
+    PaginatedSignalementModerationList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/SignalementModeration'
     PaginatedSupportTicketList:
       type: object
       required:
@@ -13199,6 +14069,14 @@ components:
       properties:
         status:
           $ref: '#/components/schemas/StatutTicketEnum'
+    PatchedContenuReponseRequest:
+      type: object
+      description: Corps de la réponse du vendeur (création et modification).
+      properties:
+        contenu:
+          type: string
+          minLength: 1
+          maxLength: 2000
     PatchedLivraisonChangerStatusRequest:
       type: object
       properties:
@@ -14075,6 +14953,25 @@ components:
       - reference
       - statut
       - statut_display
+    ReponseVendeur:
+      type: object
+      description: Réponse de la boutique à un avis.
+      properties:
+        contenu:
+          type: string
+          readOnly: true
+        date_creation:
+          type: string
+          format: date-time
+          readOnly: true
+        date_modification:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - contenu
+      - date_creation
+      - date_modification
     ResoudreContestationDecisionEnum:
       enum:
       - rejetee
@@ -14467,6 +15364,96 @@ components:
         * `support` - Service Client
         * `admin` - Administrateur
         * `super_admin` - Super Administrateur
+    Signalement:
+      type: object
+      description: Signalement tel que son auteur le reçoit.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        avis_id:
+          type: string
+          format: uuid
+          readOnly: true
+        motif:
+          allOf:
+          - $ref: '#/components/schemas/MotifSignalementAvisEnum'
+          readOnly: true
+        commentaire:
+          type: string
+          readOnly: true
+        statut:
+          allOf:
+          - $ref: '#/components/schemas/StatutSignalementAvisEnum'
+          readOnly: true
+        date_creation:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - avis_id
+      - commentaire
+      - date_creation
+      - id
+      - motif
+      - statut
+    SignalementModeration:
+      type: object
+      description: Signalement dans la file de modération.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        avis:
+          allOf:
+          - $ref: '#/components/schemas/AvisModeration'
+          readOnly: true
+        signalant_id:
+          type: integer
+          readOnly: true
+        motif:
+          allOf:
+          - $ref: '#/components/schemas/MotifSignalementAvisEnum'
+          readOnly: true
+        commentaire:
+          type: string
+          readOnly: true
+        statut:
+          allOf:
+          - $ref: '#/components/schemas/StatutSignalementAvisEnum'
+          readOnly: true
+        date_creation:
+          type: string
+          format: date-time
+          readOnly: true
+        date_traitement:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          readOnly: true
+      required:
+      - avis
+      - commentaire
+      - date_creation
+      - date_traitement
+      - id
+      - motif
+      - signalant_id
+      - statut
+    SignalerAvisRequest:
+      type: object
+      description: 'Corps du signalement : motif parmi une liste fermée.'
+      properties:
+        motif:
+          $ref: '#/components/schemas/MotifSignalementAvisEnum'
+        commentaire:
+          type: string
+          default: ''
+          description: 'Facultatif : précision pour la modération.'
+          maxLength: 500
+      required:
+      - motif
     SimulationCheckout:
       type: object
       properties:
@@ -14714,6 +15701,16 @@ components:
         * `en_cours` - Versement en cours
         * `verse` - Versé
         * `annule` - Annulé
+    StatutSignalementAvisEnum:
+      enum:
+      - ouvert
+      - accepte
+      - rejete
+      type: string
+      description: |-
+        * `ouvert` - Ouvert
+        * `accepte` - Accepté (avis masqué)
+        * `rejete` - Rejeté
     StatutTicketEnum:
       enum:
       - open
@@ -15274,6 +16271,16 @@ components:
       properties:
         operateur:
           $ref: '#/components/schemas/OperateurEnum'
+    TypeDecisionEnum:
+      enum:
+      - masquer
+      - retablir
+      - rejeter_signalement
+      type: string
+      description: |-
+        * `masquer` - Avis masqué
+        * `retablir` - Avis rétabli
+        * `rejeter_signalement` - Signalement rejeté
     TypeNotificationEnum:
       enum:
       - commande
