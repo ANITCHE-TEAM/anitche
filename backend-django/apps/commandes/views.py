@@ -14,10 +14,12 @@ from rest_framework.exceptions import APIException, PermissionDenied, Validation
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework import status
 
-from .models import Commande, GroupeCommande, CommandeItem
+from .models import Commande, CommandeHistorique, GroupeCommande, CommandeItem
 from .serializers import (
     AdresseLivraisonSerializer,
     CommandeAdministrationSerializer,
+    CommandeHistoriqueAdministrationSerializer,
+    CommandeHistoriqueSerializer,
     CommandeDetailSerializer,
     CommandeSerializer,
     CommandeVendeurSerializer,
@@ -31,6 +33,7 @@ from .services import (
     TransitionImpossible,
     annuler_commande,
     calculer_checkout,
+    creer_commande,
     est_payee,
     passer_en_preparation,
     trouver_coupon,
@@ -167,7 +170,8 @@ class ValiderPanierView(APIView):
                     logger_securite.error("Validation de panier impossible : aucun barème de frais en vigueur.")
                     raise ServiceIndisponible()
 
-                commande = Commande.objects.create(
+                commande = creer_commande(
+                    request.user,
                     groupe=groupe,
                     boutique=lot.boutique,
                     client=request.user,
@@ -306,6 +310,31 @@ class CommandeDetailView(generics.RetrieveAPIView):
         return Commande.objects.filter(client=self.request.user).select_related("groupe").prefetch_related("article")
 
 
+class HistoriqueCommandeView(generics.ListAPIView):
+    """Historique des statuts d'une commande, du plus ancien au plus récent.
+    Même visibilité que le détail de l'espace concerné : 404 pour un tiers."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = CommandeHistoriqueSerializer
+
+    def commandes_visibles(self):
+        raise NotImplementedError
+
+    def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):  # génération du schéma OpenAPI
+            return CommandeHistorique.objects.none()
+        commande = get_object_or_404(self.commandes_visibles(), pk=self.kwargs["pk"])
+        return CommandeHistorique.objects.filter(commande=commande)
+
+
+@extend_schema(
+    summary="Historique des statuts d'une commande (client)",
+    description="Origine du changement (`source`) seulement : jamais le compte qui l'a fait. 404 pour la commande d'un autre client.",
+)
+class CommandeHistoriqueView(HistoriqueCommandeView):
+    def commandes_visibles(self):
+        return Commande.objects.filter(client=self.request.user)
+
+
 @extend_schema(
     summary="Annuler sa commande",
     description="Possible tant que la commande n'est pas en préparation (409 sinon).",
@@ -357,6 +386,17 @@ class CommandeVendeurDetailView(generics.RetrieveAPIView):
 
 
 @extend_schema(
+    summary="Historique des statuts d'une commande (vendeur)",
+    description="Origine du changement (`source`) seulement. 404 pour la commande d'une autre boutique.",
+)
+class CommandeVendeurHistoriqueView(HistoriqueCommandeView):
+    permission_classes = [IsAuthenticated, EstVendeurValide]
+
+    def commandes_visibles(self):
+        return commandes_du_vendeur(self.request.user)
+
+
+@extend_schema(
     summary="Passer une commande en préparation (vendeur)",
     description="`confirmee` → `preparation`. Boutique suspendue : seules les commandes payées (403 sinon).",
     request=None,
@@ -375,7 +415,7 @@ class PasserEnPreparationView(APIView):
         if commande.boutique.est_suspendue and not est_payee(commande):
             raise PermissionDenied(BoutiqueNonSuspendue.message)
         try:
-            passer_en_preparation(commande)
+            passer_en_preparation(commande, request.user)
         except TransitionImpossible as erreur:
             raise ErreurMetier(str(erreur), status.HTTP_409_CONFLICT)
         commande = commandes_du_vendeur(request.user).get(pk=commande.pk)
@@ -457,6 +497,19 @@ class CommandeAdministrationDetailView(generics.RetrieveAPIView):
 
     def get_queryset(self):
         return commandes_administration()
+
+
+@extend_schema(
+    summary="Historique des statuts d'une commande (administration)",
+    description="Comme pour le client, plus `auteur` : identifiant du compte à l'origine du changement (vide pour le système).",
+    responses={200: CommandeHistoriqueAdministrationSerializer(many=True)},
+)
+class CommandeAdministrationHistoriqueView(HistoriqueCommandeView):
+    permission_classes = [IsAuthenticated, EstAdministrateur]
+    serializer_class = CommandeHistoriqueAdministrationSerializer
+
+    def commandes_visibles(self):
+        return Commande.objects.all()
 
 
 @extend_schema(

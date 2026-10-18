@@ -1002,9 +1002,9 @@ class ConcurrenceTests(DonneesLivraison, TransactionTestCase):
         code = self.code()
         original = services_commandes.synchroniser_depuis_livraison
 
-        def lent(commande, statut):
+        def lent(commande, statut, *arguments):
             time.sleep(0.3)  # la première requête garde le verrou un moment
-            return original(commande, statut)
+            return original(commande, statut, *arguments)
 
         barriere = threading.Barrier(2)
         resultats = {}
