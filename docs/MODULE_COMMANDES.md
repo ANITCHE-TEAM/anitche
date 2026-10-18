@@ -28,6 +28,7 @@ Aucun appel frontend à ce jour.
 - **`GroupeCommande`** : un checkout (une commande par boutique du panier) et **l'adresse de livraison** : `livraison_zone` (zone tarifaire, vide pour les groupes antérieurs aux frais de livraison), `livraison_commune`, `livraison_quartier`, `livraison_point_de_repere`, `livraison_telephone` (téléphone choisi par le client pour cette livraison, visible par le vendeur et le livreur ; jamais celui du profil), **`livraison_latitude`, `livraison_longitude`** (point GPS facultatif, `numeric(9, 6)`, vides pour l'existant ; contrainte en base `groupe_commande_position_complete_ou_absente` : les deux renseignés ou les deux vides).
 - **`Commande`** : une boutique, un client, `numero_commande` (`CMD-<année>-<8 hex>`, nouvel essai en cas de collision, format inchangé), `status`, `motif_annulation` (`client`, `expiration`, `administration`, `boutique_indisponible`), `montant_total` (articles − remise + frais de livraison : le montant payé), `coupon_code`, `montant_remise`, **frais de livraison figés** : `frais_livraison`, `livraison_offerte`, `frais_livraison_vendeur` (jamais exposé au client), voir [`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md) § 9.
   - `client` et `boutique` en **PROTECT** : un historique de vente ne disparaît jamais avec un compte ou une boutique.
+- **`CommandeHistorique`** : une ligne par changement de statut (règle de gestion § 6) : `commande`, `ancien_statut` (vide pour la création), `nouveau_statut`, `auteur` (compte, `NULL` pour le système ; `SET_NULL`), `source` (`client`, `vendeur`, `admin`, `paiement`, `livraison`, `systeme`), `motif` (code court : le motif d'annulation, jamais un texte libre), `created_at`. Écrite uniquement par `apps/commandes/services.py`, dans la transaction du changement. Lecture seule dans l'admin Django, jamais supprimable depuis l'admin (elle disparaît seulement avec sa commande, que l'admin ne supprime pas non plus).
 - **`CommandeItem`** : `nom_produit`, `prix_unitaire`, `quantite` figés au checkout ; `variante` en PROTECT. **Frais vendeur figés** au checkout (migration 0006) : `taux_commission`, `frais_fixe_unitaire`, `montant_commission`, `montant_frais_fixes`, `montant_net_vendeur` — jamais exposés au client.
 
 ## 3. Endpoints — `/api/commandes/`
@@ -97,6 +98,7 @@ Corps qui n'est pas un objet JSON (liste, chaîne, nombre, booléen, `null`) : *
 |---|---|---|
 | GET | `vendeur/` | Liste paginée |
 | GET | `vendeur/<uuid>/` | Détail |
+| GET | `vendeur/<uuid>/historique/` | Historique des statuts (voir « Historique » ci-dessous) |
 | POST | `vendeur/<uuid>/preparation/` | `confirmee` → `preparation`. **409** depuis un autre statut. Boutique suspendue : **403** sauf si la commande est déjà payée |
 
 Représentation vendeur : `id`, `numero_commande`, `created_at`, `status`, `motif_annulation`, `montant_total`, `montant_remise`, `frais_livraison`, `livraison_offerte`, `frais_livraison_vendeur` (ce que la livraison offerte déduit de son reversement), `articles` (`nom_produit`, `variante`, `prix_unitaire`, `quantite`), `client` (**prénom + initiale du nom**, ex. « Awa K. »), `adresse_livraison` (commune, quartier, point de repère, téléphone de livraison). **Jamais** l'email ni le téléphone du profil du client, **ni le point GPS** (§ 3 bis). Une commande ne concerne qu'une boutique : un vendeur ne voit jamais les articles d'un autre vendeur.
@@ -107,6 +109,7 @@ Représentation vendeur : `id`, `numero_commande`, `created_at`, `status`, `moti
 |---|---|---|
 | GET | `administration/` | Toutes les commandes, paginées (20), plus récentes d'abord. Filtres combinables : `status` (valeur du modèle), `boutique` et `client` (identifiants), `numero` (début du numéro, 20 caractères au plus, insensible à la casse), `date_min` et `date_max` (ISO 8601 : une date seule couvre la journée entière, `date_max` comprise). Une valeur invalide est **ignorée**, comme dans les autres listes |
 | GET | `administration/<uuid>/` | Détail (**404** si inconnue) |
+| GET | `administration/<uuid>/historique/` | Historique des statuts, avec `auteur` (identifiant du compte, `null` pour le système) |
 | POST | `administration/<uuid>/annuler/` | Annulation jusqu'à la préparation incluse ; stock restitué ; paiement encaissé → `Remboursement` à traiter. **409** après expédition. Journalisée (`securite`) |
 
 Représentation de la liste et du détail (`CommandeAdministrationSerializer`) : celle du vendeur (ci-dessus), plus `client` (`id`, `email`, `nom`, `prenom`, pour le support) et `boutique` (`id`, `nom`, `slug`). **Jamais le point GPS** : l'adresse est celle du vendeur. Lecture seule. Requêtes en nombre constant (`select_related` du client, du groupe et de la boutique, `prefetch_related` des articles). Aucun index sur `status` ni sur `created_at` : à décider sur un `EXPLAIN` quand le volume le justifiera.
@@ -114,6 +117,14 @@ Représentation de la liste et du détail (`CommandeAdministrationSerializer`) :
 Le `count` d'une liste filtrée sert de compteur au tableau de bord (par exemple `?status=confirmee`) : il n'y a pas de route d'agrégats.
 
 `is_staff` ne donne aucun accès : client, vendeur, livreur, support, modérateur et `is_staff` seul reçoivent **403** ; anonyme **401**.
+
+### Historique des statuts
+
+`GET /api/commandes/<uuid>/historique/` (client), `vendeur/<uuid>/historique/` (vendeur), `administration/<uuid>/historique/` (administration) : liste paginée, **du plus ancien au plus récent**. Même visibilité que le détail de l'espace concerné : **404** pour la commande d'un autre client ou d'une autre boutique, **403** pour un rôle qui n'a pas l'espace, **401** anonyme.
+
+Chaque ligne : `id`, `ancien_statut` (`""` à la création), `nouveau_statut`, `source`, `motif`, `created_at`. Client et vendeur ne voient **jamais** le compte à l'origine du changement (pas d'`auteur`, aucune identité d'administrateur) : seulement la `source`. L'administration reçoit en plus `auteur`.
+
+Les commandes créées avant l'historique n'ont **aucune ligne** tant que leur statut n'a pas changé (pas de faux historique ni de ligne « état initial » : sa date aurait été celle de la migration) ; la première ligne enregistrée porte alors leur vrai ancien statut.
 
 ## 4. Montants
 
@@ -125,7 +136,9 @@ Le `count` d'une liste filtrée sert de compteur au tableau de bord (par exemple
 
 ## 5. Cycle de vie
 
-Une seule fonction de transition (`apps/commandes/services.py`), appelée partout (vues, paiements, livraison, tâche d'expiration). Chaque transition est un UPDATE conditionnel sur le statut attendu : appliquée une seule fois, même sous requêtes simultanées.
+Une seule fonction de transition, `changer_statut_commande` (`apps/commandes/services.py`), appelée partout (vues, paiements, livraison, tâche d'expiration) ; `creer_commande` crée la commande et sa première ligne d'historique. Chaque transition lit le statut sous verrou (`SELECT … FOR UPDATE`), applique un UPDATE conditionnel sur les statuts attendus et écrit la ligne `CommandeHistorique` dans la même transaction : appliquée une seule fois, même sous requêtes simultanées. Une transition refusée (y compris vers le statut déjà atteint) lève `TransitionImpossible` et n'écrit rien.
+
+`source` et `auteur` selon l'origine : checkout → `client` ; paiement validé → `paiement` ; préparation → `vendeur` ; livraison expédiée ou livrée → `livraison` (auteur : livreur ou administrateur) ; annulation → `client` (motif `client`), `admin` (motifs `administration` et `livraison_echouee`) ou `systeme` (motifs `expiration` et `boutique_indisponible`, sans auteur). Aucun autre code ne doit écrire `Commande.status` : `test_historique.GardeFouStatutTests` analyse le code de production et échoue sinon.
 
 | De | Vers | Qui | Effet |
 |---|---|---|---|
@@ -177,6 +190,7 @@ Tout le reste est refusé (**409**) : retour arrière, saut d'étape, sortie d'u
 9. **Format d'erreur unifié (septembre 2026).** Toutes les erreurs suivent le format commun `{success: false, status_code, detail, errors}`, `errors` toujours un objet clé → liste de messages (`{}` si aucun champ n'est en cause). Les **409** (annulation client ou administration, passage en préparation) et le **403** « boutique suspendue » du passage en préparation : lire `detail` dans l'enveloppe commune. Un « stock insuffisant » à la validation arrive dans `errors.non_field_errors`.
 10. **Point GPS au checkout (septembre 2026), facultatif.** Bouton « Utiliser ma position » (`navigator.geolocation`) qui ajoute `latitude` et `longitude` **en nombres** à `adresse_livraison`, les deux ou aucune (§ 3 bis ; exemple de code : [`GUIDE_FRONTEND.md`](./GUIDE_FRONTEND.md) § 11). Sans point, rien ne change. Refus **400** sur `adresse_livraison.latitude` / `adresse_livraison.longitude` (coordonnée seule, hors Côte d'Ivoire, chaîne) : proposer de continuer sans point. En lecture, `adresse_livraison.latitude` / `longitude` (nombres ou `null`) pour le client ; **absents** de la représentation vendeur.
 11. **Erreurs d'adresse à la validation (changement de contrat).** `POST valider-panier/` renvoie les erreurs de l'adresse sous des clés à points (`errors["adresse_livraison.telephone"]`), comme `simuler-frais/` (et non `errors.telephone`). Un corps qui n'est pas un objet JSON reçoit un **400** (`errors.non_field_errors`).
+12. **Historique des statuts (octobre 2026), ajout sans rupture.** `GET /api/commandes/<id>/historique/` (client) et `GET /api/commandes/vendeur/<id>/historique/` (vendeur) : afficher la chronologie à partir de `nouveau_statut`, `created_at` et `source` (« Vous », « Paiement », « Boutique », « Livraison », « ANITCHE »). Ne pas supposer de ligne pour les anciennes commandes (liste vide possible). Ne pas afficher `motif` brut : c'est un code (`client`, `expiration`…).
 
 ## 10. Dette connue
 
@@ -208,6 +222,8 @@ DJANGO_SETTINGS_MODULE=config.settings.ci DB_NAME=anitche_test DB_USER=postgres 
 
 **Point GPS (§ 3 bis)** — 12 tests, `apps/commandes/tests.py` (81 au total) : `PositionLivraisonCheckoutTests` (checkout sans point inchangé, `null` = absent, point enregistré sans effet sur les montants, arrondi à 6 décimales avec moitié vers le haut, entiers et bornes incluses, refus 400 sur la clé à points à la validation **et** à la simulation : coordonnée seule, hors bornes dans les quatre directions, Paris, chaîne numérique, chaîne, booléen, liste, entier démesuré ; `NaN` / `Infinity` refusés par la lecture JSON et par le champ ; erreurs d'adresse de la validation sur des clés à points), `PositionLivraisonVisibiliteTests` (client : détail, groupes, annulation, en nombres ; autre client : rien ; vendeur : jamais, détail, liste et passage en préparation ; administration : oui ; contrainte en base). Côté livraison : `livraison.PositionLivraisonTests` (5 tests, [`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md) § 14) ; démo : `demo.SeedDemoTests.test_un_seul_point_gps_sur_la_commande_en_preparation`. Suite complète : **835 tests, OK, aucun « skipped »** (27/09/2026).
 
+**Historique des statuts** — `apps/commandes/test_historique.py` (32 tests) : un test par point d'entrée (checkout, paiement validé et notification rejouée, préparation vendeur, livraison expédiée puis livrée, annulation client, annulation administration, expiration, boutique indisponible, abandon d'une livraison échouée), la fonction unique (toute transition de la table écrit une ligne, toute transition refusée n'écrit rien, statut lu sous verrou même si l'instance est périmée, double annulation, annulation de la ligne avec le reste de l'opération), les droits de lecture (client, autre client, vendeur, autre vendeur, administration, rôles croisés, anonyme, aucune identité côté client et vendeur), l'admin Django (lecture seule, non supprimable) et le garde-fou statique `GardeFouStatutTests`, qui échoue si du code de production écrit `Commande.status` ou `CommandeHistorique` hors de `services.py` (le garde-fou est lui-même testé sur des extraits fautifs et légitimes).
+
 Postman : `postman_commandes.json` (hors dépôt) — connexions, remise en état (admin), préparation, parcours client (checkout avec adresse **et point GPS**, **paiement en ligne simulé** : initiation puis notification signée du fournisseur simulé), parcours vendeur (préparation, **pas de point GPS**), annulation, scénarios de sécurité (dont **coordonnée seule → 400** et **hors Côte d'Ivoire → 400**), nettoyage. Rejouable ; `admin_password` à renseigner. `postman_panier.json` et `postman_paiements.json` envoient l'adresse au checkout.
 
 ## 12. Migrations
@@ -218,6 +234,7 @@ Postman : `postman_commandes.json` (hors dépôt) — connexions, remise en éta
 - **paiements 0003 / 0004** : fournisseurs, remboursements, frais et reversements (voir [`MODULE_PAIEMENTS.md`](./MODULE_PAIEMENTS.md) § 13) ; les paiements « à la livraison » encore actifs passent annulés.
 - **commandes 0008** : frais de livraison figés sur `Commande` (0 pour l'existant) et `GroupeCommande.livraison_zone` (vide pour l'existant). Voir [`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md) § 13.
 - **commandes 0009** : `GroupeCommande.livraison_latitude` et `livraison_longitude` (`numeric(9, 6)`, `NULL`) et la contrainte `groupe_commande_position_complete_ou_absente`. Deux `ADD COLUMN … NULL` sans valeur par défaut : aucune réécriture de la table sous PostgreSQL ; le `CHECK` relit les lignes existantes (toutes sans point, donc valides) sans les modifier.
+- **commandes 0010** : table `CommandeHistorique`. Schéma seul, aucune reprise de données : les commandes existantes n'ont pas de ligne tant que leur statut ne change pas.
 - **livraison 0006** (données, octobre 2026) : fiches de livraison non terminées des commandes annulées → `annulee` ([`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md) § 13). Aucune migration côté commandes.
 
 Base de dev avant application : 2 commandes `creee` anciennes (sans adresse), 0 paiement. Elles seront annulées par la tâche d'expiration — le service `celery-beat` de dev doit être redémarré pour charger la nouvelle planification.
