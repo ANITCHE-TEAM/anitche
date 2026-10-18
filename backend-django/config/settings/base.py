@@ -135,7 +135,7 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
-# Ça reste dans base.py et non dev.py : la config en elle-même (où pointent les fichiers) ne change pas entre dev et prod, seule la façon de servir ces fichiers change (config/urls.py en DEBUG). En prod, c'est Nginx qui sert les médias publics (infra/nginx/nginx.conf) — pas Django.
+# Ça reste dans base.py et non dev.py : la config en elle-même (où pointent les fichiers) ne change pas entre dev et prod, seule la façon de servir ces fichiers change (config/urls.py en DEBUG). En prod, c'est Nginx qui sert les médias publics (infra/nginx/serveur-commun.conf) — pas Django.
 
 
 

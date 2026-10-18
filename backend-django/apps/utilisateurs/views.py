@@ -184,7 +184,7 @@ class VerificationJetonServiceView(APIView):
 
     Exclue du schéma OpenAPI (route interne). En production, nginx répond
     404 sur ce chemin depuis Internet sans le transmettre à Django
-    (infra/nginx/nginx.conf) ; FastAPI l'appelle directement sur le réseau
+    (infra/nginx/serveur-commun.conf) ; FastAPI l'appelle directement sur le réseau
     Docker, en HTTP (SECURE_REDIRECT_EXEMPT dans prod.py).
     """
 
