@@ -6,7 +6,8 @@
 #   statique   aucun avertissement « obsolete » ; environnement identique
 #              pour backend-django, celery-worker et celery-beat ; rotation
 #              des journaux 10m x 5 sur chaque service ; scripts de
-#              infra/scripts/ en mode 100755 dans Git
+#              infra/scripts/ et infra/nginx/entrypoint.d/ en mode 100755
+#              dans Git
 #   gunicorn   réglages de backend-django/gunicorn.conf.py, lus par
 #              « gunicorn --print-config » dans l'image construite
 #
@@ -94,8 +95,10 @@ controle_modes() {
     local mode fichier faux=0
     while read -r mode _ _ fichier; do
         if [ "$mode" != 100755 ]; then ko "$fichier : mode $mode dans Git, 100755 attendu"; faux=1; fi
-    done < <(git ls-files -s 'infra/scripts/*.sh')
-    if [ "$faux" = 0 ]; then ok "infra/scripts/*.sh : tous en 100755"; fi
+    done < <(git ls-files -s 'infra/scripts/*.sh' 'infra/nginx/entrypoint.d/*.sh')
+    # Sans le bit exécutable, l'image nginx ignore un script de
+    # /docker-entrypoint.d/ (« not executable ») au lieu d'échouer.
+    if [ "$faux" = 0 ]; then ok "infra/scripts/*.sh et infra/nginx/entrypoint.d/*.sh : tous en 100755"; fi
 }
 
 statique() {

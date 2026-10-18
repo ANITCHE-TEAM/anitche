@@ -61,7 +61,7 @@ compose() { docker compose -f infra/docker-compose.prod.yml --env-file infra/.en
    set -a; . infra/.env; set +a; bash infra/scripts/check_prod_env.sh
    ```
    Il refuse un dépôt qui n'est pas `s3:https://<endpoint>/<bucket>` (chemin local compris), un mot de passe de moins de 32 caractères et une adresse de surveillance qui n'est pas en `https://`. `deploy.sh` le lance à chaque déploiement : pas de déploiement sans sauvegarde configurée.
-4. **Créer le dépôt** (une seule fois ; refusé s'il existe déjà) :
+4. **Créer le dépôt** (une seule fois ; refusé s'il existe déjà), **avant le premier déploiement** : `deploy.sh` sauvegarde la base avant d'appliquer des migrations (`infra/scripts/migrer.sh`) et s'arrête si la sauvegarde échoue, dépôt absent compris :
    ```bash
    compose run --rm --no-deps backup init
    ```
@@ -152,7 +152,7 @@ Une fois par mois, sur un poste avec Docker, **jamais sur le serveur de producti
 2. `infra/.env` reconstruit depuis le gestionnaire de secrets, droits 600, avec **toutes** les clés `FIELD_ENCRYPTION_KEYS` encore valables pour la date de la sauvegarde (registre, § 7.2).
 3. `docker compose -f infra/docker-compose.prod.yml --env-file infra/.env up -d --wait db`
 4. `infra/scripts/restore.sh --lister`, puis `infra/scripts/restore.sh --reprise` : base `DB_NAME` (vide à la création du serveur) et volume `anitche_media` (vide), mêmes vérifications. Toutes doivent être OK.
-5. `infra/scripts/deploy.sh` : construction, migrations (rien à appliquer pour la même version), rôle FastAPI (ses droits sont recréés : la restauration ne reprend aucun `GRANT`), démarrage. Les certificats, non sauvegardés, se réémettent avec `infra/scripts/init-lets-encrypt.sh` (cas « perte totale du volume de certificats » de son en-tête).
+5. `infra/scripts/deploy.sh` : construction, migrations (rien à appliquer pour la même version, donc aucune sauvegarde), rôle FastAPI (ses droits sont recréés : la restauration ne reprend aucun `GRANT`), démarrage. Les certificats, non sauvegardés, se réémettent avec `infra/scripts/init-lets-encrypt.sh` (cas « perte totale du volume de certificats » de son en-tête).
 6. Contrôles : connexion, catalogue, un dossier KYC affiché dans l'administration, puis `docker compose -f infra/docker-compose.prod.yml --env-file infra/.env exec backend-django python manage.py rechiffrer_donnees_sensibles --simulation` : **0 illisible**.
 7. Réinstaller cron et la surveillance (§ 3), lancer une sauvegarde.
 8. Noter la durée totale, de la commande 3 au contrôle 6, dans le journal des exercices.
@@ -223,7 +223,6 @@ Si le mot de passe **et** l'accès au bucket ont fuité ensemble, changer de mot
 | Il peut aussi **supprimer** les sauvegardes (la clé S3 a le droit de supprimer, nécessaire à la rétention) | À traiter : versionnement ou verrouillage d'objets du bucket, clés aux droits séparés, ou seconde copie récupérée par une autre machine. Dépend du fournisseur |
 | Fenêtre base puis médias (resoumission KYC pendant la sauvegarde) | Rare ; comptée par la restauration (§ 6.4) |
 | Le conteneur `backup` reçoit le mot de passe du superutilisateur (`pg_dump` de toute la base, `CREATE DATABASE` à la restauration) | Acceptée : il ne reçoit ni `SECRET_KEY`, ni `FIELD_ENCRYPTION_KEYS`, ni les clés de paiement, et ne tourne que le temps d'une sauvegarde. La base restaurée et chacun de ses objets appartiennent à `anitche_app` (`CREATE DATABASE … OWNER`, `pg_restore --role`), comme la base vivante |
-| Pas de sauvegarde automatique avant les migrations de `deploy.sh` | À ajouter dans `deploy.sh` ; `backup.sh` est appelable tel quel |
 
 ## 10. Journal des exercices
 

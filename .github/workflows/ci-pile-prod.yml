@@ -3,16 +3,23 @@ name: CI Pile prod
 # Démarre la vraie pile de production (infra/docker-compose.prod.yml) sur le
 # runner et vérifie, par des requêtes à travers nginx, le routage, les
 # statiques et médias, la route interne, les webhooks, la documentation
-# fermée, le refus de démarrer de prod.py et le durcissement (Redis sans mot
+# fermée, le refus de démarrer de prod.py, le durcissement (Redis sans mot
 # de passe refusé, rôle PostgreSQL non superutilisateur, conteneurs sans
-# root) (infra/ci/smoke_prod.sh).
+# root), /admin/ fermé hors ADMIN_ALLOWED_CIDRS, les Host et SNI inconnus
+# refusés, le rendu de nginx.conf pour un autre domaine, la sauvegarde avant
+# migration (migrer.sh) et le certificat renouvelé servi sans intervention
+# (infra/ci/smoke_prod.sh).
+#
+# Toute la pile tourne sur DOMAIN=staging.exemple.test : aucun nom de
+# domaine n'est écrit en dur dans nginx.conf.
 #
 # Ce que ce job ne teste pas :
 #   - frontend/Dockerfile.prod : le frontend est remplacé par une page statique
 #     (infra/ci/docker-compose.ci.yml) ; le bundle est construit par
 #     ci-frontend.yml ;
-#   - Let's Encrypt, Cloudflare, SMTP, GeniusPay, S3 et les sauvegardes : le
-#     certificat est autosigné, les fournisseurs sont factices.
+#   - Let's Encrypt, Cloudflare, SMTP, GeniusPay et S3 : le certificat est
+#     autosigné, les fournisseurs sont factices, la sauvegarde avant
+#     migration va dans un dépôt restic local (infra/ci/docker-compose.ci.yml).
 # Aucun fichier de production n'est modifié : tout vit dans infra/ci/.
 
 on:
@@ -41,11 +48,14 @@ permissions:
 env:
   # Nom commun à tous les appels docker compose du job.
   COMPOSE_PROJECT_NAME: anitche-ci
+  # Domaine de la pile de CI (réservé aux tests), repris par l'environnement,
+  # le certificat et les requêtes.
+  DOMAIN: staging.exemple.test
 
 jobs:
   pile-prod:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 35
 
     steps:
       - uses: actions/checkout@v7
@@ -61,7 +71,7 @@ jobs:
           echo "JOB_DEBUT=$(date +%s)" >> "$GITHUB_ENV"
 
       # Valeurs secrètes aléatoires (masquées dans les journaux), le reste en
-      # constantes factices ; certificat autosigné pour anitche.com.
+      # constantes factices ; certificat autosigné pour DOMAIN.
       - name: Générer l'environnement et le certificat de CI
         run: |
           echo "ENV_CI=$RUNNER_TEMP/anitche-ci.env" >> "$GITHUB_ENV"
@@ -109,9 +119,11 @@ jobs:
           export COMPOSE_FILE=infra/docker-compose.prod.yml
           bash infra/ci/etape.sh "Rôle applicatif anitche_app" timeout 120 bash infra/scripts/create_app_role.sh
 
-      - name: Migrations (conteneur ponctuel)
-        timeout-minutes: 8
-        run: bash infra/ci/etape.sh "Migrations" timeout 420 bash infra/ci/compose.sh run --rm -T backend-django python manage.py migrate --noinput
+      # Le script réel de déploiement (migrer.sh) : sauvegarde en échec
+      # bloquante, sauvegarde puis migrations, rien en attente.
+      - name: Migrations (migrer.sh, sauvegarde avant)
+        timeout-minutes: 20
+        run: bash infra/ci/etape.sh "Migrations et sauvegarde préalable" timeout 1140 bash infra/ci/smoke_prod.sh migrations
 
       # Le script réel de déploiement, sur le compose de production seul :
       # il ne s'adresse qu'au conteneur db déjà démarré.
@@ -137,10 +149,15 @@ jobs:
         timeout-minutes: 8
         run: bash infra/ci/etape.sh "Requêtes à travers nginx" bash infra/ci/smoke_prod.sh verifier
 
-      # En dernier : recrée nginx et FastAPI.
-      - name: nginx démarre sans FastAPI et le sert sans rechargement
-        timeout-minutes: 5
+      # Recrée nginx, FastAPI et Django.
+      - name: nginx démarre sans FastAPI et suit FastAPI et Django recréés
+        timeout-minutes: 8
         run: bash infra/ci/etape.sh "Resolver nginx" bash infra/ci/smoke_prod.sh resolver
+
+      # En dernier : recrée nginx avec un rechargement toutes les 10 s.
+      - name: Certificat renouvelé servi sans intervention
+        timeout-minutes: 3
+        run: bash infra/ci/etape.sh "Rechargement périodique de nginx" bash infra/ci/smoke_prod.sh certificat
 
       # État et journaux de chaque conteneur : aucun secret n'y est écrit par
       # les applications, et le fichier d'environnement n'est jamais affiché.

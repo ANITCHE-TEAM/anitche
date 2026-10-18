@@ -7,20 +7,31 @@
 #   refus_demarrage  prod.py refuse un fournisseur simulé, un SMTP absent et un
 #                    Redis sans mot de passe
 #                    (conteneur ponctuel, avant le démarrage de la pile)
+#   migrations       migrer.sh : une sauvegarde en échec bloque tout,
+#                    sinon sauvegarde (instantané db dans le dépôt restic
+#                    local de CI) puis migrations ; rien en attente : ni
+#                    l'une ni l'autre (avant le démarrage de la pile)
 #   attendre         attend un 200 de Django à travers nginx (120 s au plus)
-#   verifier         routage, statiques, médias, route interne, webhook,
-#                    documentation fermée, routes de santé fermées,
-#                    X-Request-ID, conteneurs, sécurité (Redis sans mot de
-#                    passe refusé, rôle PostgreSQL non superutilisateur,
-#                    conteneurs sans root)
-#   securite         les seuls contrôles de sécurité de « verifier »
+#   verifier         routage, /admin/ fermé, Host et SNI inconnus refusés,
+#                    configuration nginx rendue pour DOMAIN, statiques,
+#                    médias, route interne, webhook, documentation fermée,
+#                    routes de santé fermées, X-Request-ID, conteneurs,
+#                    sécurité (Redis sans mot de passe refusé, rôle
+#                    PostgreSQL non superutilisateur, conteneurs sans root)
+#   securite         les contrôles de sécurité de la pile démarrée : /admin/,
+#                    Host et SNI inconnus, Redis, rôle PostgreSQL, root
 #   resolver         nginx redémarre sans backend-fastapi (502 sur /fast/),
-#                    puis le sert sans rechargement dès que FastAPI revient
-#                    (à lancer en dernier : recrée nginx et FastAPI)
+#                    puis le sert sans rechargement dès que FastAPI revient ;
+#                    Django recréé avec une autre adresse IP, servi sans
+#                    rechargement (recrée nginx, FastAPI et Django)
+#   certificat       nginx recréé avec NGINX_RELOAD_INTERVAL=10s, nouveau
+#                    certificat de CI posé : servi en moins de 20 s, sans
+#                    intervention (à lancer en dernier)
 #
-# Variables : ENV_CI, CI_CERT_DIR, COMPOSE_PROJECT_NAME (voir compose.sh).
-# Les requêtes visent https://anitche.com résolu vers 127.0.0.1, certificat
-# vérifié (--cacert, jamais -k). Chaque attente et chaque requête a un délai.
+# Variables : DOMAIN, ENV_CI, CI_CERT_DIR, COMPOSE_PROJECT_NAME (voir
+# compose.sh). Les requêtes visent https://$DOMAIN résolu vers 127.0.0.1,
+# certificat vérifié (--cacert, jamais -k). Chaque attente et chaque
+# requête a un délai.
 # Une requête fautive est affichée en détail (statut, en-têtes et début du
 # corps de la réponse) ; la requête elle-même n'est jamais affichée avec ses
 # en-têtes, donc un jeton n'apparaît pas.
@@ -29,14 +40,20 @@ set -uo pipefail
 
 : "${CI_CERT_DIR:?CI_CERT_DIR doit désigner le dossier du certificat de test}"
 
-HOTE=anitche.com
+HOTE="${DOMAIN:?DOMAIN doit désigner le domaine de la pile de CI}"
 URL="https://$HOTE"
-CACERT="$CI_CERT_DIR/live/anitche.com/fullchain.pem"
+CACERT="$CI_CERT_DIR/live/$HOTE/fullchain.pem"
 TMP="$(mktemp -d)"
 ECHECS=()
 DESCRIPTION=""
 COURANT_OK=1
 STATUT=""
+CODE_CURL=0
+# Tous les noms servis par nginx, résolus vers la pile locale.
+RESOLUTIONS=()
+for nom in "$HOTE" "www.$HOTE" "vendeur.$HOTE" "livreur.$HOTE" "admin.$HOTE"; do
+    RESOLUTIONS+=(--resolve "$nom:443:127.0.0.1" --resolve "$nom:80:127.0.0.1")
+done
 JETON_EXPIRE=""
 
 compose() { bash infra/ci/compose.sh "$@"; }
@@ -50,15 +67,16 @@ appel() {
     DESCRIPTION="$libelle : $methode $url"
     COURANT_OK=1
     : > "$TMP/corps"; : > "$TMP/entetes"; : > "$TMP/erreur"
+    CODE_CURL=0
     STATUT="$(curl -sS --max-time 15 --connect-timeout 5 -X "$methode" \
         -D "$TMP/entetes" -o "$TMP/corps" -w '%{http_code}' \
-        --resolve "$HOTE:443:127.0.0.1" --resolve "$HOTE:80:127.0.0.1" \
-        --cacert "$CACERT" "$@" "$url" 2>"$TMP/erreur")" || STATUT="000"
+        "${RESOLUTIONS[@]}" --cacert "$CACERT" "$@" "$url" 2>"$TMP/erreur")" \
+        || { CODE_CURL=$?; STATUT="000"; }
 }
 
 detail() {
     echo "   Requête : $DESCRIPTION" >&2
-    echo "   Statut  : $STATUT" >&2
+    echo "   Statut  : $STATUT (code curl $CODE_CURL)" >&2
     if [ -s "$TMP/erreur" ]; then echo "   Erreur curl : $(head -c 300 "$TMP/erreur")" >&2; fi
     echo "   --- en-têtes de la réponse" >&2
     sed 's/^/   | /' "$TMP/entetes" >&2
@@ -77,12 +95,24 @@ ko() {
 statut_attendu() { [ "$STATUT" = "$1" ] || ko "statut $STATUT, $1 attendu"; }
 entete_attendu() { grep -qi -E "^$1:.*$2" "$TMP/entetes" || ko "en-tête $1 absent ou différent de /$2/"; }
 corps_attendu() { grep -q -E "$1" "$TMP/corps" || ko "corps sans /$1/"; }
+# Connexion refusée par nginx, avec le code de curl qui la distingue d'une
+# autre erreur : 52 (fermée sans réponse, return 444 ; 56 quand cette
+# fermeture interrompt une session TLS, selon la bibliothèque TLS de curl),
+# 35 (poignée de main TLS refusée). Un certificat qui ne correspond pas
+# donnerait 60. $@ : codes acceptés.
+connexion_refusee() {
+    local code
+    if [ "$STATUT" = 000 ]; then
+        for code in "$@"; do [ "$CODE_CURL" = "$code" ] && return 0; done
+    fi
+    ko "statut $STATUT, code curl $CODE_CURL ; connexion refusée attendue (code curl $*)"
+}
 corps_json_valide() { python3 -c 'import json, sys; json.load(sys.stdin)' < "$TMP/corps" 2>/dev/null || ko "corps qui n'est pas du JSON valide"; }
 conclure() { if [ "$COURANT_OK" = 1 ]; then echo "✅ $DESCRIPTION"; fi; return 0; }
 
 # Une vérification qui ne passe pas par curl (conteneurs, commandes).
 marquer() {
-    DESCRIPTION="$1"; COURANT_OK=1; STATUT="-"
+    DESCRIPTION="$1"; COURANT_OK=1; STATUT="-"; CODE_CURL=0
     : > "$TMP/corps"; : > "$TMP/entetes"; : > "$TMP/erreur"
 }
 
@@ -196,8 +226,91 @@ verifier_routage() {
     appel "Frontend (substitut) servi par nginx" GET "$URL/"
     statut_attendu 200; corps_attendu "ANITCHE CI"; conclure
 
-    appel "Administration Django via nginx" GET "$URL/admin/login/"
-    statut_attendu 200; corps_attendu "/static/"; conclure
+}
+
+verifier_admin() {
+    local chemin entete sortie
+
+    # 403 produit par nginx (son corps contient « nginx »), sans atteindre
+    # Django : l'hôte n'est pas dans ADMIN_ALLOWED_CIDRS (127.0.0.1/32 et
+    # ::1/128 en CI ; vu de nginx, l'hôte arrive par la passerelle Docker).
+    for chemin in /admin/login/ /admin/ //admin/login/ /%61dmin/login/ /api/../admin/login/ /static/../admin/login/; do
+        appel "/admin/ fermé depuis l'hôte ($chemin)" GET "$URL$chemin" --path-as-is
+        statut_attendu 403; corps_attendu nginx; conclure
+    done
+    appel "/admin/ fermé depuis l'hôte (POST de connexion)" POST "$URL/admin/login/" --data 'username=a&password=b'
+    statut_attendu 403; corps_attendu nginx; conclure
+
+    # Adresse forgée par le client : real_ip ne lit CF-Connecting-IP que
+    # depuis une plage Cloudflare ; les autres en-têtes ne comptent jamais.
+    for entete in "CF-Connecting-IP: 127.0.0.1" "X-Forwarded-For: 127.0.0.1" "X-Real-IP: 127.0.0.1"; do
+        appel "/admin/ fermé malgré l'en-tête ${entete%%:*} forgé" GET "$URL/admin/login/" -H "$entete"
+        statut_attendu 403; corps_attendu nginx; conclure
+    done
+
+    # Témoin : depuis le conteneur nginx, la connexion vient de 127.0.0.1,
+    # autorisée en CI ; Django sert la page de connexion de l'administration.
+    marquer "Témoin : /admin/login/ servi depuis le conteneur nginx (127.0.0.1 autorisé)"
+    sortie="$(timeout 60 bash infra/ci/compose.sh exec -T nginx curl -sS --max-time 15 \
+        --resolve "$HOTE:443:127.0.0.1" --cacert "/etc/letsencrypt/live/$HOTE/fullchain.pem" \
+        -w '\nSTATUT=%{http_code}' "https://$HOTE/admin/login/" 2>&1)"
+    STATUT="$(sed -n 's/^STATUT=//p' <<<"$sortie" | tail -n 1)"
+    printf '%s\n' "$sortie" > "$TMP/corps"
+    [ "$STATUT" = 200 ] || ko "statut « $STATUT », 200 attendu"
+    corps_attendu "/static/admin/"
+    conclure
+}
+
+verifier_hotes_inconnus() {
+    local sous_domaine
+
+    appel "HTTP, Host inconnu : connexion fermée sans réponse" GET "http://$HOTE/" -H "Host: inconnu.exemple.test"
+    connexion_refusee 52; conclure
+    appel "HTTP par l'adresse IP : connexion fermée sans réponse" GET "http://127.0.0.1/api/catalogue/categories/"
+    connexion_refusee 52; conclure
+    appel "HTTPS, SNI inconnu : poignée de main refusée" GET "https://inconnu.exemple.test/" \
+        --resolve "inconnu.exemple.test:443:127.0.0.1"
+    connexion_refusee 35; conclure
+    appel "HTTPS par l'adresse IP (sans SNI) : poignée de main refusée" GET "https://127.0.0.1/"
+    connexion_refusee 35; conclure
+    # SNI et certificat valides, mais en-tête Host inconnu : bloc par défaut.
+    appel "HTTPS, SNI connu et Host inconnu : connexion fermée sans réponse" GET "$URL/api/catalogue/categories/" \
+        --http1.1 -H "Host: inconnu.exemple.test"
+    connexion_refusee 52 56; conclure
+
+    appel "Témoin : www.$HOTE servi en HTTPS" GET "https://www.$HOTE/api/catalogue/categories/"
+    statut_attendu 200; conclure
+    # Le challenge ACME de chaque nom du certificat atteint le webroot de
+    # certbot (404 de nginx : fichier absent), au lieu d'une connexion fermée.
+    for sous_domaine in vendeur livreur admin; do
+        appel "Challenge ACME joignable pour $sous_domaine.$HOTE" GET "http://$sous_domaine.$HOTE/.well-known/acme-challenge/absent"
+        statut_attendu 404; corps_attendu nginx; conclure
+        appel "$sous_domaine.$HOTE redirigé vers HTTPS" GET "http://$sous_domaine.$HOTE/"
+        statut_attendu 301; entete_attendu location "https://$sous_domaine.$HOTE/"; conclure
+    done
+}
+
+# Configuration rendue par l'image nginx depuis le modèle nginx.conf.
+verifier_rendu_nginx() {
+    marquer "Configuration nginx rendue pour DOMAIN=$HOTE"
+    timeout 30 bash infra/ci/compose.sh exec -T nginx cat /etc/nginx/conf.d/default.conf > "$TMP/rendu" 2>&1 \
+        || ko "configuration rendue illisible"
+    grep -qxF "    server_name $HOTE www.$HOTE;" "$TMP/rendu" || ko "server_name du bloc 443 absent"
+    grep -qxF "    server_name $HOTE www.$HOTE vendeur.$HOTE livreur.$HOTE admin.$HOTE;" "$TMP/rendu" \
+        || ko "server_name du bloc 80 (tous les noms du certificat) absent"
+    grep -qF "ssl_certificate     /etc/letsencrypt/live/$HOTE/fullchain.pem;" "$TMP/rendu" || ko "chemin du certificat absent"
+    if grep -nE '\$\{[A-Za-z_]+\}' "$TMP/rendu" > "$TMP/corps"; then ko "variable non remplacée"; fi
+    if [ "$HOTE" != anitche.com ] && grep -n 'anitche\.com' "$TMP/rendu" > "$TMP/corps"; then ko "anitche.com écrit en dur"; fi
+    # Les variables de nginx ne sont pas des variables d'environnement.
+    grep -qF 'proxy_set_header Host $host;' "$TMP/rendu" || ko "\$host remplacé au rendu"
+    grep -qF 'rid=$request_id' "$TMP/rendu" || ko "\$request_id remplacé au rendu"
+    conclure
+
+    marquer "Adresses autorisées sur /admin/ : exactement celles de ADMIN_ALLOWED_CIDRS"
+    timeout 30 bash infra/ci/compose.sh exec -T nginx grep '^allow ' /etc/nginx/anitche/admin_autorises.conf > "$TMP/corps" 2>&1
+    STATUT="$(tr '\n' ' ' < "$TMP/corps")"
+    [ "$STATUT" = "allow 127.0.0.1/32; allow ::1/128; " ] || ko "« allow 127.0.0.1/32; allow ::1/128; » attendu"
+    conclure
 }
 
 verifier_statiques_medias() {
@@ -365,6 +478,14 @@ verifier_conteneurs() {
         conclure
     done
 
+    # Les migrations ne passent que par migrer.sh (sauvegarde avant).
+    marquer "backend-django : commande de démarrage sans migrate"
+    etat="$(docker inspect -f '{{json .Config.Cmd}}' "$(compose ps -q backend-django 2>/dev/null)" 2>/dev/null)"
+    STATUT="$etat"
+    if grep -q migrate <<<"$etat"; then ko "la commande lance migrate"; fi
+    grep -q gunicorn <<<"$etat" || ko "commande sans gunicorn"
+    conclure
+
     marquer "/health/ de Django répond 200 depuis son conteneur (base et Redis)"
     etat="$(timeout 60 bash infra/ci/compose.sh exec -T backend-django python -c "
 import urllib.request
@@ -444,6 +565,9 @@ with connection.cursor() as curseur:
 verifier() {
     preparer_donnees
     verifier_routage
+    verifier_admin
+    verifier_hotes_inconnus
+    verifier_rendu_nginx
     verifier_statiques_medias
     verifier_route_interne
     verifier_fastapi
@@ -474,8 +598,12 @@ attendre_statut() {
     return 1
 }
 
+adresse_ip() {
+    docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$(compose ps -q "$1" 2>/dev/null)" 2>/dev/null
+}
+
 resolver() {
-    local id_nginx demarre_avant demarre_apres
+    local id_nginx demarre_avant demarre_apres ip_avant ip_apres reseau n occupants
 
     # FastAPI absent, nginx recréé : sans resolver, nginx refuse de démarrer
     # (« host not found in upstream »).
@@ -509,6 +637,39 @@ resolver() {
     fi
     conclure
 
+    # Django recréé avec une autre adresse IP. Sans resolver, nginx
+    # garderait l'ancienne (502 ou délai dépassé). Docker attribue la plus
+    # basse adresse libre, souvent celle qui vient d'être libérée : des
+    # conteneurs témoins occupent les adresses libres jusqu'à celle de
+    # Django (10 au plus) le temps qu'il redémarre.
+    marquer "Django recréé avec une autre adresse IP"
+    ip_avant="$(adresse_ip backend-django)"
+    reseau="$(docker inspect -f '{{range $nom, $r := .NetworkSettings.Networks}}{{$nom}}{{end}}' "$(compose ps -q backend-django)")"
+    compose rm -sf backend-django >/dev/null 2>&1 || ko "Django non retiré"
+    occupants=()
+    for n in 1 2 3 4 5 6 7 8 9 10; do
+        occupants+=("$COMPOSE_PROJECT_NAME-occupant-ip-$n")
+        docker run -d --rm --name "$COMPOSE_PROJECT_NAME-occupant-ip-$n" --network "$reseau" \
+            --entrypoint sleep nginx:alpine 300 >/dev/null 2>&1 || { ko "conteneur témoin non démarré"; break; }
+        [ "$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
+            "$COMPOSE_PROJECT_NAME-occupant-ip-$n" 2>/dev/null)" = "$ip_avant" ] && break
+    done
+    compose up -d --no-deps --wait --wait-timeout 120 backend-django >/dev/null 2>"$TMP/erreur" || ko "Django ne redevient pas sain"
+    docker rm -f "${occupants[@]}" >/dev/null 2>&1 || true
+    ip_apres="$(adresse_ip backend-django)"
+    STATUT="${ip_avant:-?} puis ${ip_apres:-?}"
+    if [ -z "$ip_avant" ] || [ -z "$ip_apres" ] || [ "$ip_avant" = "$ip_apres" ]; then
+        ko "deux adresses différentes attendues (sinon le contrôle ne prouve rien)"
+    fi
+    conclure
+
+    if attendre_statut "$URL/api/catalogue/categories/" 200 "nginx sert Django recréé, sans rechargement"; then
+        corps_json_valide
+    else
+        ko "statut $STATUT, 200 attendu dans les 60 s"
+    fi
+    conclure
+
     marquer "nginx n'a ni redémarré ni été rechargé"
     demarre_apres="$(docker inspect -f '{{.State.StartedAt}}' "$id_nginx")"
     [ "$demarre_avant" = "$demarre_apres" ] || ko "nginx a redémarré ($demarre_avant puis $demarre_apres)"
@@ -518,13 +679,132 @@ resolver() {
     conclure
 }
 
+# --- migrations ---------------------------------------------------------------
+
+# Compose de production plus la surcharge de CI (dépôt restic local), pour
+# migrer.sh et backup.sh qui lisent COMPOSE_FILE et ENV_FILE.
+export COMPOSE_PATH_SEPARATOR=:
+CI_COMPOSE_FILE=infra/docker-compose.prod.yml:infra/ci/docker-compose.ci.yml
+
+restic_ci() {
+    timeout 120 bash infra/ci/compose.sh --profile backup run --rm --no-deps -T --entrypoint restic backup "$@"
+}
+
+# Nombre d'instantanés de la base dans le dépôt de CI ; vide si illisible.
+instantanes_db() {
+    restic_ci snapshots --host anitche --tag db --json 2>/dev/null \
+        | python3 -c 'import json, sys; print(len(json.load(sys.stdin) or []))' 2>/dev/null
+}
+
+migrer() {
+    COMPOSE_FILE="$CI_COMPOSE_FILE" ENV_FILE="$1" timeout 900 bash infra/scripts/migrer.sh > "$TMP/corps" 2>&1
+}
+
+migrations_en_attente() {
+    ! timeout 120 bash infra/ci/compose.sh run --rm --no-deps -T backend-django \
+        python manage.py migrate --check --noinput > /dev/null 2>&1
+}
+
+migrations() {
+    local avant apres code env_ko
+
+    marquer "Dépôt restic local de CI prêt"
+    if ! restic_ci cat config > /dev/null 2>&1; then
+        timeout 120 bash infra/ci/compose.sh --profile backup run --rm --no-deps -T backup init > "$TMP/corps" 2>&1 \
+            || ko "restic init échoue"
+    fi
+    avant="$(instantanes_db)"
+    STATUT="${avant:-illisible} instantané(s) db"
+    [[ "$avant" =~ ^[0-9]+$ ]] || ko "nombre d'instantanés illisible"
+    conclure
+
+    # Sauvegarde impossible (mot de passe du dépôt faux) : migrer.sh
+    # s'arrête et la base reste sans migration.
+    marquer "Sauvegarde en échec : migrer.sh s'arrête sans migrer"
+    env_ko="$TMP/env_sauvegarde_ko"
+    ( umask 077; sed 's/^BACKUP_PASSWORD=.*/BACKUP_PASSWORD=mot-de-passe-faux-de-ci-0123456789abcdef/' "$ENV_CI" > "$env_ko" )
+    migrer "$env_ko"; code=$?
+    rm -f -- "$env_ko"
+    STATUT="code $code"
+    [ "$code" -ne 0 ] || ko "migrer.sh a réussi malgré la sauvegarde en échec"
+    grep -q "migrations NON appliquées" "$TMP/corps" || ko "message d'arrêt absent"
+    migrations_en_attente || ko "des migrations ont été appliquées malgré la sauvegarde en échec"
+    conclure
+
+    marquer "migrer.sh : sauvegarde de la base, puis migrations"
+    migrer "$ENV_CI" || ko "migrer.sh échoue"
+    apres="$(instantanes_db)"
+    STATUT="instantanés db : ${avant:-?} puis ${apres:-?}"
+    [ "$apres" = "$((avant + 1))" ] || ko "un instantané db de plus attendu"
+    ! migrations_en_attente || ko "migrations encore en attente"
+    conclure
+
+    marquer "migrer.sh sans migration en attente : ni sauvegarde ni migration"
+    avant="$apres"
+    migrer "$ENV_CI" || ko "migrer.sh échoue"
+    grep -q "Aucune migration en attente" "$TMP/corps" || ko "message « Aucune migration en attente » absent"
+    apres="$(instantanes_db)"
+    STATUT="instantanés db : ${avant:-?} puis ${apres:-?}"
+    [ "$apres" = "$avant" ] || ko "aucun nouvel instantané attendu"
+    conclure
+}
+
+# --- certificat ---------------------------------------------------------------
+
+# Numéro de série du certificat servi pour DOMAIN, et de celui du dossier
+# de CI.
+serie_servie() {
+    timeout 10 openssl s_client -connect 127.0.0.1:443 -servername "$HOTE" < /dev/null 2>/dev/null \
+        | openssl x509 -noout -serial 2>/dev/null
+}
+serie_fichier() { openssl x509 -noout -serial -in "$CACERT" 2>/dev/null; }
+
+certificat() {
+    local avant nouvelle servie debut limite
+
+    marquer "nginx recréé avec NGINX_RELOAD_INTERVAL=10s"
+    NGINX_RELOAD_INTERVAL=10s compose up -d --no-deps --force-recreate --wait --wait-timeout 60 nginx \
+        > /dev/null 2>"$TMP/erreur" || ko "nginx ne démarre pas"
+    avant="$(serie_servie)"
+    STATUT="servi : ${avant:-aucun}"
+    [ -n "$avant" ] && [ "$avant" = "$(serie_fichier)" ] || ko "le certificat servi n'est pas celui de CI"
+    conclure
+
+    # Renouvellement simulé : nouveau certificat dans le dossier monté, sans
+    # toucher au conteneur nginx.
+    bash infra/ci/generer_certificat_ci.sh "$CI_CERT_DIR" > /dev/null
+    nouvelle="$(serie_fichier)"
+    marquer "Certificat renouvelé servi sans intervention, en moins de 20 s"
+    debut=$SECONDS
+    limite=$((SECONDS + 20))
+    servie=""
+    while [ "$SECONDS" -lt "$limite" ]; do
+        servie="$(serie_servie)"
+        [ "$servie" = "$nouvelle" ] && break
+        sleep 1
+    done
+    STATUT="servi : ${servie:-aucun} ; nouveau : $nouvelle ; ancien : $avant ; $((SECONDS - debut)) s"
+    [ "$nouvelle" != "$avant" ] || ko "le nouveau certificat a le même numéro de série"
+    [ "$servie" = "$nouvelle" ] || ko "nouveau certificat non servi après 20 s"
+    conclure
+
+    appel "Requête vérifiée avec le nouveau certificat" GET "$URL/api/catalogue/categories/"
+    statut_attendu 200; conclure
+
+    marquer "Rechargement périodique écrit dans le journal de nginx"
+    compose logs --no-color nginx 2>/dev/null | grep -q "rechargement périodique de nginx" || ko "aucun rechargement journalisé"
+    conclure
+}
+
 case "${1:-}" in
     refus_demarrage) refus_demarrage ;;
+    migrations) migrations ;;
     attendre) attendre; exit $? ;;
     verifier) verifier; exit $? ;;
-    securite) verifier_securite ;;
+    securite) verifier_admin; verifier_hotes_inconnus; verifier_securite ;;
     resolver) resolver ;;
-    *) echo "Usage : smoke_prod.sh refus_demarrage|attendre|verifier|securite|resolver" >&2; exit 2 ;;
+    certificat) certificat ;;
+    *) echo "Usage : smoke_prod.sh refus_demarrage|migrations|attendre|verifier|securite|resolver|certificat" >&2; exit 2 ;;
 esac
 
 if [ "${#ECHECS[@]}" -gt 0 ]; then exit 1; fi
