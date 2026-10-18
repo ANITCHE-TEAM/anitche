@@ -12391,6 +12391,7 @@ components:
           title: Boutique créatrice
         numero_lot:
           type: string
+          default: ''
           description: Numéro de série ou identifiant de lot de production
           maxLength: 60
         origine_geographique:
@@ -12451,7 +12452,6 @@ components:
       - desactive_par
       - id
       - nb_scans
-      - numero_lot
       - produit
       - produit_nom
       - statut_certification_display
@@ -12469,6 +12469,7 @@ components:
           title: Variante spécifique (optionnel)
         numero_lot:
           type: string
+          default: ''
           description: Numéro de série ou identifiant de lot de production
           maxLength: 60
         origine_geographique:
@@ -12494,7 +12495,6 @@ components:
         est_actif:
           type: boolean
       required:
-      - numero_lot
       - produit
     PasseportVerifie:
       oneOf:
@@ -12671,6 +12671,7 @@ components:
           title: Variante spécifique (optionnel)
         numero_lot:
           type: string
+          default: ''
           description: Numéro de série ou identifiant de lot de production
           maxLength: 60
         origine_geographique:

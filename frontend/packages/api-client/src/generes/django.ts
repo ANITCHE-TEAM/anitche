@@ -4256,7 +4256,10 @@ export interface components {
             variante?: number | null;
             /** Boutique créatrice */
             readonly boutique: number;
-            /** @description Numéro de série ou identifiant de lot de production */
+            /**
+             * @description Numéro de série ou identifiant de lot de production
+             * @default
+             */
             numero_lot: string;
             /** @description Région ou ville de fabrication (ex: Tiassalé, Grand-Bassam) */
             origine_geographique?: string;
@@ -4289,7 +4292,10 @@ export interface components {
             produit: number;
             /** Variante spécifique (optionnel) */
             variante?: number | null;
-            /** @description Numéro de série ou identifiant de lot de production */
+            /**
+             * @description Numéro de série ou identifiant de lot de production
+             * @default
+             */
             numero_lot: string;
             /** @description Région ou ville de fabrication (ex: Tiassalé, Grand-Bassam) */
             origine_geographique?: string;
@@ -4391,8 +4397,11 @@ export interface components {
             produit?: number;
             /** Variante spécifique (optionnel) */
             variante?: number | null;
-            /** @description Numéro de série ou identifiant de lot de production */
-            numero_lot?: string;
+            /**
+             * @description Numéro de série ou identifiant de lot de production
+             * @default
+             */
+            numero_lot: string;
             /** @description Région ou ville de fabrication (ex: Tiassalé, Grand-Bassam) */
             origine_geographique?: string;
             /** @description Composition détaillée (ex: Tissu Baoulé 100% coton, fil d'or, cuir véritable) */
