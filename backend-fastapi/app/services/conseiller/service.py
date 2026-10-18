@@ -223,11 +223,10 @@ def _candidat(row) -> Candidat:
     return Candidat(id=row["id"], nom=row["nom"], categorie=row["categorie_nom"], boutique=row["boutique_nom"], prix=int(prix))
 
 
-def _produits(state, resultat: Resultat, lignes: list) -> list[dict]:
+def _produits(resultat: Resultat, lignes: list) -> list[dict]:
     par_id = {row["id"]: row for row in lignes}
-    media_base_url = state.settings.media_base_url
     return [
-        {**search.product_result(par_id[identifiant], media_base_url), "justification": justification}
+        {**search.product_result(par_id[identifiant]), "justification": justification}
         for identifiant, justification in resultat.sortie.produits
     ]
 
@@ -249,7 +248,7 @@ async def conseiller(state, demande: DemandeConseil) -> dict:
         candidats=tuple(_candidat(row) for row in lignes),
         max_produits=MAX_PRODUITS_CONSEIL,
     ))
-    produits = _produits(state, resultat, lignes)
+    produits = _produits(resultat, lignes)
     return {
         "reponse": resultat.sortie.message or message_gabarit(len(produits), demande.budget_max),
         "produits_suggeres": produits,
@@ -270,4 +269,4 @@ async def recommander(state, demande: DemandeRecommandations) -> dict:
         candidats=tuple(_candidat(row) for row in lignes),
         max_produits=MAX_PRODUITS_RECOMMANDATIONS,
     ))
-    return {"recommandations": _produits(state, resultat, lignes), "source": resultat.source}
+    return {"recommandations": _produits(resultat, lignes), "source": resultat.source}
