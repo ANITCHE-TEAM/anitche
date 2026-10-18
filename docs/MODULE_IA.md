@@ -81,8 +81,8 @@ Réponse 200 (données de démonstration ; un seul des 3 produits montré) :
     {
       "id": 34, "nom": "Sac en pagne tissé", "slug": "sac-en-pagne-tisse-4d5e6f",
       "prix_base": "9500.00", "prix_min": 9500.0,
-      "image_principale": "http://localhost:8000/media/catalogue/produits/2026/09/produit.png",
-      "miniature_principale": "http://localhost:8000/media/catalogue/miniatures/2026/09/produit.webp",
+      "image_principale": "/media/catalogue/produits/2026/09/produit.png",
+      "miniature_principale": "/media/catalogue/miniatures/2026/09/produit.webp",
       "categorie": 5, "categorie_nom": "Mode", "boutique": 11, "boutique_nom": "Pagnes & Style",
       "boutique_slug": "pagnes-style", "en_stock": true, "date_creation": "2026-09-27T20:27:03.031043Z",
       "justification": "Pagne : une valeur sûre pour une cérémonie. 9 500 FCFA, dans votre budget."
