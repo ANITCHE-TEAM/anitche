@@ -228,6 +228,18 @@ done
 if [ -n "${DOMAIN:-}" ] && [ "${#HOTES_AUTORISES[@]}" -gt 0 ] && ! hote_autorise "$DOMAIN"; then
     erreur "DOMAIN : doit figurer dans ALLOWED_HOSTS (sinon Django refuse toutes les requêtes du site)."
 fi
+# Les portails appellent /api/ sur leur propre sous-domaine : nginx transmet
+# ce nom à Django, qui répond 400 (DisallowedHost) s'il n'est pas autorisé.
+for var in DOMAIN_VENDEUR DOMAIN_LIVREUR DOMAIN_ADMIN; do
+    valeur="${!var:-}"
+    if [ -z "$valeur" ] && [ -n "${DOMAIN:-}" ]; then
+        valeur="$(tr '[:upper:]' '[:lower:]' <<<"${var#DOMAIN_}").$DOMAIN"
+    fi
+    [ -n "$valeur" ] || continue
+    if [ "${#HOTES_AUTORISES[@]}" -gt 0 ] && [[ "$valeur" =~ $MOTIF_HOTE ]] && ! hote_autorise "$valeur"; then
+        erreur "$var : « $valeur » doit figurer dans ALLOWED_HOSTS (sinon le portail n'atteint pas l'API : Django répond 400)."
+    fi
+done
 
 # Adresses autorisées sur /admin/ : vide (par défaut) = fermé à tous.
 # Jamais de préfixe /0 (tout Internet).

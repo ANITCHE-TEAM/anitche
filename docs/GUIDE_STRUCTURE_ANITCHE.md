@@ -72,7 +72,8 @@ anitche/
 ├── infra/                          # Déploiement
 │   ├── docker-compose.yml
 │   ├── docker-compose.prod.yml
-│   ├── nginx/nginx.conf          # modèle (variables DOMAIN…), rendu au démarrage
+│   ├── nginx/nginx.conf          # modèle (variables DOMAIN…), rendu au démarrage ; un bloc HTTPS par nom d'hôte
+│   ├── nginx/serveur-commun.conf # /api/, /fast/, /media/ communs aux cinq noms (inclus)
 │   ├── nginx/entrypoint.d/       # contrôles et rechargement périodique de nginx
 │   ├── backup/                   # image de sauvegarde (restic + pg_dump)
 │   └── scripts/{deploy.sh, migrer.sh, backup.sh, restore.sh, init-lets-encrypt.sh}
@@ -184,7 +185,7 @@ Variables de `infra/.env` (modèle commenté : `infra/.env.example`), transmises
 
 ### Composants
 
-- **Nginx** en reverse proxy devant tout, sur le domaine `DOMAIN` de `infra/.env` (`https://anitche.com` en production ; aucun nom écrit dans `infra/nginx/nginx.conf`, qui est un modèle) : Host et SNI inconnus refusés sans réponse, `/admin/` fermé sauf aux adresses de `ADMIN_ALLOWED_CIDRS` (vide par défaut), certificat renouvelé servi grâce à un rechargement toutes les `NGINX_RELOAD_INTERVAL` (6 h). `/` vers le build React statique, `/api/` et `/admin/` vers Django avec le chemin complet (sauf la route interne `/api/utilisateurs/jeton/verification`, 404), `/fast/` vers FastAPI sans le préfixe `/fast` (WebSocket compris). Il sert lui-même `/static/` (volume `anitche_static`, rempli par `collectstatic`) et les seuls médias publics sous `/media/` (images des produits et catégories, logos et bannières ; volume `anitche_media` en lecture seule) ; tout autre chemin sous `/media/` répond 404. Détail et liste des dossiers : en-tête de `infra/nginx/nginx.conf`.
+- **Nginx** en reverse proxy devant tout, sur le domaine `DOMAIN` de `infra/.env` (`https://anitche.com` en production ; aucun nom écrit dans `infra/nginx/nginx.conf`, qui est un modèle) : Host et SNI inconnus refusés sans réponse, `/admin/` fermé sauf aux adresses de `ADMIN_ALLOWED_CIDRS` (vide par défaut), certificat renouvelé servi grâce à un rechargement toutes les `NGINX_RELOAD_INTERVAL` (6 h). `/` vers le portail React du nom d'hôte (client, vendeur, livreur ou admin : une image chacune, `frontend/Dockerfile.prod`), `/api/` et `/admin/` vers Django avec le chemin complet (sauf la route interne `/api/utilisateurs/jeton/verification`, 404), `/fast/` vers FastAPI sans le préfixe `/fast` (WebSocket compris). Il sert lui-même `/static/` (volume `anitche_static`, rempli par `collectstatic`) et les seuls médias publics sous `/media/` (images des produits et catégories, logos et bannières ; volume `anitche_media` en lecture seule) ; tout autre chemin sous `/media/` répond 404. Détail et liste des dossiers : en-tête de `infra/nginx/nginx.conf`.
 - **Gunicorn** pour Django, **Uvicorn** pour FastAPI, chacun dans son conteneur.
 - **PostgreSQL managé** si possible (Neon, Supabase, Railway) plutôt que self-hosté au début.
 - **Redis** pour Celery + cache.

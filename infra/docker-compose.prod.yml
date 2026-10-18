@@ -3,9 +3,11 @@
 #   docker compose -f infra/docker-compose.prod.yml up -d --build
 #
 # Différences clés avec le dev :
-#   - le frontend est buildé en statique (Dockerfile.prod) et servi par Nginx
-#   - Nginx fait aussi office de reverse proxy vers Django (/api/, /admin/) et
-#     FastAPI (/fast/), et sert /static/ et les médias publics (/media/)
+#   - le frontend est buildé en statique, un portail par image (Dockerfile.prod),
+#     et servi par un nginx sans root par portail
+#   - Nginx route chaque nom de domaine vers son portail et fait office de
+#     reverse proxy vers Django (/api/, /admin/) et FastAPI (/fast/), et sert
+#     /static/ et les médias publics (/media/)
 #   - Django tourne avec Gunicorn, pas le serveur de dev
 #   - les secrets viennent d'un fichier .env (jamais commité), pas de valeurs par défaut
 
@@ -14,6 +16,19 @@ x-logging: &logging
   options:
     max-size: "10m"
     max-file: "5"
+
+# Un portail React : image nginx sans root (port 8080), construite par
+# frontend/Dockerfile.prod avec le portail choisi par PORTAIL. Le contrôle
+# demande la page d'accueil du portail au nginx de l'image.
+x-portail: &portail
+  restart: unless-stopped
+  logging: *logging
+  healthcheck:
+    test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+    interval: 10s
+    timeout: 5s
+    retries: 3
+    start_period: 10s
 
 # Environnement commun à Django, au worker et à beat : les trois chargent
 # config.settings.prod, qui refuse de démarrer si une variable manque. Une
@@ -126,7 +141,7 @@ services:
       # retours) ne sont servis que par les vues Django protégées ; nginx
       # monte ce volume en lecture seule et n'en sert que les dossiers
       # publics (images des produits et catégories, logos et bannières des
-      # boutiques) : voir infra/nginx/nginx.conf.
+      # boutiques) : voir infra/nginx/serveur-commun.conf.
       - anitche_media:/app/media
       # STATIC_ROOT = /app/staticfiles : collectstatic y écrit au démarrage,
       # nginx le sert sous /static/ (lecture seule).
@@ -238,12 +253,37 @@ services:
       backend-django:
         condition: service_started
 
-  frontend:
+  frontend-client:
+    <<: *portail
     build:
       context: ../frontend
       dockerfile: Dockerfile.prod
-    restart: unless-stopped
-    logging: *logging
+      args:
+        PORTAIL: client
+
+  frontend-vendeur:
+    <<: *portail
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile.prod
+      args:
+        PORTAIL: vendeur
+
+  frontend-livreur:
+    <<: *portail
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile.prod
+      args:
+        PORTAIL: livreur
+
+  frontend-admin:
+    <<: *portail
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile.prod
+      args:
+        PORTAIL: admin
 
   nginx:
     image: nginx:alpine
@@ -253,7 +293,7 @@ services:
       - "80:80"
       - "443:443"
     # Domaines et accès à /admin/ (docs/DEPLOIEMENT.md). nginx.conf est un
-    # modèle : l'image le rend au démarrage avec les seules variables de
+    # modèle (serveur-commun.conf et proxy-en-tetes.conf, lus tels quels) : l'image le rend au démarrage avec les seules variables de
     # NGINX_ENVSUBST_FILTER (« $$ » : un « $ » littéral pour compose).
     # 40-anitche-config.sh refuse de démarrer sur un nom ou une adresse
     # invalide ; 50-anitche-rechargement.sh recharge nginx périodiquement
@@ -269,13 +309,15 @@ services:
       NGINX_ENVSUBST_FILTER: ^(DOMAIN|DOMAIN_VENDEUR|DOMAIN_LIVREUR|DOMAIN_ADMIN)$$
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/templates/default.conf.template:ro
+      - ./nginx/serveur-commun.conf:/etc/nginx/anitche/serveur-commun.conf:ro
+      - ./nginx/proxy-en-tetes.conf:/etc/nginx/anitche/proxy-en-tetes.conf:ro
       - ./nginx/entrypoint.d/40-anitche-config.sh:/docker-entrypoint.d/40-anitche-config.sh:ro
       - ./nginx/entrypoint.d/50-anitche-rechargement.sh:/docker-entrypoint.d/50-anitche-rechargement.sh:ro
       # Certificats émis/renouvelés par le service "certbot"
       # ci-dessous, partagés en lecture avec Nginx via ce volume commun.
       - certbot_conf:/etc/letsencrypt:ro
       - certbot_www:/var/www/certbot:ro
-      # /static/ et médias publics sous /media/ (infra/nginx/nginx.conf),
+      # /static/ et médias publics sous /media/ (infra/nginx/*.conf),
       # en lecture seule : nginx ne peut ni modifier ni ajouter un fichier.
       - anitche_static:/srv/static:ro
       - anitche_media:/srv/media:ro
@@ -287,7 +329,10 @@ services:
       retries: 3
       start_period: 10s
     depends_on:
-      - frontend
+      - frontend-client
+      - frontend-vendeur
+      - frontend-livreur
+      - frontend-admin
       - backend-django
       - backend-fastapi
 

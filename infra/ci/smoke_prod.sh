@@ -12,8 +12,11 @@
 #                    local de CI) puis migrations ; rien en attente : ni
 #                    l'une ni l'autre (avant le démarrage de la pile)
 #   attendre         attend un 200 de Django à travers nginx (120 s au plus)
-#   verifier         routage, /admin/ fermé, Host et SNI inconnus refusés,
-#                    configuration nginx rendue pour DOMAIN, statiques,
+#   portails         les quatre portails, chacun sur son nom d'hôte : page,
+#                    URL profonde, cache des assets et d'index.html, CSP, API
+#                    et médias sur la même origine (inclus dans « verifier »)
+#   verifier         routage, portails, /admin/ fermé, Host et SNI inconnus
+#                    refusés, configuration nginx rendue pour DOMAIN, statiques,
 #                    médias, route interne, webhook, documentation fermée,
 #                    routes de santé fermées, X-Request-ID, conteneurs,
 #                    sécurité (Redis sans mot de passe refusé, rôle
@@ -223,9 +226,81 @@ verifier_routage() {
         -H "Authorization: Bearer $JETON_EXPIRE"
     statut_attendu 401; conclure
 
-    appel "Frontend (substitut) servi par nginx" GET "$URL/"
-    statut_attendu 200; corps_attendu "ANITCHE CI"; conclure
+}
 
+# Un portail par nom d'hôte : client sur le domaine principal, les autres sur
+# leur sous-domaine (vendeur., livreur. et admin. de DOMAIN dans la CI).
+verifier_portails() {
+    local portail hote url racine asset prive
+    for portail in client vendeur livreur admin; do
+        if [ "$portail" = client ]; then hote="$HOTE"; else hote="$portail.$HOTE"; fi
+        url="https://$hote"
+        racine="$TMP/racine-$portail.html"
+
+        appel "Portail $portail : page d'accueil" GET "$url/"
+        statut_attendu 200; entete_attendu x-portail "$portail"; corps_attendu 'id="root"'
+        entete_attendu content-type "text/html"; entete_attendu cache-control "no-cache"
+        cp "$TMP/corps" "$racine"; conclure
+
+        # CSP présente, sans eval ni origine extérieure.
+        appel "Portail $portail : Content-Security-Policy" GET "$url/"
+        entete_attendu content-security-policy "default-src 'self'"
+        entete_attendu content-security-policy "frame-ancestors 'none'"
+        entete_attendu content-security-policy "style-src-elem 'self' 'unsafe-inline'"
+        entete_attendu content-security-policy "object-src 'none'"
+        if grep -i '^content-security-policy:' "$TMP/entetes" | grep -qE "unsafe-eval|https?:|[*]"; then
+            ko "CSP trop large (unsafe-eval, origine extérieure ou joker)"
+        fi
+        conclure
+
+        # Repli de l'application : une URL profonde reçoit index.html.
+        appel "Portail $portail : URL profonde servie par index.html" GET "$url/commandes/12/details"
+        statut_attendu 200; entete_attendu x-portail "$portail"; entete_attendu cache-control "no-cache"
+        cmp -s "$TMP/corps" "$racine" || ko "le corps diffère de la page d'accueil"
+        conclure
+
+        asset="$(grep -oE '/assets/[^"]+[.]js' "$racine" | head -n 1)"
+        marquer "Portail $portail : fichier du bundle repéré dans index.html"
+        [ -n "$asset" ] || ko "aucun /assets/*.js dans index.html"
+        conclure
+        appel "Portail $portail : asset immuable" GET "$url${asset:-/assets/absent.js}"
+        statut_attendu 200; entete_attendu cache-control "max-age=31536000"
+        entete_attendu cache-control "immutable"; entete_attendu content-type "javascript"; conclure
+
+        # Un fichier du bundle disparu est un 404, jamais index.html (le
+        # navigateur l'exécuterait comme du JavaScript), et non mis en cache.
+        appel "Portail $portail : asset absent" GET "$url/assets/absent-0123.js"
+        statut_attendu 404
+        if grep -qi '^cache-control:.*immutable' "$TMP/entetes"; then ko "404 marqué immuable"; fi
+        conclure
+
+        # Même origine : API Django, FastAPI et médias, sans CORS.
+        appel "Portail $portail : API Django sur le sous-domaine" GET "$url/api/catalogue/categories/"
+        statut_attendu 200; entete_attendu content-type "application/json"; corps_json_valide; conclure
+        appel "Portail $portail : FastAPI sur le sous-domaine" GET "$url/fast/recherche/produits"
+        statut_attendu 200; corps_attendu '"count": *0'; conclure
+        appel "Portail $portail : média public servi" GET "$url/media/catalogue/produits/ci.txt"
+        statut_attendu 200; corps_attendu "^public"; conclure
+        # 404 de nginx (son corps contient « nginx ») : sans le bloc /media/,
+        # le repli du portail répondrait 200 avec index.html.
+        for prive in kyc support/pieces_jointes retours/preuves; do
+            appel "Portail $portail : média privé refusé ($prive)" GET "$url/media/$prive/ci.txt"
+            statut_attendu 404; corps_attendu nginx; conclure
+        done
+        appel "Portail $portail : route de santé fermée" GET "$url/health/"
+        statut_attendu 404; corps_attendu nginx; conclure
+        appel "Portail $portail : route interne de vérification du jeton fermée" GET "$url/api/utilisateurs/jeton/verification/"
+        statut_attendu 404; corps_attendu nginx; conclure
+
+        # /admin/ de Django n'existe que sur le domaine principal (403 testé
+        # par verifier_admin) : ailleurs, c'est une URL du portail.
+        if [ "$portail" != client ]; then
+            appel "Portail $portail : /admin/login/ n'atteint pas Django" GET "$url/admin/login/"
+            statut_attendu 200; entete_attendu x-portail "$portail"
+            if grep -q csrfmiddlewaretoken "$TMP/corps"; then ko "page de connexion de Django servie"; fi
+            conclure
+        fi
+    done
 }
 
 verifier_admin() {
@@ -292,6 +367,7 @@ verifier_hotes_inconnus() {
 
 # Configuration rendue par l'image nginx depuis le modèle nginx.conf.
 verifier_rendu_nginx() {
+    local portail
     marquer "Configuration nginx rendue pour DOMAIN=$HOTE"
     timeout 30 bash infra/ci/compose.sh exec -T nginx cat /etc/nginx/conf.d/default.conf > "$TMP/rendu" 2>&1 \
         || ko "configuration rendue illisible"
@@ -302,8 +378,20 @@ verifier_rendu_nginx() {
     if grep -nE '\$\{[A-Za-z_]+\}' "$TMP/rendu" > "$TMP/corps"; then ko "variable non remplacée"; fi
     if [ "$HOTE" != anitche.com ] && grep -n 'anitche\.com' "$TMP/rendu" > "$TMP/corps"; then ko "anitche.com écrit en dur"; fi
     # Les variables de nginx ne sont pas des variables d'environnement.
-    grep -qF 'proxy_set_header Host $host;' "$TMP/rendu" || ko "\$host remplacé au rendu"
     grep -qF 'rid=$request_id' "$TMP/rendu" || ko "\$request_id remplacé au rendu"
+    for portail in vendeur livreur admin; do
+        grep -qxF "    server_name $portail.$HOTE;" "$TMP/rendu" || ko "bloc 443 de $portail.$HOTE absent"
+    done
+    conclure
+
+    # Les fichiers inclus sont lus tels quels : aucun nom de domaine, et les
+    # variables de nginx intactes.
+    marquer "Fichiers inclus par nginx : sans nom de domaine, variables de nginx intactes"
+    timeout 30 bash infra/ci/compose.sh exec -T nginx cat /etc/nginx/anitche/serveur-commun.conf /etc/nginx/anitche/proxy-en-tetes.conf > "$TMP/rendu" 2>&1 \
+        || ko "fichiers inclus illisibles"
+    if [ "$HOTE" != anitche.com ] && grep -n 'anitche\.com' "$TMP/rendu" > "$TMP/corps"; then ko "anitche.com écrit en dur"; fi
+    grep -qF 'proxy_set_header Host $host;' "$TMP/rendu" || ko "proxy_set_header Host absent"
+    grep -qF 'add_header X-Request-ID $request_id always;' "$TMP/rendu" || ko "X-Request-ID absent"
     conclure
 
     marquer "Adresses autorisées sur /admin/ : exactement celles de ADMIN_ALLOWED_CIDRS"
@@ -458,7 +546,8 @@ except OSError:
 verifier_conteneurs() {
     local service id etat
 
-    for service in backend-django celery-worker celery-beat backend-fastapi nginx; do
+    for service in backend-django celery-worker celery-beat backend-fastapi nginx \
+                   frontend-client frontend-vendeur frontend-livreur frontend-admin; do
         marquer "Conteneur $service en marche, sans redémarrage"
         id="$(compose ps -q "$service" 2>/dev/null)"
         etat="$(docker inspect -f '{{.State.Running}} {{.RestartCount}}' "$id" 2>/dev/null)"
@@ -467,9 +556,10 @@ verifier_conteneurs() {
         conclure
     done
 
-    # Chaque service qui a un healthcheck doit être « healthy » (frontend et
-    # certbot n'en ont pas).
-    for service in db redis backend-django celery-worker celery-beat backend-fastapi nginx; do
+    # Chaque service qui a un healthcheck doit être « healthy » (certbot n'en
+    # a pas).
+    for service in db redis backend-django celery-worker celery-beat backend-fastapi nginx \
+                   frontend-client frontend-vendeur frontend-livreur frontend-admin; do
         marquer "Healthcheck de $service"
         id="$(compose ps -q "$service" 2>/dev/null)"
         etat="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}sans-healthcheck{{end}}' "$id" 2>/dev/null)"
@@ -553,7 +643,8 @@ with connection.cursor() as curseur:
         || ko "réponse « $sortie », « anitche_app False False False » attendu (current_user, rolsuper, rolcreatedb, rolcreaterole)"
     conclure
 
-    for service in backend-django celery-worker celery-beat backend-fastapi; do
+    for service in backend-django celery-worker celery-beat backend-fastapi \
+                   frontend-client frontend-vendeur frontend-livreur frontend-admin; do
         marquer "Conteneur $service sans root (id -u ≠ 0)"
         sortie="$(timeout 30 bash infra/ci/compose.sh exec -T "$service" id -u 2>&1 | tail -n 1)"
         STATUT="$sortie"
@@ -565,6 +656,7 @@ with connection.cursor() as curseur:
 verifier() {
     preparer_donnees
     verifier_routage
+    verifier_portails
     verifier_admin
     verifier_hotes_inconnus
     verifier_rendu_nginx
@@ -801,10 +893,11 @@ case "${1:-}" in
     migrations) migrations ;;
     attendre) attendre; exit $? ;;
     verifier) verifier; exit $? ;;
+    portails) preparer_donnees; verifier_portails ;;
     securite) verifier_admin; verifier_hotes_inconnus; verifier_securite ;;
     resolver) resolver ;;
     certificat) certificat ;;
-    *) echo "Usage : smoke_prod.sh refus_demarrage|migrations|attendre|verifier|securite|resolver|certificat" >&2; exit 2 ;;
+    *) echo "Usage : smoke_prod.sh refus_demarrage|migrations|attendre|verifier|portails|securite|resolver|certificat" >&2; exit 2 ;;
 esac
 
 if [ "${#ECHECS[@]}" -gt 0 ]; then exit 1; fi
