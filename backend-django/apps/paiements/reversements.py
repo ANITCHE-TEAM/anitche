@@ -8,6 +8,7 @@ livraison confirmée et délai de rétractation, frais déduits.
     disponible           → en_cours → verse  transfert par le fournisseur
     disponible           → verse             versement manuel (référence saisie)
     en_cours             → disponible        refus certain ou échec confirmé par le fournisseur
+    en_cours             → disponible / verse   résolution manuelle (commande resoudre_reversement)
     tout sauf verse      → annule            commande annulée (sauf en_cours)
 
 Un transfert dont l'issue est incertaine (délai dépassé, panne ou réponse
@@ -396,7 +397,8 @@ def alerter_administration_reversement(reversement, raison):
     message = (
         f"Reversement {reversement.reference} ({int(reversement.montant_a_verser)} FCFA à verser, "
         f"fournisseur {reversement.fournisseur or 'aucun'}) : {raison} Diagnostic : python manage.py "
-        f"reconcilier_reversements --reference {reversement.reference} --lecture-seule."
+        f"reconcilier_reversements --reference {reversement.reference} --lecture-seule, puis, si le "
+        f"fournisseur ne tranche pas, resoudre_reversement."
     )
     logger_securite.error("ALERTE ADMINISTRATION — %s", message)
     ServiceNotification.notifier_administration(
@@ -733,6 +735,56 @@ def alerter_reversements_bloques(maintenant=None):
         )
         alertes += 1
     return alertes
+
+
+#: Décisions de resoudre_transfert_incertain.
+NON_PARTI = "non-parti"
+VERSE_CONFIRME = "verse"
+
+
+def resoudre_transfert_incertain(reversement, administrateur, decision, motif, reference_externe=""):
+    """Sortie manuelle d'un reversement en cours que le fournisseur ne
+    tranche pas (transfert introuvable, bloqué) : l'administration a vérifié
+    le transfert dans le tableau de bord du fournisseur. Jamais automatique.
+
+        non-parti → disponible, ajustements libérés : aucun argent n'est parti
+        verse     → versé (référence du fournisseur obligatoire), vendeur notifié
+
+    Administrateur actif de l'administration et motif obligatoires, journal
+    de sécurité. Le fournisseur du transfert est conservé : un succès tardif
+    de ce même transfert reste silencieux, un autre alerte. Lève
+    ErreurVersement."""
+    from apps.vendeurs.permissions import ROLES_ADMINISTRATION
+
+    motif, reference_externe = (motif or "").strip(), (reference_externe or "").strip()
+    if decision not in (NON_PARTI, VERSE_CONFIRME):
+        raise ErreurVersement(f"Décision inconnue : {decision}.")
+    if administrateur is None or not administrateur.is_active or administrateur.role not in ROLES_ADMINISTRATION:
+        raise ErreurVersement("Seul un administrateur actif peut résoudre un transfert.")
+    if not motif:
+        raise ErreurVersement("Le motif est obligatoire.")
+    if decision == VERSE_CONFIRME and not reference_externe:
+        raise ErreurVersement("La référence du transfert chez le fournisseur est obligatoire.")
+    if len(reference_externe) > Reversement._meta.get_field("reference_externe").max_length:
+        raise ErreurVersement("Référence du fournisseur trop longue.")
+    with transaction.atomic():
+        verrouille = (Reversement.objects.select_for_update().select_related("boutique__proprietaire", "commande")
+                      .get(pk=reversement.pk))
+        if verrouille.statut != Statut.EN_COURS:
+            raise ErreurVersement("Seul un reversement en cours peut être résolu.")
+        if decision == NON_PARTI:
+            _liberer_ajustements(verrouille)
+            verrouille.statut = Statut.DISPONIBLE
+        else:
+            verrouille.reference_externe = reference_externe
+            verrouille.verse_par = administrateur
+            _finaliser(verrouille)
+        verrouille.save()
+    logger_securite.warning("Reversement %s : en_cours → %s (source=admin, admin_id=%s, décision=%s, motif=%r).",
+                            verrouille.reference, verrouille.statut, administrateur.id, decision, motif)
+    if verrouille.statut == Statut.VERSE:
+        _notifier_vendeur(verrouille)
+    return verrouille
 
 
 # =====================================================================

@@ -2581,6 +2581,78 @@ class ReconciliationReversementTests(DonneesReconciliationReversement, APITestCa
         self.assertEqual(reversements.alerter_reversements_bloques(timezone.now() + timedelta(hours=3)), 0)
 
 
+class ResolutionManuelleTests(DonneesReconciliationReversement, APITestCase):
+    """resoudre_reversement : seule sortie d'un reversement en cours que le
+    fournisseur ne tranche pas. Administrateur actif nommé, motif
+    obligatoire, référence obligatoire pour « verse », journal de sécurité."""
+
+    def resoudre(self, reference, decision, *options, par="admin@pay.ci", motif="Vérifié dans le tableau de bord"):
+        sortie = StringIO()
+        call_command("resoudre_reversement", reference, decision, "--par", par, "--motif", motif, *options,
+                     stdout=sortie)
+        return sortie.getvalue()
+
+    def test_resoudre_non_parti(self):
+        ajustement = AjustementVendeur.objects.create(boutique=self.boutique1, montant=Decimal("-1000"),
+                                                      motif="Retour remboursé après versement")
+        autre = self.autre_reversement()
+        with self.assertLogs("securite", "WARNING") as journaux:
+            sortie = self.resoudre(autre.reference, "non-parti", motif="Absent du tableau de bord du fournisseur")
+        self.assertIn(f"{autre.reference} : Disponible", sortie)
+        autre.refresh_from_db()
+        self.assertEqual((autre.statut, autre.montant_a_verser, autre.montant_ajustements),
+                         ("disponible", Decimal("0"), Decimal("0")))
+        self.assertIsNone(AjustementVendeur.objects.get(pk=ajustement.pk).reversement_impute)
+        journal = "\n".join(journaux.output)
+        for attendu in (f"Reversement {autre.reference} : en_cours → disponible (source=admin, admin_id={self.admin.id}",
+                        "décision=non-parti", "Absent du tableau de bord du fournisseur"):
+            self.assertIn(attendu, journal)
+        self.assertEqual(self.versements_notifies(), 0)
+        # Le versement manuel redevient possible.
+        r = self.api(self.admin).post(f"/api/paiements/admin/reversements/{autre.pk}/verser/",
+                                      {"reference_externe": "OM-7"})
+        self.assertEqual((r.status_code, r.data["statut"]), (200, "verse"))
+
+    def test_resoudre_verse(self):
+        with self.assertLogs("securite", "WARNING"):
+            self.resoudre(self.reversement.reference, "verse", "--reference-externe", "T-TABLEAU")
+        self.reversement.refresh_from_db()
+        self.assertEqual((self.reversement.statut, self.reversement.reference_externe, self.reversement.verse_par,
+                          self.reversement.fournisseur), ("verse", "T-TABLEAU", self.admin, "simule"))
+        self.assertIsNotNone(self.reversement.date_versement)
+        self.assertEqual(self.versements_notifies(), 1)
+        # Succès tardif de ce même transfert : silencieux.
+        r = self.notifier(self.reversement.reference, montant=8200, transfert=True, transaction_id="T-TABLEAU")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual((self.versements_notifies(), self.alertes().count()), (1, 0))
+
+    def test_resolution_refusee(self):
+        creer = Utilisateur.objects.create_user
+        creer(email="inactif@pay.ci", password="x", nom="A", prenom="I", role=Role.ADMIN, is_active=False)
+        refus = {
+            "motif vide": ("non-parti", (), {"motif": "   "}),
+            "vendeur": ("non-parti", (), {"par": "v1@pay.ci"}),
+            "client": ("non-parti", (), {"par": "c1@pay.ci"}),
+            "administrateur inactif": ("non-parti", (), {"par": "inactif@pay.ci"}),
+            "utilisateur inconnu": ("non-parti", (), {"par": "personne@pay.ci"}),
+            "versé sans référence": ("verse", (), {}),
+            "référence trop longue": ("verse", ("--reference-externe", "X" * 151), {}),
+            "décision inconnue": ("annule", (), {}),
+        }
+        for libelle, (decision, options, parametres) in refus.items():
+            with self.subTest(libelle), self.assertRaises(CommandError):
+                self.resoudre(self.reversement.reference, decision, *options, **parametres)
+        self.reversement.refresh_from_db()
+        self.assertEqual((self.reversement.statut, self.reversement.montant_a_verser), ("en_cours", Decimal("8200")))
+        # Hors « en cours » : refusé (un reversement versé ou disponible ne se résout pas).
+        Reversement.objects.filter(pk=self.reversement.pk).update(statut=Reversement.Statut.DISPONIBLE)
+        with self.assertRaises(CommandError):
+            self.resoudre(self.reversement.reference, "verse", "--reference-externe", "T-1")
+        with self.assertRaises(CommandError):
+            self.resoudre("REV-INCONNU", "non-parti")
+        self.assertEqual(self.versements_notifies(), 0)
+
+
 class ReconciliationReversementConcurrenceTests(FilsConcurrents, DonneesReconciliationReversement,
                                                 TransactionTestCase):
     """PostgreSQL : la réconciliation, une autre réconciliation et la
