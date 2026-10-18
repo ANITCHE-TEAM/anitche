@@ -2,6 +2,7 @@ from django.db.models import Prefetch
 from rest_framework import generics
 from rest_framework.permissions import AllowAny
 from rest_framework.throttling import ScopedRateThrottle
+from drf_spectacular.utils import extend_schema, extend_schema_view
 
 from .models import Panier, PanierItem
 from .serializers import PanierSerializer, PanierItemSerializer
@@ -38,6 +39,15 @@ class PanierDetailView(generics.RetrieveAPIView):
         return Panier(id=None, utilisateur=utilisateur)
 
 
+AUTO_ACHAT = (
+    "Article de la boutique du propriétaire du compte : 400, errors.code = [\"auto_achat_interdit\"] "
+    "(un vendeur n'achète pas dans sa propre boutique ; les articles des autres boutiques restent achetables)."
+)
+
+
+@extend_schema_view(
+    post=extend_schema(description=f"Ajoute l'article, ou incrémente sa ligne. {AUTO_ACHAT}"),
+)
 class PanierItemListCreateView(generics.ListCreateAPIView):
     permission_classes = [AllowAny]
     throttle_classes = [ScopedRateThrottle]
@@ -59,6 +69,10 @@ class PanierItemListCreateView(generics.ListCreateAPIView):
         )
 
 
+@extend_schema_view(
+    put=extend_schema(description=f"Seule la quantité change. Une hausse est contrôlée (stock, disponibilité). {AUTO_ACHAT}"),
+    patch=extend_schema(description=f"Seule la quantité change. Une hausse est contrôlée (stock, disponibilité). {AUTO_ACHAT}"),
+)
 class PanierItemDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [AllowAny]
     throttle_classes = [ScopedRateThrottle]

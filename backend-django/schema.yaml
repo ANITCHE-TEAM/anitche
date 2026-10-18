@@ -2042,7 +2042,8 @@ paths:
     post:
       operationId: commandes_simuler_frais_create
       description: 'Aucune écriture : montants par commande (une par boutique) et
-        totaux, recalculés à l''identique à la validation.'
+        totaux, recalculés à l''identique à la validation. Mêmes refus que la validation,
+        dont `errors.code = ["auto_achat_interdit"]` (article de la boutique du client).'
       summary: Simuler les montants du checkout
       tags:
       - Commandes
@@ -2098,7 +2099,9 @@ paths:
       operationId: commandes_valider_panier_create
       description: 'Crée une commande par boutique (statut `creee`, à payer sous 30
         minutes), décrémente le stock et vide le panier. Mêmes montants que `simuler-frais/`.
-        Stock insuffisant ou panier vide : 400 (`errors.non_field_errors`).'
+        Stock insuffisant ou panier vide : 400 (`errors.non_field_errors`). Panier
+        contenant un article de la boutique du client : 400, `errors.code = ["auto_achat_interdit"]`,
+        aucune commande créée.'
       summary: Valider le panier (checkout)
       tags:
       - Commandes
@@ -4895,6 +4898,10 @@ paths:
             par l''en-tête Retry-After.'
     post:
       operationId: panier_panier_items_create
+      description: 'Ajoute l''article, ou incrémente sa ligne. Article de la boutique
+        du propriétaire du compte : 400, errors.code = ["auto_achat_interdit"] (un
+        vendeur n''achète pas dans sa propre boutique ; les articles des autres boutiques
+        restent achetables).'
       tags:
       - Panier
       requestBody:
@@ -4970,6 +4977,10 @@ paths:
             par l''en-tête Retry-After.'
     put:
       operationId: panier_panier_items_update
+      description: 'Seule la quantité change. Une hausse est contrôlée (stock, disponibilité).
+        Article de la boutique du propriétaire du compte : 400, errors.code = ["auto_achat_interdit"]
+        (un vendeur n''achète pas dans sa propre boutique ; les articles des autres
+        boutiques restent achetables).'
       parameters:
       - in: path
         name: id
@@ -5023,6 +5034,10 @@ paths:
             par l''en-tête Retry-After.'
     patch:
       operationId: panier_panier_items_partial_update
+      description: 'Seule la quantité change. Une hausse est contrôlée (stock, disponibilité).
+        Article de la boutique du propriétaire du compte : 400, errors.code = ["auto_achat_interdit"]
+        (un vendeur n''achète pas dans sa propre boutique ; les articles des autres
+        boutiques restent achetables).'
       parameters:
       - in: path
         name: id

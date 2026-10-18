@@ -487,7 +487,7 @@ export interface paths {
         put?: never;
         /**
          * Simuler les montants du checkout
-         * @description Aucune écriture : montants par commande (une par boutique) et totaux, recalculés à l'identique à la validation.
+         * @description Aucune écriture : montants par commande (une par boutique) et totaux, recalculés à l'identique à la validation. Mêmes refus que la validation, dont `errors.code = ["auto_achat_interdit"]` (article de la boutique du client).
          */
         post: operations["commandes_simuler_frais_create"];
         delete?: never;
@@ -507,7 +507,7 @@ export interface paths {
         put?: never;
         /**
          * Valider le panier (checkout)
-         * @description Crée une commande par boutique (statut `creee`, à payer sous 30 minutes), décrémente le stock et vide le panier. Mêmes montants que `simuler-frais/`. Stock insuffisant ou panier vide : 400 (`errors.non_field_errors`).
+         * @description Crée une commande par boutique (statut `creee`, à payer sous 30 minutes), décrémente le stock et vide le panier. Mêmes montants que `simuler-frais/`. Stock insuffisant ou panier vide : 400 (`errors.non_field_errors`). Panier contenant un article de la boutique du client : 400, `errors.code = ["auto_achat_interdit"]`, aucune commande créée.
          */
         post: operations["commandes_valider_panier_create"];
         delete?: never;
@@ -1352,6 +1352,7 @@ export interface paths {
         };
         get: operations["panier_panier_items_list"];
         put?: never;
+        /** @description Ajoute l'article, ou incrémente sa ligne. Article de la boutique du propriétaire du compte : 400, errors.code = ["auto_achat_interdit"] (un vendeur n'achète pas dans sa propre boutique ; les articles des autres boutiques restent achetables). */
         post: operations["panier_panier_items_create"];
         delete?: never;
         options?: never;
@@ -1367,11 +1368,13 @@ export interface paths {
             cookie?: never;
         };
         get: operations["panier_panier_items_retrieve"];
+        /** @description Seule la quantité change. Une hausse est contrôlée (stock, disponibilité). Article de la boutique du propriétaire du compte : 400, errors.code = ["auto_achat_interdit"] (un vendeur n'achète pas dans sa propre boutique ; les articles des autres boutiques restent achetables). */
         put: operations["panier_panier_items_update"];
         post?: never;
         delete: operations["panier_panier_items_destroy"];
         options?: never;
         head?: never;
+        /** @description Seule la quantité change. Une hausse est contrôlée (stock, disponibilité). Article de la boutique du propriétaire du compte : 400, errors.code = ["auto_achat_interdit"] (un vendeur n'achète pas dans sa propre boutique ; les articles des autres boutiques restent achetables). */
         patch: operations["panier_panier_items_partial_update"];
         trace?: never;
     };
