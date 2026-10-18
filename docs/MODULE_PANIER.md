@@ -47,6 +47,7 @@ Tous en `AllowAny` : le panier courant est déterminé par le JWT (utilisateur c
 
 ### Refus (400)
 - Ajout d'un article **indisponible** (variante inactive, produit inactif, boutique fermée/suspendue, vendeur non validé) → `errors.variante` : « Cet article n'est plus disponible à la vente. … ».
+- **Article de sa propre boutique** (ajout, ou hausse de quantité d'une ligne) → `errors.code = ["auto_achat_interdit"]`, message dans `detail` et dans `errors.variante` : « Vous ne pouvez pas acheter un article de votre propre boutique. » Se fier à `errors.code[0]`, pas au texte. La règle compare le propriétaire de la boutique de l'article au compte du panier : un article d'une autre boutique reste achetable par ce vendeur, et un compte sans boutique (client, livreur, administrateur) n'est jamais concerné. Une baisse de quantité et la suppression d'une telle ligne (panier rempli avant la règle) restent permises. Le checkout et la simulation appliquent la même règle (voir [`MODULE_COMMANDES.md`](./MODULE_COMMANDES.md)).
 - `quantite` < 1 → `errors.quantite`.
 - Quantité (cumulée, à l'ajout) supérieure au stock → « Stock insuffisant : X disponible(s), Y demandé(s). »
 - **Changer la variante d'une ligne** (PATCH/PUT avec une autre `variante`) → `errors.variante` : « La variante d'une ligne de panier ne peut pas être modifiée. Supprimez la ligne puis ajoutez la nouvelle variante. » Renvoyer la même variante (PUT complet) est accepté.
@@ -95,6 +96,7 @@ Contrôle en modification de quantité : une **baisse** est toujours autorisée,
 
 - `backend-django/apps/panier/tests.py` — 33 tests : limite `panier` (ni `anon` ni `user`, seau commun aux trois vues, seau propre à chaque compte, taux de production), création paresseuse du panier, isolation entre paniers, ajout et incrément, refus d'un article indisponible (4 cas), ligne devenue indisponible (marquage, total, baisse/suppression/hausse, retour à la normale), quantités (0, négative, > stock, baisse toujours permise / hausse contrôlée, contrainte en base), variante figée, `session_key` non exposée, contraintes d'unicité, nombre de requêtes constant (`panier/` et `panier/items/`), panier vide `id: null`, stock non détaillé, concurrence (8 premiers ajouts simultanés → un panier, une ligne, aucun 500).
 - `backend-django/apps/commandes/tests.py` : `test_articles_indisponibles_tous_listes_et_validation_refusee`.
+- Auto-achat d'un vendeur : `PanierAutoAchatTestCase` (`apps/panier/tests.py`, 6 tests : ajout refusé, autre boutique acceptée, hausse refusée, baisse et suppression permises, comptes sans boutique, rôle changé) et `AutoAchatVendeurTests` (`apps/commandes/tests.py`, 7 tests : validation, panier mixte, autre boutique, simulation, coupon non consommé, comptes sans boutique, aucune création de commande hors validation).
 
 ⚠️ **Toujours lancer les tests sur PostgreSQL.** Sans `DJANGO_SETTINGS_MODULE`, `manage.py test` bascule sur SQLite et `PanierConcurrenceTestCase` est **sauté silencieusement**.
 
