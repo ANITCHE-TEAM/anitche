@@ -76,6 +76,7 @@ admin.py      consultation seule
 | `/vendeur/reversements` | vendeur | reversement effectué |
 | `/administration/retours/{uuid}` | administration | retour rejeté par un vendeur |
 | `/administration/remboursements` | administration | remboursement à traiter |
+| `/administration/reversements` | administration | reversement à vérifier (transfert bloqué, succès non conforme ou tardif) |
 | `/administration/livraisons/{uuid}` | administration | livraison contestée |
 
 Le texte d'aide du champ (donc le schéma OpenAPI) reprend cette liste. **Ajouter une route** : une fonction et une entrée dans `ROUTES` (`liens.py`), une ligne ci-dessus et la migration `AlterField` que `makemigrations` réclame (texte d'aide, sans SQL). Les clés de `metadata` ne font pas partie du contrat de navigation (elles varient selon la notification : `commande_id` ou `commande`, `remboursement`, `reversement`, `retour_id`…) : ne naviguer que par `lien_redirection`.

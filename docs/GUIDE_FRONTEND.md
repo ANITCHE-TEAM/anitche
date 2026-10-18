@@ -557,7 +557,7 @@ await api.post(`/api/paiements/simulation/${reference}/`, { statut: 'succes' });
 |---|---|
 | Client | `/commandes`, `/commandes/{uuid}`, `/livraisons/{uuid}`, `/retours/{uuid}`, `/paiements/{uuid}`, `/fidelite/mon-compte`, `/support/tickets/{uuid}` |
 | Vendeur | `/vendeur/commandes/{uuid}`, `/vendeur/produits/{id}`, `/vendeur/retours/{uuid}`, `/vendeur/reversements`, `/support/tickets/{uuid}` |
-| Administration | `/administration/retours/{uuid}`, `/administration/remboursements`, `/administration/livraisons/{uuid}` |
+| Administration | `/administration/retours/{uuid}`, `/administration/remboursements`, `/administration/reversements`, `/administration/livraisons/{uuid}` |
 
 - Chaque portail associe ces chemins à ses pages ; **tout préfixe inconnu mène au centre de notifications**. Ne jamais naviguer vers une valeur reçue sans la résoudre, et ne jamais lire `metadata` pour naviguer (ses clés varient).
 - Le préfixe d'administration est `/administration/`, jamais `/admin/` (admin Django). Les anciennes notifications `/admin/retours/…` ont été réécrites.
