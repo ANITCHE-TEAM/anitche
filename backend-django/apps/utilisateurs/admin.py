@@ -3,7 +3,7 @@ from django.contrib.auth.admin import UserAdmin
 from django.urls import reverse
 from django.utils.html import format_html
 
-from .models import Utilisateur, DocumentKYC
+from .models import Utilisateur, DocumentKYC, JournalConnexion
 
 
 class UtilisateurAdmin(UserAdmin):
@@ -177,3 +177,29 @@ class DocumentKYCAdmin(admin.ModelAdmin):
             return "—"
         url = reverse('kyc-telecharger', args=[obj.utilisateur_id, champ])
         return format_html('<a href="{}">Télécharger (accès contrôlé)</a>', url)
+
+
+@admin.register(JournalConnexion)
+class JournalConnexionAdmin(admin.ModelAdmin):
+    """Journal des connexions en lecture seule : ni ajout, ni modification, ni
+    suppression à la main (la purge est faite par la tâche planifiée)."""
+
+    list_display = ('date_creation', 'email_tente', 'utilisateur', 'methode', 'reussie', 'motif_echec', 'adresse_ip')
+    list_filter = ('reussie', 'methode', 'motif_echec')
+    search_fields = ('email_tente', 'adresse_ip')
+    date_hierarchy = 'date_creation'
+    list_select_related = ('utilisateur',)
+    raw_id_fields = ('utilisateur',)
+    show_full_result_count = False
+
+    def get_readonly_fields(self, request, obj=None):
+        return [champ.name for champ in self.model._meta.fields]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

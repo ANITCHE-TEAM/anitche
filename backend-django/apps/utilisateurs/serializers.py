@@ -4,6 +4,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 
 from .models import (
+    JournalConnexion,
     Utilisateur,
     TypeUsageOTP,
     DocumentKYC,
@@ -96,6 +97,50 @@ class UtilisateurAdministrationSerializer(serializers.ModelSerializer):
             'email_verifie', 'statut_kyc', 'date_creation',
         ]
         read_only_fields = fields
+
+
+# =====================================================
+# JOURNAL DES CONNEXIONS
+# =====================================================
+
+class JournalConnexionSerializer(serializers.ModelSerializer):
+    """Connexion vue par son titulaire : date, résultat, méthode, IP et
+    appareil. Aucun secret n'est enregistré dans le journal."""
+
+    class Meta:
+        model = JournalConnexion
+        fields = [
+            'id', 'date_creation', 'reussie', 'motif_echec', 'methode',
+            'adresse_ip', 'user_agent',
+        ]
+        read_only_fields = fields
+
+
+class JournalConnexionAdministrationSerializer(JournalConnexionSerializer):
+    """Connexion vue par l'administration : ajoute le compte visé (vide si
+    l'email tenté est inconnu) et l'email tenté."""
+
+    class Meta(JournalConnexionSerializer.Meta):
+        fields = ['id', 'utilisateur', 'email_tente', *JournalConnexionSerializer.Meta.fields[1:]]
+        read_only_fields = fields
+
+
+class FiltreJournalConnexionSerializer(serializers.Serializer):
+    """Paramètres de requête du journal vu par l'administration."""
+
+    utilisateur = serializers.IntegerField(required=False, min_value=1, help_text="Identifiant du compte.")
+    email = serializers.CharField(required=False, max_length=254, help_text="Email tenté, égalité exacte.")
+    # default=None : sans lui, un paramètre absent d'une query string est lu
+    # comme False (comportement des champs booléens pour une saisie HTML).
+    reussie = serializers.BooleanField(required=False, default=None, help_text="`true` : réussies ; `false` : refusées.")
+    date_debut = serializers.DateField(required=False, help_text="AAAA-MM-JJ, inclus.")
+    date_fin = serializers.DateField(required=False, help_text="AAAA-MM-JJ, inclus.")
+
+    def validate(self, donnees):
+        debut, fin = donnees.get('date_debut'), donnees.get('date_fin')
+        if debut and fin and debut > fin:
+            raise serializers.ValidationError({'date_fin': ["date_fin précède date_debut."]})
+        return donnees
 
 
 # =====================================================

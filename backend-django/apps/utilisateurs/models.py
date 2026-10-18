@@ -371,3 +371,81 @@ class CodeOTP(models.Model):
     class Meta:
         verbose_name = "Code OTP"
         verbose_name_plural = "Codes OTP"
+
+
+# ============================
+# JOURNAL DES CONNEXIONS
+# ============================
+
+class MethodeConnexion(models.TextChoices):
+    """Chemins par lesquels un jeton de session est délivré."""
+
+    MOT_DE_PASSE = 'mot_de_passe', 'Email et mot de passe'
+    GOOGLE = 'google', 'Google'
+
+
+class MotifEchecConnexion(models.TextChoices):
+    """Raison courte d'un refus de connexion (jamais de texte libre)."""
+
+    EMAIL_INCONNU = 'email_inconnu', 'Email inconnu'
+    MOT_DE_PASSE_INCORRECT = 'mot_de_passe_incorrect', 'Mot de passe incorrect'
+    COMPTE_DESACTIVE = 'compte_desactive', 'Compte désactivé'
+    GOOGLE_JETON_INVALIDE = 'google_jeton_invalide', 'Jeton Google invalide'
+    GOOGLE_INFOS_INCOMPLETES = 'google_infos_incompletes', 'Informations Google incomplètes'
+    GOOGLE_LIAISON_REFUSEE = 'google_liaison_refusee', 'Liaison Google refusée'
+
+
+class JournalConnexion(models.Model):
+    """Une tentative de connexion, réussie ou refusée.
+
+    Ne contient jamais de mot de passe, de jeton ni de code OTP. L'utilisateur
+    est vide quand l'email tenté ne correspond à aucun compte ; l'email tenté
+    est conservé en minuscules, tel que saisi, même s'il est inconnu. Les
+    lignes sont purgées après `JOURNAL_CONNEXIONS_RETENTION_JOURS` jours
+    (apps.utilisateurs.tasks.purger_journal_connexions).
+    """
+
+    utilisateur = models.ForeignKey(
+        Utilisateur,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='journal_connexions',
+    )
+    email_tente = models.CharField(max_length=254, blank=True)
+    reussie = models.BooleanField()
+    motif_echec = models.CharField(
+        max_length=30,
+        choices=MotifEchecConnexion.choices,
+        blank=True,
+    )
+    methode = models.CharField(max_length=20, choices=MethodeConnexion.choices)
+    adresse_ip = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.CharField(max_length=255, blank=True)
+    date_creation = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        resultat = 'réussie' if self.reussie else f'refusée ({self.motif_echec})'
+        return f"Connexion {self.methode} {resultat} — {self.email_tente or '?'}"
+
+    class Meta:
+        verbose_name = "Connexion"
+        verbose_name_plural = "Journal des connexions"
+        ordering = ['-date_creation', '-id']
+        indexes = [
+            # Historique d'un utilisateur, récentes d'abord.
+            models.Index(fields=['utilisateur', '-date_creation'], name='journalconn_user_date_idx'),
+            # Recherche d'un email tenté (y compris inconnu).
+            models.Index(fields=['email_tente', '-date_creation'], name='journalconn_email_date_idx'),
+            # Filtre par période et purge.
+            models.Index(fields=['date_creation'], name='journalconn_date_idx'),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(reussie=True, motif_echec='')
+                    | (models.Q(reussie=False) & ~models.Q(motif_echec=''))
+                ),
+                name='journalconn_motif_si_echec',
+            ),
+        ]

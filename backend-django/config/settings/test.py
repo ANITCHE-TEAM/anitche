@@ -70,6 +70,7 @@ REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {
     'retour_photo': '100000/day',
     'avis_creation': '100000/day',
     'avis_ecriture': '100000/day',
+    'avis_signalement': '100000/day',
     'support_ticket': '100000/day',
     'support_message': '100000/day',
     'support_piece_jointe': '100000/day',

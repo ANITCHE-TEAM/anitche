@@ -31,6 +31,7 @@ Le module dépend de `apps/core` (validateurs de fichiers, `CheminUploadUUID`, `
   - `numero_mobile_money` est un `EncryptedCharField` (§ 4) : jamais en clair en base ni dans ses sauvegardes, relu en clair par l'application. Longueur métier validée par l'API : 20 caractères.
   - **Plus de `compte_bancaire`** (migration 0009, septembre 2026) : les reversements aux vendeurs se font en mobile money uniquement ([`MODULE_PAIEMENTS.md`](./MODULE_PAIEMENTS.md) § 7). Le champ n'est ni collecté ni stocké ; un client qui l'envoie quand même n'est pas bloqué (valeur ignorée).
 - **`CodeOTP`** : `code_hash` (jamais en clair), `type_usage` (`inscription`, `mdp_oublie`, `changement_email`, `changement_telephone`), `nouvelle_valeur`, `date_expiration`, `nombre_tentatives`, `utilise`.
+- **`JournalConnexion`** : une ligne par tentative de connexion, réussie ou refusée (§ 5 bis) : `utilisateur` (vide si l'email tenté est inconnu ; `SET_NULL` si le compte est supprimé), `email_tente` (minuscules), `reussie`, `motif_echec`, `methode`, `adresse_ip`, `user_agent` (255 caractères au plus), `date_creation`.
 
 ## 3. Endpoints — `/api/utilisateurs/`
 
@@ -51,6 +52,8 @@ Le module dépend de `apps/core` (validateurs de fichiers, `CheminUploadUUID`, `
 | POST | `upload-kyc/` | IsAuthenticated + **email vérifié** | `kyc` | Dépôt du dossier = demande vendeur (§ 8). Fichiers en écriture seule |
 | GET | `kyc/<utilisateur_id>/<champ>/` | propriétaire, `admin`, `super_admin` | `user` | Seul accès aux pièces. Non autorisé → 403 avant toute recherche ; champ inconnu ou non fourni → 404 ; **fichier référencé mais absent du stockage → 404** « Ce document n'est plus disponible. » (journalisé). Réponse servie avec son vrai `Content-Type` (`image/jpeg`, `image/png`, `image/webp` ou `application/pdf`, déduit de l'extension) et `Content-Disposition: inline; filename="<uuid>.<ext>"`, lisible par un portail d'une autre origine (`Access-Control-Expose-Headers`). Le schéma OpenAPI décrit ces types, jamais `application/json` |
 | GET | `administration/` | `admin`, `super_admin` | `user` | **Recherche de comptes** pour le portail d'administration (retrouver un client, nommer un livreur, assigner un agent). Paginée (20), plus récents d'abord. Filtres combinables : `recherche` (partie de l'email, du nom, du prénom ou du téléphone, 100 caractères au plus), `role`, `est_actif` (`true` ou `false`) ; une valeur invalide est ignorée. Autres rôles et `is_staff` seul → **403**, anonyme **401** |
+| GET | `connexions/` | IsAuthenticated | `user` | **Mes connexions** : tentatives faites sur mon compte (réussies et refusées), paginées (20), plus récentes d'abord. Champs : `id`, `date_creation`, `reussie`, `motif_echec`, `methode`, `adresse_ip`, `user_agent` (§ 5 bis) |
+| GET | `administration/connexions/` | `admin`, `super_admin` | `user` | **Journal complet**, paginé (20), plus récentes d'abord. Ajoute `utilisateur` (id, `null` si l'email est inconnu) et `email_tente`. Filtres combinables : `utilisateur` (id), `email` (égalité exacte, casse ignorée, y compris un email sans compte), `reussie` (`true` / `false`), `date_debut` et `date_fin` (`AAAA-MM-JJ`, jours inclus). **Valeur invalide ou `date_fin` avant `date_debut` → 400** (contrairement à la recherche de comptes, qui ignore les valeurs invalides). Autres rôles → **403**, anonyme **401** |
 
 Représentation d'un compte pour l'administration (`UtilisateurAdministrationSerializer`), **minimale par construction** : `id`, `email`, `prenom`, `nom`, `telephone`, `role`, `is_active`, `email_verifie`, `statut_kyc`, `date_creation`. Jamais le mot de passe, une pièce KYC, le numéro mobile money, l'identifiant Google ni `is_staff`. Lecture seule ; nombre de requêtes constant.
 
@@ -136,6 +139,28 @@ Ne jamais passer à l'étape 5 tant que l'étape 4 signale des valeurs illisible
 - **Purge** : `nettoyer_otp_expires` (3 h 00) supprime les OTP expirés depuis plus de 24 heures.
 - **Notification de connexion** : après chaque connexion réussie (mot de passe ou Google), email au titulaire avec l'**IP réelle** du client (`adresse_ip_client()`, `apps/core/reseau.py`, qui ne lit `X-Forwarded-For` que derrière le proxy de confiance) et le user-agent. Jamais sur un échec.
 
+## 5 bis. Journal des connexions
+
+**Chemins qui délivrent un jeton, tous journalisés** : `connexion/` (email + mot de passe) et `connexion-google/`. Aucun flux OTP n'en délivre ; le rafraîchissement du jeton, le mot de passe oublié et l'admin Django (`/admin/`, hors de ce module) ne sont pas journalisés.
+
+| `motif_echec` | Chemin | Cas |
+|---|---|---|
+| `email_inconnu` | mot de passe | aucun compte pour cet email (`utilisateur` vide) |
+| `mot_de_passe_incorrect` | mot de passe | compte actif, mot de passe faux |
+| `compte_desactive` | mot de passe, Google | compte `is_active = false` |
+| `google_jeton_invalide` | Google | `id_token` refusé par Google (`email_tente` vide) |
+| `google_infos_incompletes` | Google | `sub`, email ou `email_verified` manquant |
+| `google_liaison_refusee` | Google | compte existant non vérifié avec mot de passe (§ 7) |
+
+- **Réponse inchangée** : le client reçoit la même réponse (401, 400, 403, 409) qu'avant le journal, quel que soit le motif. Le motif n'est lisible que dans le journal (le titulaire voit ses propres lignes, l'administration toutes).
+- **IP** : `adresse_ip_client()` (§ 5), jamais l'en-tête `X-Forwarded-For` tel que le client l'envoie. Sans proxy déclaré, c'est `REMOTE_ADDR`. En production, Nginx écrase l'en-tête avec l'IP réelle et Django lit la dernière entrée (`NUM_PROXIES = 1`). Adresse invalide : colonne vide, la connexion n'est pas affectée.
+- **Jamais enregistrés** : mot de passe, jeton (`access`, `refresh`, `id_token` Google), code OTP. Seul l'email tenté est conservé, en minuscules et tronqué à 254 caractères.
+- **Panne du journal** : l'écriture se fait dans un point de sauvegarde ; une erreur est inscrite dans le logger `securite` puis ignorée. Une connexion réussie reste réussie, un refus reste un refus.
+- **Non journalisés** : les requêtes mal formées (champ manquant, 400 de validation) et celles bloquées par la limite de débit (429), pour qu'un attaquant ne remplisse pas la table à volonté.
+- **Purge** : `purger_journal_connexions` (3 h 30, `CELERY_BEAT_SCHEDULE`) supprime les lignes de plus de `JOURNAL_CONNEXIONS_RETENTION_JOURS` jours (**180** par défaut ; l'IP et l'appareil sont des données personnelles).
+- **Index** : `(utilisateur, -date_creation)` pour l'historique d'un compte, `(email_tente, -date_creation)` pour la recherche par email, `(date_creation)` pour la période et la purge. Contrainte : un échec a toujours un motif, une réussite n'en a jamais.
+- **Admin Django** : lecture seule, y compris pour un superutilisateur (ni ajout, ni modification, ni suppression).
+
 ## 6. Email vérifié
 
 La connexion reste possible sans email vérifié (navigation, panier). Sont refusées tant que l'email n'est pas vérifié, avec **403** et `errors.code = ["email_non_verifie"]` :
@@ -215,6 +240,8 @@ Changements de contrat à intégrer (tous testés côté backend) :
    - `deconnexion/` : refresh absent ou invalide → **400** `errors.refresh` ;
    - `errors.code` de l'email non vérifié devient une liste : `["email_non_verifie"]`.
 
+9. **Journal des connexions** (additif, aucun contrat existant ne change) : `GET /api/utilisateurs/connexions/` alimente un écran « Activité de connexion » du compte (date, méthode `mot_de_passe` / `google`, IP, appareil, refus compris avec `motif_echec`) ; `GET /api/utilisateurs/administration/connexions/` alimente la consultation de l'administration, avec ses filtres (§ 3). Les deux sont paginées (`count`, `next`, `previous`, `results`). Les types sont régénérés dans `frontend/packages/api-client`.
+
 Aucun autre champ de réponse ne change (le profil, les jetons et le dépôt KYC gardent leur format ; `numero_mobile_money` est renvoyé en clair au titulaire comme avant).
 
 ## 12. Dette connue
@@ -236,5 +263,7 @@ DJANGO_SETTINGS_MODULE=config.settings.ci DB_NAME=anitche_test DB_USER=postgres 
 Vérifier dans la sortie `-v 2` que tout est `ok` et rien `skipped`. Les tests écrivent leurs fichiers dans un `MEDIA_ROOT` temporaire (`config/settings/test.py`), jamais dans `media/`.
 
 `apps/utilisateurs/tests.py` — 119 tests. Route interne FastAPI (§ 3 bis) : réponse limitée à `id` et `role`, 401 sans jeton, jeton invalide, jeton révoqué et compte désactivé (avec le code machine), limite `service_fastapi` (429 et `Retry-After`) sans consommer la limite `user`, taux de production, route absente du schéma, pas de redirection HTTPS avec les réglages de production (une autre route l'est). Passe 2 : chiffrement en base et relecture, longueurs métier, valeur illisible jamais écrasée, rotation de clé et commande de re-chiffrement (dont simulation et valeurs illisibles), migration 0008 aller-retour, IP de la notification (mot de passe, Google, sans proxy), durée affichée dans l'email OTP, pièce KYC perdue (404), email vérifié (connexion libre, 3 actions refusées avec le code machine, renvoi du code puis vérification), inscription sans téléphone et limite par IP, limites OTP séparées, limite de rafraîchissement dédiée, `telephone_verifie` non validé sans SMS, isolation de `MEDIA_ROOT`. Téléchargement KYC : type de contenu réel dans la liste du schéma (PDF, PNG), `Content-Disposition` exposé à une autre origine. Recherche d'administration (`UtilisateursAdministrationTests`, 4 tests) : refus pour chaque rôle non administrateur (même avec `is_staff`) et 401 anonyme, recherche par email, nom accentué et téléphone, filtres `role` et `est_actif`, valeurs invalides ignorées, clés exactes de la représentation sans mot de passe, numéro mobile money, pièce ni `google_id`, nombre de requêtes constant.
+
+`apps/utilisateurs/test_journal_connexions.py` — 52 tests du journal des connexions (§ 5 bis) : une ligne par chemin et par motif (mot de passe et Google, réussites et refus), réponse identique quel que soit le motif, requête mal formée non journalisée, aucun secret dans la base ni dans l'API, IP (en-tête du client ignoré sans proxy, dernière entrée derrière le proxy de confiance, adresse invalide), troncature, panne du journal sans effet sur la réponse (dont une vraie erreur SQL dans la transaction), lecture par son titulaire (isolement, ordre, pagination, champs exposés), lecture d'administration (refus de chaque rôle non administrateur, filtres, valeurs invalides, pagination), contraintes du modèle, admin Django en lecture seule, purge (seuil, réglage, entrée beat).
 
 Postman : `utilisateurs.postman_collection.json` (hors dépôt) ; scénarios automatiques 5 (email non vérifié) et 6 (téléphone refusé à l'inscription), les autres demandent de saisir les codes OTP à la main.

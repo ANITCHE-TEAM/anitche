@@ -53,6 +53,50 @@ export interface paths {
         patch: operations["avis_partial_update"];
         trace?: never;
     };
+    "/api/avis/{id}/reponse/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Répondre à un avis
+         * @description Réservé au propriétaire de la boutique de l'avis. Une seule réponse par avis (409 ensuite : la modifier). Avis d'une autre boutique ou boutique suspendue : 403 ; avis introuvable, masqué ou supprimé : 404.
+         */
+        post: operations["avis_reponse_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Modifier ma réponse à un avis
+         * @description Sans limite de durée ; `date_modification` est mise à jour.
+         */
+        patch: operations["avis_reponse_partial_update"];
+        trace?: never;
+    };
+    "/api/avis/{id}/signaler/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Signaler un avis
+         * @description Tout compte connecté. `motif` parmi une liste fermée, `commentaire` facultatif (500 caractères). Un signalement par utilisateur et par avis (409 ensuite). Son propre avis : 403 ; avis introuvable, masqué ou supprimé : 404. Le signalement ne masque rien : la modération décide.
+         */
+        post: operations["avis_signaler_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/avis/a-noter/": {
         parameters: {
             query?: never;
@@ -82,6 +126,126 @@ export interface paths {
         };
         /** Mes avis */
         get: operations["avis_mes_avis_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/avis/moderation/avis/{id}/masquer/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Masquer un avis (modération)
+         * @description Modérateur, admin, super_admin. `motif` obligatoire. L'avis sort du public et des moyennes (recalculées) ; son auteur le voit `masque`. Ses signalements ouverts sont acceptés. Avis non publié : 409.
+         */
+        post: operations["avis_moderation_avis_masquer_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/avis/moderation/avis/{id}/retablir/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rétablir un avis masqué (modération)
+         * @description Modérateur, admin, super_admin. `motif` obligatoire. L'avis revient dans le public et les moyennes. Avis non masqué : 409.
+         */
+        post: operations["avis_moderation_avis_retablir_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/avis/moderation/signalements/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Signalements d'avis (modération)
+         * @description Modérateur, admin, super_admin. File des signalements `ouvert` (défaut) dont l'avis est encore publié, les plus anciens d'abord ; `statut=accepte` ou `rejete` consulte les signalements traités. Valeur invalide : 400.
+         */
+        get: operations["avis_moderation_signalements_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/avis/moderation/signalements/{id}/rejeter/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rejeter un signalement (modération)
+         * @description Modérateur, admin, super_admin. `motif` obligatoire. L'avis reste publié. Signalement déjà traité : 409.
+         */
+        post: operations["avis_moderation_signalements_rejeter_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/avis/produit/{produit_id}/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Avis publiés d'un produit
+         * @description Public. Seuls les avis publiés figurent ici, les plus récents d'abord, avec la réponse de la boutique. Un avis masqué par la modération ou supprimé par son auteur n'y est plus. Produit inconnu ou non visible au public : 404.
+         */
+        get: operations["avis_produit_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/avis/recus/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Avis reçus par ma boutique
+         * @description Avis publiés sur les produits de ma boutique, les plus récents d'abord, avec ma réponse. `sans_reponse=true` ne garde que ceux auxquels je n'ai pas encore répondu.
+         */
+        get: operations["avis_recus_list"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1832,6 +1996,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/utilisateurs/administration/connexions/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Journal des connexions (administration)
+         * @description Toutes les tentatives de connexion, les plus récentes d'abord. Filtres combinables ; une valeur invalide est refusée (400). `email` : égalité exacte, casse ignorée, y compris pour un email sans compte. `date_debut` et `date_fin` sont inclusives (jour entier).
+         */
+        get: operations["utilisateurs_administration_connexions_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/utilisateurs/changement-contact/": {
         parameters: {
             query?: never;
@@ -1866,7 +2050,8 @@ export interface paths {
          * @description Notifie le titulaire du compte à chaque connexion réussie,
          *     uniquement en cas de succès (jamais sur un
          *     échec, pour ne pas alerter à tort sur une simple faute de frappe
-         *     de mot de passe ni révéler qu'un email existe).
+         *     de mot de passe ni révéler qu'un email existe). Chaque tentative,
+         *     réussie ou refusée, est inscrite au journal des connexions.
          */
         post: operations["utilisateurs_connexion_create"];
         delete?: never;
@@ -1915,6 +2100,26 @@ export interface paths {
          * @description Renvoie un nouvel `access` et un nouveau `refresh` (rotation) ; l'ancien refresh devient inutilisable.
          */
         post: operations["utilisateurs_connexion_rafraichir_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/utilisateurs/connexions/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Mes connexions
+         * @description Tentatives de connexion à mon compte (réussies et refusées), les plus récentes d'abord : date, méthode, adresse IP et appareil. Permet de repérer une connexion que je n'ai pas faite. Les lignes sont conservées `JOURNAL_CONNEXIONS_RETENTION_JOURS` jours (180 par défaut).
+         */
+        get: operations["utilisateurs_connexions_list"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2456,6 +2661,48 @@ export interface components {
             readonly date_modification: string;
             /** @description Fin du délai de modification par l'auteur (ISO 8601). */
             readonly modifiable_jusqu_au: string;
+            readonly reponse_vendeur: components["schemas"]["ReponseVendeur"] | null;
+        };
+        /** @description Avis signalé, tel que la modération le lit. */
+        AvisModeration: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly produit_id: number;
+            readonly produit_nom: string;
+            readonly boutique_nom: string;
+            readonly client_id: number;
+            readonly note: number;
+            readonly commentaire: string;
+            readonly statut: components["schemas"]["AvisStatutEnum"];
+        };
+        /**
+         * @description Un avis publié tel que le public le voit : prénom et initiale du nom
+         *     seulement, jamais l'email ni l'identifiant du client.
+         */
+        AvisPublic: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly auteur: string;
+            readonly note: number;
+            readonly commentaire: string;
+            readonly est_modifie: boolean;
+            /** Format: date-time */
+            readonly date_creation: string;
+            readonly reponse_vendeur: components["schemas"]["ReponseVendeur"] | null;
+        };
+        /** @description Un avis reçu par la boutique, vu par son propriétaire. */
+        AvisRecu: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly produit_id: number;
+            readonly produit_nom: string;
+            readonly auteur: string;
+            readonly note: number;
+            readonly commentaire: string;
+            readonly est_modifie: boolean;
+            /** Format: date-time */
+            readonly date_creation: string;
+            readonly reponse_vendeur: components["schemas"]["ReponseVendeur"] | null;
         };
         /**
          * @description * `publie` - Publié
@@ -2940,6 +3187,10 @@ export interface components {
         ConnexionGoogleRequest: {
             id_token: string;
         };
+        /** @description Corps de la réponse du vendeur (création et modification). */
+        ContenuReponseRequest: {
+            contenu: string;
+        };
         Contestation: {
             /** Format: uuid */
             readonly id: string;
@@ -3049,6 +3300,17 @@ export interface components {
             artisan_createur: string;
             /** @default standard */
             statut_certification: components["schemas"]["StatutCertificationEnum"];
+        };
+        /** @description Décision de modération : qui, quand, quoi, pourquoi. */
+        DecisionModeration: {
+            readonly id: number;
+            /** Format: uuid */
+            readonly avis_id: string;
+            readonly moderateur_id: number;
+            readonly type_decision: components["schemas"]["TypeDecisionEnum"];
+            readonly motif: string;
+            /** Format: date-time */
+            readonly date_creation: string;
         };
         /** @description Réponse des décisions sur une demande vendeur (documentation OpenAPI). */
         DecisionVendeurReponse: {
@@ -3340,6 +3602,36 @@ export interface components {
             /** @description Jeton de rafraîchissement (7 jours, à usage unique). */
             refresh: string;
         };
+        /**
+         * @description Connexion vue par son titulaire : date, résultat, méthode, IP et
+         *     appareil. Aucun secret n'est enregistré dans le journal.
+         */
+        JournalConnexion: {
+            readonly id: number;
+            /** Format: date-time */
+            readonly date_creation: string;
+            readonly reussie: boolean;
+            readonly motif_echec: components["schemas"]["MotifEchecEnum"];
+            readonly methode: components["schemas"]["MethodeConnexionEnum"];
+            readonly adresse_ip: string | null;
+            readonly user_agent: string;
+        };
+        /**
+         * @description Connexion vue par l'administration : ajoute le compte visé (vide si
+         *     l'email tenté est inconnu) et l'email tenté.
+         */
+        JournalConnexionAdministration: {
+            readonly id: number;
+            readonly utilisateur: number | null;
+            readonly email_tente: string;
+            /** Format: date-time */
+            readonly date_creation: string;
+            readonly reussie: boolean;
+            readonly motif_echec: components["schemas"]["MotifEchecEnum"];
+            readonly methode: components["schemas"]["MethodeConnexionEnum"];
+            readonly adresse_ip: string | null;
+            readonly user_agent: string;
+        };
         /** @description Article vendu et frais figés au moment de l'achat. */
         LigneReversement: {
             nom_produit: string;
@@ -3538,6 +3830,12 @@ export interface components {
             message: string;
         };
         /**
+         * @description * `mot_de_passe` - Email et mot de passe
+         *     * `google` - Google
+         * @enum {string}
+         */
+        MethodeConnexionEnum: "mot_de_passe" | "google";
+        /**
          * @description * `wave` - Wave
          *     * `orange_money` - Orange Money
          *     * `mtn_money` - MTN Mobile Money
@@ -3556,6 +3854,20 @@ export interface components {
          */
         MotifAnnulationEnum: "client" | "expiration" | "administration" | "boutique_indisponible" | "livraison_echouee";
         /**
+         * @description * `email_inconnu` - Email inconnu
+         *     * `mot_de_passe_incorrect` - Mot de passe incorrect
+         *     * `compte_desactive` - Compte désactivé
+         *     * `google_jeton_invalide` - Jeton Google invalide
+         *     * `google_infos_incompletes` - Informations Google incomplètes
+         *     * `google_liaison_refusee` - Liaison Google refusée
+         * @enum {string}
+         */
+        MotifEchecEnum: "email_inconnu" | "mot_de_passe_incorrect" | "compte_desactive" | "google_jeton_invalide" | "google_infos_incompletes" | "google_liaison_refusee";
+        /** @description Corps d'une décision de modération : le motif est obligatoire. */
+        MotifModerationRequest: {
+            motif: string;
+        };
+        /**
          * @description * `commande_annulee` - Commande annulée après paiement
          *     * `paiement_en_double` - Commande déjà payée par un autre paiement
          *     * `retour` - Retour remboursé
@@ -3573,6 +3885,16 @@ export interface components {
          * @enum {string}
          */
         MotifRetourEnum: "produit_defectueux" | "non_conforme" | "mauvaise_taille" | "article_manquant" | "changement_avis" | "autre";
+        /**
+         * @description * `spam` - Publicité ou spam
+         *     * `injurieux` - Propos injurieux ou haineux
+         *     * `hors_sujet` - Hors sujet
+         *     * `faux_avis` - Avis non authentique
+         *     * `donnees_personnelles` - Données personnelles
+         *     * `autre` - Autre
+         * @enum {string}
+         */
+        MotifSignalementAvisEnum: "spam" | "injurieux" | "hors_sujet" | "faux_avis" | "donnees_personnelles" | "autre";
         NommerLivreurRequest: {
             utilisateur_id: number;
         };
@@ -3644,6 +3966,36 @@ export interface components {
              */
             previous?: string | null;
             results: components["schemas"]["Avis"][];
+        };
+        PaginatedAvisPublicList: {
+            /** @example 123 */
+            count: number;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=4
+             */
+            next?: string | null;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=2
+             */
+            previous?: string | null;
+            results: components["schemas"]["AvisPublic"][];
+        };
+        PaginatedAvisRecuList: {
+            /** @example 123 */
+            count: number;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=4
+             */
+            next?: string | null;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=2
+             */
+            previous?: string | null;
+            results: components["schemas"]["AvisRecu"][];
         };
         PaginatedBaremeFraisList: {
             /** @example 123 */
@@ -3870,6 +4222,36 @@ export interface components {
             previous?: string | null;
             results: components["schemas"]["ImageProduit"][];
         };
+        PaginatedJournalConnexionAdministrationList: {
+            /** @example 123 */
+            count: number;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=4
+             */
+            next?: string | null;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=2
+             */
+            previous?: string | null;
+            results: components["schemas"]["JournalConnexionAdministration"][];
+        };
+        PaginatedJournalConnexionList: {
+            /** @example 123 */
+            count: number;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=4
+             */
+            next?: string | null;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=2
+             */
+            previous?: string | null;
+            results: components["schemas"]["JournalConnexion"][];
+        };
         PaginatedLivraisonHistoriqueList: {
             /** @example 123 */
             count: number;
@@ -4079,6 +4461,21 @@ export interface components {
              */
             previous?: string | null;
             results: components["schemas"]["ReversementVendeur"][];
+        };
+        PaginatedSignalementModerationList: {
+            /** @example 123 */
+            count: number;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=4
+             */
+            next?: string | null;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=2
+             */
+            previous?: string | null;
+            results: components["schemas"]["SignalementModeration"][];
         };
         PaginatedSupportTicketList: {
             /** @example 123 */
@@ -4494,6 +4891,10 @@ export interface components {
         };
         PatchedChangementStatutTicketRequestRequest: {
             status?: components["schemas"]["StatutTicketEnum"];
+        };
+        /** @description Corps de la réponse du vendeur (création et modification). */
+        PatchedContenuReponseRequest: {
+            contenu?: string;
         };
         PatchedLivraisonChangerStatusRequest: {
             status?: components["schemas"]["StatutLivraisonEnum"];
@@ -4935,6 +5336,14 @@ export interface components {
             /** Format: date-time */
             readonly date_traitement: string | null;
         };
+        /** @description Réponse de la boutique à un avis. */
+        ReponseVendeur: {
+            readonly contenu: string;
+            /** Format: date-time */
+            readonly date_creation: string;
+            /** Format: date-time */
+            readonly date_modification: string;
+        };
         /**
          * @description * `rejetee` - Rejetée
          *     * `fondee` - Fondée
@@ -5120,6 +5529,39 @@ export interface components {
          * @enum {string}
          */
         RoleEnum: "client" | "vendeur" | "livreur" | "moderateur" | "support" | "admin" | "super_admin";
+        /** @description Signalement tel que son auteur le reçoit. */
+        Signalement: {
+            readonly id: number;
+            /** Format: uuid */
+            readonly avis_id: string;
+            readonly motif: components["schemas"]["MotifSignalementAvisEnum"];
+            readonly commentaire: string;
+            readonly statut: components["schemas"]["StatutSignalementAvisEnum"];
+            /** Format: date-time */
+            readonly date_creation: string;
+        };
+        /** @description Signalement dans la file de modération. */
+        SignalementModeration: {
+            readonly id: number;
+            readonly avis: components["schemas"]["AvisModeration"];
+            readonly signalant_id: number;
+            readonly motif: components["schemas"]["MotifSignalementAvisEnum"];
+            readonly commentaire: string;
+            readonly statut: components["schemas"]["StatutSignalementAvisEnum"];
+            /** Format: date-time */
+            readonly date_creation: string;
+            /** Format: date-time */
+            readonly date_traitement: string | null;
+        };
+        /** @description Corps du signalement : motif parmi une liste fermée. */
+        SignalerAvisRequest: {
+            motif: components["schemas"]["MotifSignalementAvisEnum"];
+            /**
+             * @description Facultatif : précision pour la modération.
+             * @default
+             */
+            commentaire: string;
+        };
         SimulationCheckout: {
             /** @description Zone tarifaire déduite de la commune. */
             zone: string;
@@ -5253,6 +5695,13 @@ export interface components {
          * @enum {string}
          */
         StatutReversementEnum: "en_attente_livraison" | "en_retractation" | "suspendu" | "disponible" | "en_cours" | "verse" | "annule";
+        /**
+         * @description * `ouvert` - Ouvert
+         *     * `accepte` - Accepté (avis masqué)
+         *     * `rejete` - Rejeté
+         * @enum {string}
+         */
+        StatutSignalementAvisEnum: "ouvert" | "accepte" | "rejete";
         /**
          * @description * `open` - Ouvert
          *     * `in_progress` - En cours
@@ -5517,6 +5966,13 @@ export interface components {
         TransfererReversementRequest: {
             operateur?: components["schemas"]["OperateurEnum"];
         };
+        /**
+         * @description * `masquer` - Avis masqué
+         *     * `retablir` - Avis rétabli
+         *     * `rejeter_signalement` - Signalement rejeté
+         * @enum {string}
+         */
+        TypeDecisionEnum: "masquer" | "retablir" | "rejeter_signalement";
         /**
          * @description * `commande` - Commande
          *     * `paiement` - Paiement
@@ -6104,6 +6560,240 @@ export interface operations {
             };
         };
     };
+    avis_reponse_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContenuReponseRequest"];
+                "application/x-www-form-urlencoded": components["schemas"]["ContenuReponseRequest"];
+                "multipart/form-data": components["schemas"]["ContenuReponseRequest"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReponseVendeur"];
+                };
+            };
+            /** @description Requête invalide (erreurs par champ dans `errors`) ou refus métier (message dans `detail`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Action non autorisée pour ce compte. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Conflit : l'état actuel de la ressource ne permet pas cette action. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    avis_reponse_partial_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["PatchedContenuReponseRequest"];
+                "application/x-www-form-urlencoded": components["schemas"]["PatchedContenuReponseRequest"];
+                "multipart/form-data": components["schemas"]["PatchedContenuReponseRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReponseVendeur"];
+                };
+            };
+            /** @description Requête invalide (erreurs par champ dans `errors`) ou refus métier (message dans `detail`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Action non autorisée pour ce compte. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    avis_signaler_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SignalerAvisRequest"];
+                "application/x-www-form-urlencoded": components["schemas"]["SignalerAvisRequest"];
+                "multipart/form-data": components["schemas"]["SignalerAvisRequest"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Signalement"];
+                };
+            };
+            /** @description Requête invalide (erreurs par champ dans `errors`) ou refus métier (message dans `detail`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Action non autorisée pour ce compte. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Conflit : l'état actuel de la ressource ne permet pas cette action. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
     avis_a_noter_list: {
         parameters: {
             query?: {
@@ -6166,6 +6856,408 @@ export interface operations {
             };
             /** @description Authentification absente, jeton invalide ou expiré. */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    avis_moderation_avis_masquer_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MotifModerationRequest"];
+                "application/x-www-form-urlencoded": components["schemas"]["MotifModerationRequest"];
+                "multipart/form-data": components["schemas"]["MotifModerationRequest"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionModeration"];
+                };
+            };
+            /** @description Requête invalide (erreurs par champ dans `errors`) ou refus métier (message dans `detail`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Action non autorisée pour ce compte. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Conflit : l'état actuel de la ressource ne permet pas cette action. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    avis_moderation_avis_retablir_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MotifModerationRequest"];
+                "application/x-www-form-urlencoded": components["schemas"]["MotifModerationRequest"];
+                "multipart/form-data": components["schemas"]["MotifModerationRequest"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionModeration"];
+                };
+            };
+            /** @description Requête invalide (erreurs par champ dans `errors`) ou refus métier (message dans `detail`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Action non autorisée pour ce compte. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Conflit : l'état actuel de la ressource ne permet pas cette action. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    avis_moderation_signalements_list: {
+        parameters: {
+            query?: {
+                /** @description Un numéro de page de l'ensemble des résultats. */
+                page?: number;
+                /**
+                 * @description Défaut `ouvert`. `accepte` retrouve les avis masqués à la suite d'un signalement.
+                 *
+                 *     * `ouvert` - Ouvert
+                 *     * `accepte` - Accepté (avis masqué)
+                 *     * `rejete` - Rejeté
+                 */
+                statut?: "ouvert" | "accepte" | "rejete";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaginatedSignalementModerationList"];
+                };
+            };
+            /** @description Requête invalide (erreurs par champ dans `errors`) ou refus métier (message dans `detail`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Action non autorisée pour ce compte. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    avis_moderation_signalements_rejeter_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MotifModerationRequest"];
+                "application/x-www-form-urlencoded": components["schemas"]["MotifModerationRequest"];
+                "multipart/form-data": components["schemas"]["MotifModerationRequest"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionModeration"];
+                };
+            };
+            /** @description Requête invalide (erreurs par champ dans `errors`) ou refus métier (message dans `detail`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Action non autorisée pour ce compte. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Conflit : l'état actuel de la ressource ne permet pas cette action. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    avis_produit_list: {
+        parameters: {
+            query?: {
+                /** @description Un numéro de page de l'ensemble des résultats. */
+                page?: number;
+            };
+            header?: never;
+            path: {
+                produit_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaginatedAvisPublicList"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    avis_recus_list: {
+        parameters: {
+            query?: {
+                /** @description Un numéro de page de l'ensemble des résultats. */
+                page?: number;
+                /** @description `true` : avis sans réponse de la boutique. */
+                sans_reponse?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaginatedAvisRecuList"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Action non autorisée pour ce compte. */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -13319,6 +14411,74 @@ export interface operations {
             };
         };
     };
+    utilisateurs_administration_connexions_list: {
+        parameters: {
+            query?: {
+                /** @description AAAA-MM-JJ, inclus. */
+                date_debut?: string;
+                /** @description AAAA-MM-JJ, inclus. */
+                date_fin?: string;
+                /** @description Email tenté, égalité exacte. */
+                email?: string;
+                /** @description Un numéro de page de l'ensemble des résultats. */
+                page?: number;
+                /** @description `true` : réussies ; `false` : refusées. */
+                reussie?: boolean;
+                /** @description Identifiant du compte. */
+                utilisateur?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaginatedJournalConnexionAdministrationList"];
+                };
+            };
+            /** @description Requête invalide (erreurs par champ dans `errors`) ou refus métier (message dans `detail`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Action non autorisée pour ce compte. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
     utilisateurs_changement_contact_create: {
         parameters: {
             query?: never;
@@ -13523,6 +14683,46 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    utilisateurs_connexions_list: {
+        parameters: {
+            query?: {
+                /** @description Un numéro de page de l'ensemble des résultats. */
+                page?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaginatedJournalConnexionList"];
                 };
             };
             /** @description Authentification absente, jeton invalide ou expiré. */

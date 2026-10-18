@@ -23,7 +23,7 @@ from apps.catalogue.models import Produit
 from apps.commandes.models import Commande, CommandeItem
 from apps.vendeurs.models import Boutique
 
-from .models import Avis
+from .models import Avis, DecisionModeration, ReponseVendeur, SignalementAvis
 
 logger = logging.getLogger(__name__)
 
@@ -213,3 +213,141 @@ def supprimer_avis(avis_id, client):
         avis.save(update_fields=["statut", "date_modification"])
         recalculer_agregats(avis.produit_id, avis.boutique_id)
     logger.info("Avis %s supprimé par son auteur.", avis.pk)
+
+
+# =====================================================================
+# RÉPONSE DU VENDEUR
+# =====================================================================
+
+def _avis_publie_de_la_boutique_du_vendeur(avis_id, vendeur):
+    """Avis publié sur un produit de la boutique du vendeur, sous verrou
+    (la modération ne peut pas le masquer pendant l'écriture de la réponse).
+
+    404 : avis inconnu, masqué ou supprimé. 403 : avis d'une autre boutique,
+    ou boutique suspendue (gelée côté vendeur)."""
+    avis = (
+        Avis.objects.select_for_update(of=("self",))
+        .select_related("boutique")
+        .filter(pk=avis_id, statut=Statut.PUBLIE)
+        .first()
+    )
+    if avis is None:
+        raise AvisRefuse("Avis introuvable.", 404)
+    if avis.boutique.proprietaire_id != vendeur.pk:
+        raise AvisRefuse("Cet avis ne concerne pas votre boutique.", 403)
+    if avis.boutique.est_suspendue:
+        raise AvisRefuse("Votre boutique est suspendue par l'administration : aucune réponse n'est possible.", 403)
+    return avis
+
+
+def repondre_a_un_avis(avis_id, vendeur, contenu):
+    """Première réponse du propriétaire de la boutique à un avis publié.
+    409 si l'avis a déjà une réponse (la modifier avec `modifier_reponse`)."""
+    with transaction.atomic():
+        avis = _avis_publie_de_la_boutique_du_vendeur(avis_id, vendeur)
+        try:
+            with transaction.atomic():
+                return ReponseVendeur.objects.create(avis=avis, auteur=vendeur, contenu=contenu)
+        except IntegrityError:
+            raise AvisRefuse("Vous avez déjà répondu à cet avis : modifiez votre réponse.", 409)
+
+
+def modifier_reponse(avis_id, vendeur, contenu):
+    """Modifie la réponse existante ; `date_modification` est mise à jour."""
+    with transaction.atomic():
+        avis = _avis_publie_de_la_boutique_du_vendeur(avis_id, vendeur)
+        reponse = ReponseVendeur.objects.filter(avis=avis).first()
+        if reponse is None:
+            raise AvisRefuse("Aucune réponse à modifier pour cet avis.", 404)
+        reponse.contenu = contenu
+        reponse.save(update_fields=["contenu", "date_modification"])
+        return reponse
+
+
+# =====================================================================
+# SIGNALEMENT
+# =====================================================================
+
+def signaler_avis(avis_id, utilisateur, motif, commentaire=""):
+    """Signale un avis publié. 404 : avis inconnu, masqué ou supprimé (le
+    public ne le voit pas). 403 : son propre avis. 409 : déjà signalé par cet
+    utilisateur."""
+    avis = Avis.objects.filter(pk=avis_id, statut=Statut.PUBLIE).first()
+    if avis is None:
+        raise AvisRefuse("Avis introuvable.", 404)
+    if avis.client_id == utilisateur.pk:
+        raise AvisRefuse("Vous ne pouvez pas signaler votre propre avis.", 403)
+    try:
+        with transaction.atomic():
+            return SignalementAvis.objects.create(avis=avis, auteur=utilisateur, motif=motif, commentaire=commentaire)
+    except IntegrityError:
+        raise AvisRefuse("Vous avez déjà signalé cet avis.", 409)
+
+
+# =====================================================================
+# MODÉRATION
+# =====================================================================
+
+def _avis_verrouille_pour_moderation(avis_id):
+    """Avis sous verrou (produit, boutique, puis avis), ou 404."""
+    avis = Avis.objects.filter(pk=avis_id).first()
+    if avis is None:
+        raise AvisRefuse("Avis introuvable.", 404)
+    _verrouiller(avis.produit_id, avis.boutique_id)
+    return Avis.objects.select_for_update().get(pk=avis_id)
+
+
+def masquer_avis(avis_id, moderateur, motif):
+    """Masque un avis publié : il sort du public et des moyennes (recalculées).
+    Tous ses signalements ouverts sont acceptés par cette même décision."""
+    with transaction.atomic():
+        avis = _avis_verrouille_pour_moderation(avis_id)
+        if avis.statut != Statut.PUBLIE:
+            raise AvisRefuse("Seul un avis publié peut être masqué.", 409)
+        avis.statut = Statut.MASQUE
+        avis.save(update_fields=["statut", "date_modification"])
+        decision = DecisionModeration.objects.create(
+            avis=avis, moderateur=moderateur, type_decision=DecisionModeration.TypeDecision.MASQUER, motif=motif,
+        )
+        SignalementAvis.objects.filter(avis=avis, statut=SignalementAvis.Statut.OUVERT).update(
+            statut=SignalementAvis.Statut.ACCEPTE, decision=decision, date_traitement=timezone.now(),
+        )
+        recalculer_agregats(avis.produit_id, avis.boutique_id)
+    logger.info("Avis %s masqué par %s.", avis.pk, moderateur.pk)
+    return decision
+
+
+def retablir_avis(avis_id, moderateur, motif):
+    """Rétablit un avis masqué : il revient dans le public et les moyennes."""
+    with transaction.atomic():
+        avis = _avis_verrouille_pour_moderation(avis_id)
+        if avis.statut != Statut.MASQUE:
+            raise AvisRefuse("Seul un avis masqué peut être rétabli.", 409)
+        avis.statut = Statut.PUBLIE
+        avis.save(update_fields=["statut", "date_modification"])
+        decision = DecisionModeration.objects.create(
+            avis=avis, moderateur=moderateur, type_decision=DecisionModeration.TypeDecision.RETABLIR, motif=motif,
+        )
+        recalculer_agregats(avis.produit_id, avis.boutique_id)
+    logger.info("Avis %s rétabli par %s.", avis.pk, moderateur.pk)
+    return decision
+
+
+def rejeter_signalement(signalement_id, moderateur, motif):
+    """Rejette un signalement ouvert : l'avis reste publié."""
+    with transaction.atomic():
+        signalement = SignalementAvis.objects.select_for_update().filter(pk=signalement_id).first()
+        if signalement is None:
+            raise AvisRefuse("Signalement introuvable.", 404)
+        if signalement.statut != SignalementAvis.Statut.OUVERT:
+            raise AvisRefuse("Ce signalement a déjà été traité.", 409)
+        decision = DecisionModeration.objects.create(
+            avis_id=signalement.avis_id, moderateur=moderateur,
+            type_decision=DecisionModeration.TypeDecision.REJETER_SIGNALEMENT, motif=motif,
+        )
+        signalement.statut = SignalementAvis.Statut.REJETE
+        signalement.decision = decision
+        signalement.date_traitement = timezone.now()
+        signalement.save(update_fields=["statut", "decision", "date_traitement"])
+    logger.info("Signalement %s rejeté par %s.", signalement.pk, moderateur.pk)
+    return decision

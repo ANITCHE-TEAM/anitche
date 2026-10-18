@@ -1,12 +1,16 @@
 
 import logging
+from contextlib import contextmanager
 
+from django.db import transaction
 from rest_framework_simplejwt.token_blacklist.models import (
     BlacklistedToken,
     OutstandingToken,
 )
 
-from .models import Utilisateur
+from apps.core.reseau import adresse_ip_client
+
+from .models import JournalConnexion, MethodeConnexion, MotifEchecConnexion, Utilisateur
 
 logger_securite = logging.getLogger('securite')
 
@@ -48,7 +52,10 @@ class InfosGoogleIncompletes(Exception):
 
 class CompteDesactive(Exception):
     """Le compte visé a été désactivé (banni, fraude...)."""
-    pass
+
+    def __init__(self, utilisateur=None):
+        super().__init__()
+        self.utilisateur = utilisateur
 
 
 class LiaisonGoogleRefusee(Exception):
@@ -58,7 +65,10 @@ class LiaisonGoogleRefusee(Exception):
     utilisable ne peut pas être lié automatiquement à un identifiant
     Google, sans quoi l'attaquant qui l'a créé garderait un accès total.
     """
-    pass
+
+    def __init__(self, utilisateur=None):
+        super().__init__()
+        self.utilisateur = utilisateur
 
 
 def resoudre_utilisateur_google(infos):
@@ -99,7 +109,7 @@ def resoudre_utilisateur_google(infos):
                 "(utilisateur_id=%s, email=%s)",
                 utilisateur_existant.id, utilisateur_existant.email,
             )
-            raise CompteDesactive()
+            raise CompteDesactive(utilisateur_existant)
 
         if (
             utilisateur_existant
@@ -110,7 +120,7 @@ def resoudre_utilisateur_google(infos):
                 "Liaison Google refusée : compte existant non vérifié "
                 "(email=%s).", email,
             )
-            raise LiaisonGoogleRefusee()
+            raise LiaisonGoogleRefusee(utilisateur_existant)
 
         utilisateur, cree = Utilisateur.objects.avec_email(email).get_or_create(
             defaults={
@@ -142,6 +152,78 @@ def resoudre_utilisateur_google(infos):
             "(utilisateur_id=%s, email=%s)",
             utilisateur.id, utilisateur.email,
         )
-        raise CompteDesactive()
+        raise CompteDesactive(utilisateur)
 
     return utilisateur
+
+
+# =====================================================
+# JOURNAL DES CONNEXIONS
+# =====================================================
+
+USER_AGENT_LONGUEUR_MAX = 255
+EMAIL_TENTE_LONGUEUR_MAX = 254
+
+
+def _texte_pour_journal(valeur, longueur_max):
+    """Texte tronqué, sans caractère nul (refusé par PostgreSQL)."""
+    if not isinstance(valeur, str):
+        return ''
+    return valeur.replace('\x00', '')[:longueur_max]
+
+
+@contextmanager
+def _journal_sans_echec(methode):
+    """Absorbe toute panne du journal des connexions.
+
+    Une panne (base indisponible, valeur refusée) est journalisée puis
+    ignorée : elle ne doit transformer ni une connexion réussie ni un refus en
+    erreur serveur. Le bloc s'exécute dans un point de sauvegarde, pour ne pas
+    rendre inutilisable une transaction déjà ouverte par l'appelant.
+    """
+    try:
+        with transaction.atomic():
+            yield
+    except Exception:
+        logger_securite.exception("Écriture du journal des connexions impossible (methode=%s)", methode)
+
+
+def enregistrer_connexion(request, *, methode, reussie, utilisateur=None, email='', motif_echec=''):
+    """Écrit une ligne du journal des connexions ; n'échoue jamais.
+
+    L'adresse IP vient de `adresse_ip_client` (la même source que les limites
+    de débit et l'email de nouvelle connexion) : un X-Forwarded-For envoyé par
+    le client n'est jamais lu, sauf derrière le proxy de confiance déclaré par
+    REST_FRAMEWORK['NUM_PROXIES'].
+    """
+    with _journal_sans_echec(methode):
+        JournalConnexion.objects.create(
+            utilisateur=utilisateur,
+            email_tente=_texte_pour_journal(email, EMAIL_TENTE_LONGUEUR_MAX).strip().lower(),
+            reussie=reussie,
+            motif_echec='' if reussie else motif_echec,
+            methode=methode,
+            adresse_ip=adresse_ip_client(request),
+            user_agent=_texte_pour_journal(request.META.get('HTTP_USER_AGENT', ''), USER_AGENT_LONGUEUR_MAX),
+        )
+
+
+def enregistrer_echec_mot_de_passe(request, email):
+    """Journalise un refus de la connexion par email et mot de passe.
+
+    Le motif est déduit du compte visé ; la réponse faite au client, elle, est
+    la même dans les trois cas (voir LoginThrottleView).
+    """
+    email = _texte_pour_journal(email, EMAIL_TENTE_LONGUEUR_MAX)
+    with _journal_sans_echec(MethodeConnexion.MOT_DE_PASSE):
+        utilisateur = Utilisateur.objects.avec_email(email).first()
+        if utilisateur is None:
+            motif = MotifEchecConnexion.EMAIL_INCONNU
+        elif not utilisateur.is_active:
+            motif = MotifEchecConnexion.COMPTE_DESACTIVE
+        else:
+            motif = MotifEchecConnexion.MOT_DE_PASSE_INCORRECT
+        enregistrer_connexion(
+            request, methode=MethodeConnexion.MOT_DE_PASSE, reussie=False,
+            utilisateur=utilisateur, email=email, motif_echec=motif,
+        )

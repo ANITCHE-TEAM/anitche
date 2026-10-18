@@ -234,6 +234,9 @@ REST_FRAMEWORK = {
         # suivantes (modification, suppression).
         'avis_creation': '10/hour',
         'avis_ecriture': '30/hour',
+        # Signalement d'avis, par utilisateur : une lecture attentive en
+        # produit quelques-uns, au-delà c'est du harcèlement de la modération.
+        'avis_signalement': '20/hour',
         # Support, par utilisateur : tickets, messages d'un fil de discussion
         # et pièces jointes (5 par message au plus).
         'support_ticket': '10/hour',
@@ -337,6 +340,11 @@ SPECTACULAR_SETTINGS = {
         'StatutGainFideliteEnum': 'apps.fidelite.models.GainFidelite.Statut',
         'StatutTicketEnum': 'apps.support.models.SupportTicket.Status',
         'CanalNotificationEnum': 'apps.notifications.models.Notification.Canal',
+        'AvisStatutEnum': 'apps.avis.models.Avis.Statut',
+        'StatutSignalementAvisEnum': 'apps.avis.models.SignalementAvis.Statut',
+        'MotifSignalementAvisEnum': 'apps.avis.models.SignalementAvis.Motif',
+        'MethodeEnum': 'apps.paiements.models.Paiement.Methode',
+        'MethodeConnexionEnum': 'apps.utilisateurs.models.MethodeConnexion',
     },
     # Versions figées (drf-spectacular charge sinon « @latest » depuis le
     # CDN) : même interface pour toute l'équipe, pas de mise à jour subie.
@@ -415,6 +423,12 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'apps.utilisateurs.tasks.purger_tokens_expires',
         'schedule': crontab(hour=3, minute=15),
     },
+    # Journal des connexions : lignes plus anciennes que
+    # JOURNAL_CONNEXIONS_RETENTION_JOURS supprimées.
+    'utilisateurs-purger-journal-connexions': {
+        'task': 'apps.utilisateurs.tasks.purger_journal_connexions',
+        'schedule': crontab(hour=3, minute=30),
+    },
 }
 
 # Cache Redis : REDIS_CACHE_URL (base 1), lue comme REDIS_URL dans
@@ -433,6 +447,10 @@ CACHES = {
 
 # Auth Google
 GOOGLE_OAUTH_CLIENT_ID = config('GOOGLE_OAUTH_CLIENT_ID', default='')
+
+# Journal des connexions (apps.utilisateurs) : durée de conservation des
+# lignes (IP et appareil sont des données personnelles), en jours.
+JOURNAL_CONNEXIONS_RETENTION_JOURS = config('JOURNAL_CONNEXIONS_RETENTION_JOURS', default=180, cast=int)
 
 # Chiffrement au repos de champs sensibles (DocumentKYC.numero_mobile_money,
 # Reversement.numero_destinataire)
