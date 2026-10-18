@@ -15,7 +15,7 @@ Aucun nom de domaine n'est écrit dans `infra/nginx/nginx.conf` : c'est un modè
 | Variable | Défaut | Rôle |
 |---|---|---|
 | `DOMAIN` | aucun (obligatoire) | Domaine du site (`anitche.com`), servi en HTTPS avec `www.` ; nom du certificat |
-| `DOMAIN_VENDEUR`, `DOMAIN_LIVREUR`, `DOMAIN_ADMIN` | `vendeur.`, `livreur.`, `admin.` de `DOMAIN` | Sous-domaines des portails, dans le même certificat. Servis pour l'instant en HTTP seulement (challenge ACME, redirection vers HTTPS) |
+| `DOMAIN_VENDEUR`, `DOMAIN_LIVREUR`, `DOMAIN_ADMIN` | `vendeur.`, `livreur.`, `admin.` de `DOMAIN` | Sous-domaines des portails vendeur, livreur et admin, servis en HTTPS avec le même certificat. Chacun doit figurer dans `ALLOWED_HOSTS` (§ 1.1) |
 | `ADMIN_ALLOWED_CIDRS` | vide | Adresses autorisées sur `/admin/` (Django). **Vide : 403 pour tous** (§ 5) |
 | `NGINX_RELOAD_INTERVAL` | `6h` | Rechargement périodique de nginx, qui lui fait servir le certificat renouvelé par certbot |
 
@@ -26,6 +26,23 @@ Comportement de nginx :
 - Host ou SNI inconnus, accès par l'adresse IP du serveur : connexion fermée sans réponse (`return 444`, poignée de main TLS refusée). Aucun scan n'atteint Django et le certificat n'est montré qu'aux noms qu'il couvre.
 - Valeur invalide (nom d'hôte, adresse de `ADMIN_ALLOWED_CIDRS`, préfixe `/0`, intervalle) : nginx refuse de démarrer (`infra/nginx/entrypoint.d/40-anitche-config.sh`) ; `check_prod_env.sh` les refuse avant le déploiement.
 - Backends résolus à chaque requête (`resolver` de Docker) : nginx démarre sans eux et suit un conteneur recréé, sans rechargement.
+
+### 1.1 Les quatre portails
+
+Un portail React par nom d'hôte, chacun dans sa propre image (`frontend/Dockerfile.prod`, argument `PORTAIL`) servie par un nginx sans root (port 8080, non publié) :
+
+| Nom d'hôte | Service compose | Contenu |
+|---|---|---|
+| `DOMAIN`, `www.DOMAIN` | `frontend-client` | portail client, plus `/admin/` de Django (§ 5) et `/static/` |
+| `DOMAIN_VENDEUR` | `frontend-vendeur` | portail vendeur |
+| `DOMAIN_LIVREUR` | `frontend-livreur` | portail livreur |
+| `DOMAIN_ADMIN` | `frontend-admin` | portail d'administration (distinct de `/admin/` de Django) |
+
+- **Même origine** : chaque nom sert aussi `/api/` (Django), `/fast/` (FastAPI) et les médias publics (`/media/`), par `infra/nginx/serveur-commun.conf`. Les portails n'ont donc pas besoin de CORS. Les médias privés (`kyc/`, `support/pieces_jointes/`, `retours/preuves/`) répondent 404 sur chaque nom.
+- **`ALLOWED_HOSTS`** doit contenir `DOMAIN`, `www.DOMAIN` et les trois sous-domaines : nginx transmet le nom d'hôte reçu à Django, qui répond 400 sinon. `check_prod_env.sh` le vérifie.
+- **Cache** (`frontend/nginx/portail.conf`) : `/assets/` (noms à empreinte) en `immutable` pour un an ; `index.html` et le repli des URL profondes (`/commandes/12` renvoie `index.html`) en `no-cache`. Un fichier de `/assets/` absent est un 404, jamais `index.html`.
+- **CSP** (`frontend/nginx/en-tetes.conf`, commentée directive par directive) : tout vient de l'origine du portail ; ni script ni style en ligne dans le HTML ; `'unsafe-inline'` seulement pour les balises `<style>` que Radix, le verrou de défilement des fenêtres modales et sonner créent à l'exécution. Une page qui a besoin d'un domaine extérieur (tuiles de carte, polices) ou de `blob:`/`data:` pour des images le demande en modifiant ce fichier ; sans cela le navigateur la bloque et le signale dans sa console (un serveur de développement n'applique pas la CSP : tester sur l'image de production).
+- Reconstruire un seul portail : `docker compose -f infra/docker-compose.prod.yml up -d --build frontend-vendeur`.
 
 ## 2. Premier serveur
 
