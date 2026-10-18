@@ -3496,7 +3496,7 @@ export interface components {
             readonly est_lu: boolean;
             /** Format: date-time */
             readonly date_lecture: string | null;
-            /** @description Route logique de la ressource, à associer à une page par chaque portail : un chemin (jamais une URL, ni un hôte, ni une requête), ou vide si la notification ne mène nulle part. Liste fermée (apps/notifications/liens.py) : /commandes, /commandes/{uuid}, /livraisons/{uuid}, /retours/{uuid}, /paiements/{uuid}, /fidelite/mon-compte, /support/tickets/{uuid}, /vendeur/commandes/{uuid}, /vendeur/produits/{id}, /vendeur/retours/{uuid}, /vendeur/reversements, /administration/retours/{uuid}, /administration/remboursements, /administration/livraisons/{uuid}. Un préfixe inconnu mène au centre de notifications. */
+            /** @description Route logique de la ressource, à associer à une page par chaque portail : un chemin (jamais une URL, ni un hôte, ni une requête), ou vide si la notification ne mène nulle part. Liste fermée (apps/notifications/liens.py) : /commandes, /commandes/{uuid}, /livraisons/{uuid}, /retours/{uuid}, /paiements/{uuid}, /fidelite/mon-compte, /support/tickets/{uuid}, /vendeur/commandes/{uuid}, /vendeur/produits/{id}, /vendeur/retours/{uuid}, /vendeur/reversements, /administration/retours/{uuid}, /administration/remboursements, /administration/reversements, /administration/livraisons/{uuid}. Un préfixe inconnu mène au centre de notifications. */
             readonly lien_redirection: string;
             /** @description Données contextuelles additionnelles (IDs techniques, totaux, etc.) */
             readonly metadata: unknown;

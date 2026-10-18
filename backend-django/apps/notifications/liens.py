@@ -27,6 +27,7 @@ ROUTES = (
     "/vendeur/reversements",
     "/administration/retours/{uuid}",
     "/administration/remboursements",
+    "/administration/reversements",
     "/administration/livraisons/{uuid}",
 )
 
@@ -89,6 +90,10 @@ def lien_retour_administration(demande):
 
 def lien_remboursements_administration():
     return "/administration/remboursements"
+
+
+def lien_reversements_administration():
+    return "/administration/reversements"
 
 
 def lien_livraison_administration(livraison):

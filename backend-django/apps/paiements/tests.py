@@ -54,6 +54,7 @@ from .fournisseurs.base import (
     SUCCES,
     ErreurFournisseur,
     EtatTransaction,
+    MontantHorsLimites,
     NotificationInvalide,
     OperationNonSupportee,
     TransactionIntrouvable,
@@ -1767,7 +1768,11 @@ class MigrationBaremeQuatorzePourcentTests(Donnees, TransactionTestCase):
 # REVERSEMENTS
 # =====================================================================
 
-class ReversementTests(Donnees, APITestCase):
+class DonneesReversement(Donnees):
+    """Commande de la boutique 1 payée : reversement en attente de livraison."""
+
+    URL_TRANSFERER = "/api/paiements/admin/reversements/{}/transferer/"
+
     def setUp(self):
         self.creer_donnees()
         (self.commande,) = self.commander((self.variante1, 2))  # 10 000 : 1 400 + 400 → net 8 200
@@ -1787,6 +1792,17 @@ class ReversementTests(Donnees, APITestCase):
         reversements.rendre_disponibles()
         self.reversement.refresh_from_db()
 
+    def transferer_avec(self, **resultat):
+        """Transfert dont le fournisseur répond tout de suite SUCCES, avec
+        les montant et devise donnés (absents s'ils ne sont pas passés)."""
+        from .fournisseurs.base import ResultatTransfert
+
+        reponse = ResultatTransfert(statut=SUCCES, identifiant_externe="T1", **resultat)
+        with mock.patch.object(FournisseurSimule, "transferer", return_value=reponse):
+            return self.api(self.admin).post(self.URL_TRANSFERER.format(self.reversement.pk), {"operateur": "wave"})
+
+
+class ReversementTests(DonneesReversement, APITestCase):
     def retour(self, statut=DemandeRetour.Statut.DEMANDE, quantite=1):
         demande = DemandeRetour.objects.create(
             commande=self.commande, client=self.client1, boutique=self.boutique1, description="x",
@@ -1884,14 +1900,6 @@ class ReversementTests(Donnees, APITestCase):
         self.assertEqual((r.status_code, r.data["statut"], r.data["operateur"]), (200, "verse", "orange_money"))
         self.assertEqual(transferer.call_args.args[1:], ("+2250707070707", "orange_money"))
 
-    def test_transfert_echoue_reste_disponible(self):
-        self.livrer(il_y_a_jours=8)
-        with mock.patch.object(FournisseurSimule, "transferer", side_effect=ErreurFournisseur("solde")):
-            r = self.api(self.admin).post(f"/api/paiements/admin/reversements/{self.reversement.pk}/transferer/")
-        self.assertEqual(r.status_code, 409)
-        self.reversement.refresh_from_db()
-        self.assertEqual(self.reversement.statut, Reversement.Statut.DISPONIBLE)
-
     def test_transfert_confirme_par_notification(self):
         from .fournisseurs.base import ResultatTransfert
 
@@ -1947,19 +1955,12 @@ class ReversementTests(Donnees, APITestCase):
                     JournalWebhook.objects.get(evenement_id=f"evt-transfert-{numero}").statut_traitement, "erreur")
                 self.assertFalse(Notification.objects.filter(
                     destinataire=self.vendeur1, titre="Reversement effectué").exists())
+                # Même règle que le succès immédiat et la réconciliation :
+                # l'argent a pu partir avec un autre montant, l'administration est alertée.
+                self.assertTrue(Notification.objects.filter(
+                    destinataire=self.admin, titre="Reversement à vérifier").exists())
 
     # --- Succès immédiat d'un transfert : même contrôle que la notification ---
-
-    URL_TRANSFERER = "/api/paiements/admin/reversements/{}/transferer/"
-
-    def transferer_avec(self, **resultat):
-        """Transfert dont le fournisseur répond tout de suite SUCCES, avec
-        les montant et devise donnés (absents s'ils ne sont pas passés)."""
-        from .fournisseurs.base import ResultatTransfert
-
-        reponse = ResultatTransfert(statut=SUCCES, identifiant_externe="T1", **resultat)
-        with mock.patch.object(FournisseurSimule, "transferer", return_value=reponse):
-            return self.api(self.admin).post(self.URL_TRANSFERER.format(self.reversement.pk), {"operateur": "wave"})
 
     def test_succes_immediat_sans_montant_et_devise_conformes_reste_en_cours(self):
         self.livrer(il_y_a_jours=8)
@@ -2044,6 +2045,176 @@ class ReversementTests(Donnees, APITestCase):
         # count + page (commande jointe) + articles : constant, sans N+1.
         with self.assertNumQueries(3):
             self.assertEqual(api.get("/api/paiements/vendeur/reversements/").data["count"], 2)
+
+
+class TransfertIncertainTests(DonneesReversement, APITestCase):
+    """Après l'envoi d'un transfert, seul un refus certain ou un échec
+    confirmé rend le reversement disponible : toute autre erreur laisse
+    l'issue incertaine, le reversement reste « en cours » (montant et
+    ajustements figés) et ne peut être ni retransféré ni versé à la main."""
+
+    def setUp(self):
+        super().setUp()
+        self.livrer(il_y_a_jours=8)
+        # Dû par la boutique : imputé au transfert (8 200 − 1 000 = 7 200).
+        self.ajustement = AjustementVendeur.objects.create(boutique=self.boutique1, montant=Decimal("-1000"),
+                                                           motif="Retour remboursé après versement")
+
+    def transferer(self):
+        return self.api(self.admin).post(self.URL_TRANSFERER.format(self.reversement.pk), {"operateur": "orange_money"})
+
+    def remettre_disponible(self):
+        Reversement.objects.filter(pk=self.reversement.pk).update(
+            statut=Reversement.Statut.DISPONIBLE, montant_a_verser=0, montant_ajustements=0)
+        AjustementVendeur.objects.update(reversement_impute=None)
+
+    def etat(self):
+        self.reversement.refresh_from_db()
+        self.ajustement.refresh_from_db()
+        return (self.reversement.statut, self.reversement.montant_a_verser, self.reversement.montant_ajustements,
+                self.ajustement.reversement_impute_id)
+
+    def en_cours_fige(self):
+        return ("en_cours", Decimal("7200"), Decimal("-1000"), self.reversement.pk)
+
+    def disponible_libere(self):
+        return ("disponible", Decimal("0"), Decimal("0"), None)
+
+    def versements_notifies(self):
+        return Notification.objects.filter(destinataire=self.vendeur1, titre="Reversement effectué").count()
+
+    def alertes(self):
+        return Notification.objects.filter(destinataire=self.admin, titre="Reversement à vérifier")
+
+    def test_delai_depasse_apres_envoi_reste_en_cours(self):
+        definir_comportement_transfert(self.reversement.reference, DELAI_APRES_ENVOI)
+        with self.assertLogs("securite", "ERROR") as journaux:
+            r = self.transferer()
+        self.assertEqual((r.status_code, r.data["statut"]), (200, "en_cours"))
+        self.assertEqual(self.etat(), self.en_cours_fige())
+        self.assertIn(f"Transfert {self.reversement.reference} : issue incertaine", journaux.output[0])
+        self.assertEqual(self.versements_notifies(), 0)
+        # Le transfert est bien parti chez le fournisseur.
+        self.assertEqual(FournisseurSimule().verifier_transfert(self.reversement).statut, SUCCES)
+
+    def test_erreur_fournisseur_non_certifiee_reste_en_cours(self):
+        class ErreurInconnue(ErreurFournisseur):
+            pass
+
+        erreurs = {
+            "générique": ErreurFournisseur("solde"),
+            "sous-classe inconnue": ErreurInconnue("nouvelle erreur d'un adaptateur"),
+            "délai dépassé": ErreurFournisseur("GeniusPay injoignable : timeout"),
+            "503": ErreurFournisseur("GeniusPay : HTTP 503"),
+            "réponse illisible": ErreurFournisseur("GeniusPay : réponse illisible"),
+        }
+        for libelle, erreur in erreurs.items():
+            with self.subTest(libelle):
+                self.remettre_disponible()
+                with mock.patch.object(FournisseurSimule, "transferer", side_effect=erreur), \
+                        self.assertLogs("securite", "ERROR"):
+                    r = self.transferer()
+                self.assertEqual((r.status_code, r.data["statut"]), (200, "en_cours"))
+                self.assertEqual(self.etat(), self.en_cours_fige())
+
+    def test_refus_certain_rend_disponible_et_libere_les_ajustements(self):
+        for libelle in ("TransfertRefuse", "MontantHorsLimites"):
+            with self.subTest(libelle):
+                self.remettre_disponible()
+                if libelle == "TransfertRefuse":
+                    definir_comportement_transfert(self.reversement.reference, REFUS_CERTAIN)
+                    r = self.transferer()
+                else:
+                    with mock.patch.object(FournisseurSimule, "transferer",
+                                           side_effect=MontantHorsLimites("Montant hors limites")):
+                        r = self.transferer()
+                self.assertEqual(r.status_code, 409)
+                self.assertIn("Transfert refusé", str(r.data))
+                self.assertEqual(self.etat(), self.disponible_libere())
+
+    def test_operation_non_supportee_rend_disponible(self):
+        with mock.patch.object(FournisseurSimule, "transferer",
+                               side_effect=OperationNonSupportee("Transfert par API non disponible")):
+            r = self.transferer()
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(self.etat(), self.disponible_libere())
+
+    def test_relance_refusee_tant_que_en_cours(self):
+        definir_comportement_transfert(self.reversement.reference, DELAI_APRES_ENVOI)
+        with mock.patch.object(FournisseurSimule, "transferer", autospec=True,
+                               side_effect=FournisseurSimule.transferer) as transferer, \
+                self.assertLogs("securite", "ERROR"):
+            self.assertEqual(self.transferer().status_code, 200)
+            self.assertEqual(self.transferer().status_code, 409)
+            r = self.api(self.admin).post(f"/api/paiements/admin/reversements/{self.reversement.pk}/verser/",
+                                          {"reference_externe": "OM-1"})
+            self.assertEqual(r.status_code, 409)
+        self.assertEqual(transferer.call_count, 1)
+        self.assertEqual(self.etat(), self.en_cours_fige())
+
+    def test_rendre_disponibles_ne_touche_que_en_retractation(self):
+        for statut in ("en_cours", "verse", "suspendu", "annule", "en_attente_livraison"):
+            with self.subTest(statut):
+                Reversement.objects.filter(pk=self.reversement.pk).update(
+                    statut=statut, date_disponibilite=timezone.now() - timedelta(days=1))
+                self.assertEqual(reversements.rendre_disponibles(), 0)
+                self.reversement.refresh_from_db()
+                self.assertEqual(self.reversement.statut, statut)
+
+    def test_resultat_echec_immediat_rend_disponible(self):
+        from .fournisseurs.base import ResultatTransfert
+
+        with mock.patch.object(FournisseurSimule, "transferer",
+                               return_value=ResultatTransfert(statut=ECHEC, identifiant_externe="T1")), \
+                self.assertLogs("securite", "WARNING") as journaux:
+            r = self.transferer()
+        self.assertEqual((r.status_code, r.data["statut"]), (200, "disponible"))
+        self.assertEqual(self.etat(), self.disponible_libere())
+        self.assertIn("en_cours → disponible, échec confirmé (source=immediat)", "\n".join(journaux.output))
+
+    def test_succes_tardif_sur_reversement_non_en_cours_alerte_sans_transition(self):
+        """Notification de succès (transaction SIM-TX) pour un reversement qui
+        n'est plus en cours : aucune transition ; alerte, sauf si le
+        reversement a été versé par ce même transfert."""
+        cas = {
+            "disponible": ("disponible", "simule", ""),
+            "versé à la main": ("verse", "", "OM-1"),
+            "versé par un autre transfert": ("verse", "simule", "SIMT-AUTRE"),
+            "annulé": ("annule", "simule", ""),
+            "versé par ce transfert": ("verse", "simule", "SIM-TX"),
+        }
+        for numero, (libelle, (statut, fournisseur, reference_externe)) in enumerate(cas.items()):
+            with self.subTest(libelle):
+                Reversement.objects.filter(pk=self.reversement.pk).update(
+                    statut=statut, fournisseur=fournisseur, reference_externe=reference_externe,
+                    montant_a_verser=Decimal("7200"))
+                avant = self.alertes().count()
+                r = self.notifier(self.reversement.reference, montant=7200, transfert=True,
+                                  evenement_id=f"evt-tardif-{numero}")
+                self.assertEqual(r.status_code, 200)
+                self.assertEqual(JournalWebhook.objects.get(evenement_id=f"evt-tardif-{numero}").statut_traitement,
+                                 "traite")
+                self.reversement.refresh_from_db()
+                self.assertEqual((self.reversement.statut, self.reversement.reference_externe),
+                                 (statut, reference_externe))
+                self.assertEqual(self.versements_notifies(), 0)
+                attendu = 0 if libelle == "versé par ce transfert" else 1
+                self.assertEqual(self.alertes().count() - avant, attendu)
+                if attendu:
+                    self.assertIn("double paiement possible", self.alertes().latest("date_creation").message)
+
+    def test_alerte_immediate_sur_succes_non_conforme(self):
+        with self.assertLogs("securite", "ERROR") as journaux:
+            r = self.transferer_avec(montant=7199, devise="XOF")
+        self.assertEqual((r.status_code, r.data["statut"]), (200, "en_cours"))
+        (alerte,) = self.alertes()
+        self.assertEqual((alerte.lien_redirection, alerte.type_notification),
+                         ("/administration/reversements", Notification.TypeNotification.PAIEMENT))
+        self.assertIn(self.reversement.reference, alerte.message)
+        self.assertIn("7199", alerte.message)
+        self.assertNotIn("0707070707", alerte.message)
+        self.assertIn("ALERTE ADMINISTRATION", "\n".join(journaux.output))
+        self.assertEqual(self.versements_notifies(), 0)
 
 
 class FournisseurSimuleTransfertTests(SimpleTestCase):

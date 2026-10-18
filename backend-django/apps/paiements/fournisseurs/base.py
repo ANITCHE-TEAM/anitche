@@ -16,7 +16,7 @@ et jamais recopiés du paiement. services._controler_etat les compare au
 montant dû et à la devise du paiement ; montant absent, non entier ou
 différent, devise absente ou différente : le succès est refusé
 (IncoherenceTransaction), quel que soit le fournisseur. Même contrat pour
-un ResultatTransfert de statut SUCCES (reversements.transferer_reversement).
+un ResultatTransfert de statut SUCCES (reversements.appliquer_etat_transfert).
 """
 
 import hashlib
