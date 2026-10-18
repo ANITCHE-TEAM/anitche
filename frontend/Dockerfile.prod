@@ -4,8 +4,10 @@
 # Le nginx de l'image ne sert que les fichiers du portail (frontend/nginx/) ;
 # nginx, devant, route le sous-domaine vers lui (infra/nginx/nginx.conf).
 
+# Versions exactes (les images ne bougent pas entre deux builds) : Dependabot
+# propose les montées (.github/dependabot.yml).
 # Étape 1 : build du bundle du portail.
-FROM node:22-alpine AS build
+FROM node:22.23.3-alpine AS build
 
 WORKDIR /app
 
@@ -31,7 +33,7 @@ RUN case "$PORTAIL" in client|vendeur|livreur|admin) ;; \
     && pnpm --filter "@anitche/app-${PORTAIL}..." build
 
 # Étape 2 : nginx sans root (uid 101, port 8080) et le dossier dist/ du portail.
-FROM nginxinc/nginx-unprivileged:1.31-alpine
+FROM nginxinc/nginx-unprivileged:1.31.7-alpine
 
 ARG PORTAIL
 

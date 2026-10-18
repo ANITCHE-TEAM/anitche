@@ -17,9 +17,11 @@ class ProduitRecherche(BaseModel):
     slug: str
     prix_base: str = Field(description="Prix de base en FCFA, chaîne à 2 décimales (« 4500.00 »), comme Django")
     prix_min: float = Field(description="Prix affiché : plus petit prix effectif (promo comprise) des variantes actives")
-    image_principale: str | None = Field(description="URL absolue de l'image principale, ou null")
+    image_principale: str | None = Field(
+        description="Chemin de l'image principale sur l'origine de la page (« /media/catalogue/produits/… »), ou null"
+    )
     miniature_principale: str | None = Field(
-        description="URL absolue de la miniature WebP (480 px de large au plus) de la même image que "
+        description="Chemin de la miniature WebP (480 px de large au plus) de la même image que "
         "`image_principale`, ou null (pas encore générée) : afficher alors `image_principale`"
     )
     categorie: int | None

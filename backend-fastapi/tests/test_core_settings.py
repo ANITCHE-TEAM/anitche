@@ -14,17 +14,18 @@ from app.core.settings import DEFAULT_RATE_LIMITS, Settings
 from app.main import create_app
 from tests.fakes import FakeDjango, FakePool, make_settings
 
+REDIS_PASSWORD = "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6"
+
 PROD = {
     "environment": "prod",
     "cors_allowed_origins": ["https://anitche.com"],
     "frontend_base_url": "https://anitche.com",
     "django_api_base_url": "http://backend-django:8000/api",
     "database_url": "postgresql://anitche_fastapi_ro:prod-secret@db:5432/anitche",
-    "redis_url": "redis://redis:6379/2",
+    "redis_url": f"redis://:{REDIS_PASSWORD}@redis:6379/2",
     "trusted_proxy_count": 1,
     "root_path": "/fast",
     "public_base_url": "https://anitche.com/fast",
-    "media_base_url": "https://anitche.com/media/",
 }
 
 
@@ -65,13 +66,10 @@ def test_valid_production_settings_are_accepted():
         {"redis_url": "redis://localhost:6379/2"},
         {"trusted_proxy_count": 0},
         {"trusted_proxy_count": 2},
-        # Liens next/previous et URL des images.
+        # Liens next/previous.
         {"public_base_url": "http://anitche.com/fast"},
         {"public_base_url": "https://localhost:8001"},
         {"public_base_url": "http://localhost:8001"},
-        {"media_base_url": "http://anitche.com/media/"},
-        {"media_base_url": "https://127.0.0.1/media/"},
-        {"media_base_url": "http://localhost:8000/media/"},
     ],
 )
 def test_production_refuses_dangerous_settings(overrides):
@@ -79,6 +77,27 @@ def test_production_refuses_dangerous_settings(overrides):
     ou dangereux (debug, CORS localhost / * / http, URL Django locale...)."""
     with pytest.raises(ValidationError, match="Configuration de production refusée"):
         prod_settings(**overrides)
+
+
+@pytest.mark.parametrize(
+    "redis_url",
+    [
+        "redis://redis:6379/2",
+        "redis://:@redis:6379/2",
+        f"redis://:{REDIS_PASSWORD[:31]}@redis:6379/2",
+        f"redis://:{REDIS_PASSWORD[:31]}-@redis:6379/2",
+        f"redis://:{REDIS_PASSWORD[:31]}é@redis:6379/2",
+    ],
+)
+def test_production_requires_a_strong_redis_password(redis_url):
+    """REDIS_URL sans mot de passe, de moins de 32 caractères ou hors lettres
+    et chiffres : même règle que config/settings/prod.py côté Django."""
+    with pytest.raises(ValidationError, match="REDIS_URL doit contenir le mot de passe de Redis"):
+        prod_settings(redis_url=redis_url)
+
+
+def test_redis_password_is_not_required_outside_production():
+    assert Settings(_env_file=None).redis_url == "redis://localhost:6379/2"
 
 
 def test_defaults_are_safe_for_dev():
@@ -131,9 +150,6 @@ def test_invalid_rate_limits_are_refused(rates):
         {"public_base_url": "ftp://anitche.com"},
         {"public_base_url": "https://anitche.com/fast?x=1"},
         {"public_base_url": "https://anitche.com/fast#ancre"},
-        {"media_base_url": "javascript:alert(1)"},
-        {"media_base_url": "https://user:secret@anitche.com/media/"},
-        {"media_base_url": "https://@anitche.com/media/"},
         # Origine acceptée au décodage QR et base des liens de
         # vérification.
         {"frontend_base_url": "anitche.com"},
@@ -151,24 +167,23 @@ def test_malformed_urls_are_refused_in_every_environment(overrides):
 
 
 def test_search_defaults_and_url_forms():
-    """Adresses de dev par défaut ; PUBLIC_BASE_URL
-    sans « / » final, MEDIA_BASE_URL avec, quelle que soit la saisie ;
-    cache de 60 s."""
+    """Adresse de dev par défaut ; PUBLIC_BASE_URL sans « / » final, quelle
+    que soit la saisie ; cache de 60 s. Les images sont des chemins relatifs :
+    aucun réglage d'adresse de médias."""
     settings = Settings(_env_file=None)
     assert settings.public_base_url == "http://localhost:8001"
-    assert settings.media_base_url == "http://localhost:8000/media/"
     assert settings.search_cache_ttl == 60
-    custom = make_settings(public_base_url="https://anitche.com/fast/", media_base_url="https://cdn.anitche.com/media")
+    assert "media_base_url" not in Settings.model_fields
+    custom = make_settings(public_base_url="https://anitche.com/fast/")
     assert custom.public_base_url == "https://anitche.com/fast"
-    assert custom.media_base_url == "https://cdn.anitche.com/media/"
 
 
-def test_production_requires_search_urls_explicitly():
-    """Obligatoires en prod : les valeurs par défaut (localhost) sont refusées."""
-    values = {key: value for key, value in PROD.items() if key not in {"public_base_url", "media_base_url"}}
+def test_production_requires_public_base_url_explicitly():
+    """Obligatoire en prod : la valeur par défaut (localhost) est refusée."""
+    values = {key: value for key, value in PROD.items() if key != "public_base_url"}
     with pytest.raises(ValidationError) as error:
         Settings(_env_file=None, **values)
-    assert "PUBLIC_BASE_URL" in str(error.value) and "MEDIA_BASE_URL" in str(error.value)
+    assert "PUBLIC_BASE_URL" in str(error.value)
 
 
 @pytest.mark.parametrize("ttl", [-1, 301])

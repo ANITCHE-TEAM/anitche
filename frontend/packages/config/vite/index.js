@@ -8,6 +8,8 @@ const RACINE_FRONTEND = fileURLToPath(new URL("../../..", import.meta.url));
  * Réglages Vite communs aux quatre portails : port fixe, proxy de dev, tests.
  * Les cibles du proxy viennent de VITE_PROXY_DJANGO / VITE_PROXY_FASTAPI
  * (environnement du process, sinon `.env` à la racine de frontend/).
+ * /media/ va à Django, comme en production où nginx le sert sur chaque nom :
+ * les API renvoient des chemins d'images relatifs (/media/…).
  */
 export function configVite({ mode, port }) {
   const env = { ...loadEnv(mode, RACINE_FRONTEND, "VITE_PROXY_"), ...process.env };
@@ -18,6 +20,7 @@ export function configVite({ mode, port }) {
       strictPort: true,
       proxy: {
         "/api": { target: env.VITE_PROXY_DJANGO ?? "http://localhost:8000" },
+        "/media": { target: env.VITE_PROXY_DJANGO ?? "http://localhost:8000" },
         "/fast": {
           target: env.VITE_PROXY_FASTAPI ?? "http://localhost:8001",
           ws: true,

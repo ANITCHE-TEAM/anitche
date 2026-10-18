@@ -425,12 +425,12 @@ export interface components {
             prix_min: number;
             /**
              * Image Principale
-             * @description URL absolue de l'image principale, ou null
+             * @description Chemin de l'image principale sur l'origine de la page (« /media/catalogue/produits/… »), ou null
              */
             image_principale: string | null;
             /**
              * Miniature Principale
-             * @description URL absolue de la miniature WebP (480 px de large au plus) de la même image que `image_principale`, ou null (pas encore générée) : afficher alors `image_principale`
+             * @description Chemin de la miniature WebP (480 px de large au plus) de la même image que `image_principale`, ou null (pas encore générée) : afficher alors `image_principale`
              */
             miniature_principale: string | null;
             /** Categorie */
@@ -485,12 +485,12 @@ export interface components {
             prix_min: number;
             /**
              * Image Principale
-             * @description URL absolue de l'image principale, ou null
+             * @description Chemin de l'image principale sur l'origine de la page (« /media/catalogue/produits/… »), ou null
              */
             image_principale: string | null;
             /**
              * Miniature Principale
-             * @description URL absolue de la miniature WebP (480 px de large au plus) de la même image que `image_principale`, ou null (pas encore générée) : afficher alors `image_principale`
+             * @description Chemin de la miniature WebP (480 px de large au plus) de la même image que `image_principale`, ou null (pas encore générée) : afficher alors `image_principale`
              */
             miniature_principale: string | null;
             /** Categorie */

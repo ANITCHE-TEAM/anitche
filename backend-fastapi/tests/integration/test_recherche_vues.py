@@ -166,15 +166,15 @@ def test_django_display_rules_are_reproduced(catalogue, make_search_app):
         images=(("", True, 0),),
     )
 
-    with TestClient(make_search_app(media_base_url="https://media.anitche.test/media/")) as client:
+    with TestClient(make_search_app()) as client:
         results = {p["id"]: p for p in search_all(client, recherche=marker)["results"]}
 
     assert set(results) == {promo, no_stock, no_stock_row, inactive_only_in_stock}
     assert results[promo]["prix_min"] == 8000.0 and results[promo]["prix_base"] == "12000.00"
     assert results[promo]["en_stock"] is True
-    assert results[promo]["image_principale"] == "https://media.anitche.test/media/catalogue/produits/a%20b.png"
+    assert results[promo]["image_principale"] == "/media/catalogue/produits/a%20b.png"
     # Miniature de la MÊME image que `image_principale`, jamais d'une autre.
-    assert results[promo]["miniature_principale"] == "https://media.anitche.test/media/catalogue/miniatures/a%20b.webp"
+    assert results[promo]["miniature_principale"] == "/media/catalogue/miniatures/a%20b.webp"
     assert results[no_stock]["miniature_principale"] is None
     assert results[no_stock_row]["miniature_principale"] is None
     assert results[inactive_only_in_stock]["miniature_principale"] is None

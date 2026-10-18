@@ -405,11 +405,17 @@ async def fetch_suggestions(db, redis, text: str, limit: int, ttl: int) -> list[
 # ------------------------------------------------------------ réponse
 
 
-def media_url(media_base_url: str, path: str | None) -> str | None:
-    """URL absolue d'une image, encodée comme Django (filepath_to_uri)."""
+MEDIA_PATH_PREFIX = "/media/"
+
+
+def media_url(path: str | None) -> str | None:
+    """Chemin d'une image sur l'origine de la page (« /media/… »), encodé
+    comme Django (filepath_to_uri). Relatif : nginx sert les médias publics
+    sous /media/ sur le domaine principal et sur chaque sous-domaine de
+    portail, dont la CSP n'autorise que 'self'."""
     if not path:
         return None
-    return media_base_url + quote(path.replace("\\", "/").lstrip("/"), safe="/~!*()'")
+    return MEDIA_PATH_PREFIX + quote(path.replace("\\", "/").lstrip("/"), safe="/~!*()'")
 
 
 def _iso(value: datetime) -> str:
@@ -422,7 +428,7 @@ def _decimal_string(value) -> str:
     return f"{Decimal(str(value)):.2f}"
 
 
-def product_result(row, media_base_url: str) -> dict:
+def product_result(row) -> dict:
     """Élément de liste, mêmes champs que ProduitPublicListSerializer.
     Jamais la quantité en stock : seulement `en_stock`."""
     prix_min = row["prix_min"] if row["prix_min"] is not None else row["prix_base"]
@@ -432,8 +438,8 @@ def product_result(row, media_base_url: str) -> dict:
         "slug": row["slug"],
         "prix_base": _decimal_string(row["prix_base"]),
         "prix_min": float(prix_min),
-        "image_principale": media_url(media_base_url, row["image_principale"]),
-        "miniature_principale": media_url(media_base_url, row["miniature_principale"]),
+        "image_principale": media_url(row["image_principale"]),
+        "miniature_principale": media_url(row["miniature_principale"]),
         "categorie": row["categorie_id"],
         "categorie_nom": row["categorie_nom"],
         "boutique": row["boutique_id"],

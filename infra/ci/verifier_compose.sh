@@ -16,6 +16,8 @@
 set -uo pipefail
 
 ECHECS=0
+# Dernière ligne de l'analyse Python, suivie du nombre de services lus.
+MARQUEUR_FIN="analyse-terminee:"
 
 ko() { echo "❌ $1" >&2; ECHECS=$((ECHECS + 1)); }
 ok() { echo "✅ $1"; }
@@ -51,7 +53,7 @@ controle_config_json() {
         rm -f -- "$json"
         return
     fi
-    resultat="$(python3 - "$json" <<'PY'
+    resultat="$(python3 - "$json" "$MARQUEUR_FIN" <<'PY'
 import json, sys
 
 services = json.load(open(sys.argv[1]))["services"]
@@ -78,15 +80,26 @@ for nom, service in sorted(services.items()):
     if log.get("driver") != "json-file" or opts.get("max-size") != "10m" or str(opts.get("max-file")) != "5":
         erreurs.append("%s : journaux %s au lieu de json-file 10m x 5" % (nom, log))
 
-print("\n".join(erreurs))
-print("services:%d" % len(services), file=sys.stderr)
+for erreur in erreurs:
+    print(erreur)
+# Dernière ligne : preuve que l'analyse est allée jusqu'au bout.
+print("%s%d" % (sys.argv[2], len(services)))
 PY
 )"
-    if [ -n "$resultat" ]; then
-        while IFS= read -r ligne; do ko "$ligne"; done <<<"$resultat"
+    local code=$?
+    local fin="${resultat##*$'\n'}"
+    if [ "$code" -ne 0 ] || [[ "$fin" != "$MARQUEUR_FIN"[1-9]* ]]; then
+        # Une analyse qui plante ou ne produit rien ne vaut jamais « conforme ».
+        ko "analyse de la configuration compose impossible (code $code) : $(head -c 600 <<<"$resultat")"
     else
-        ok "environnement identique pour backend-django, celery-worker et celery-beat"
-        ok "rotation des journaux 10m x 5 sur chaque service"
+        resultat="${resultat%"$fin"}"
+        resultat="${resultat%$'\n'}"
+        if [ -n "$resultat" ]; then
+            while IFS= read -r ligne; do ko "$ligne"; done <<<"$resultat"
+        else
+            ok "environnement identique pour backend-django, celery-worker et celery-beat"
+            ok "rotation des journaux 10m x 5 sur chaque service"
+        fi
     fi
     rm -f -- "$json"
 }

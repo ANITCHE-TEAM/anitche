@@ -19,7 +19,7 @@ Aucun nom de domaine n'est écrit dans `infra/nginx/nginx.conf` : c'est un modè
 | `ADMIN_ALLOWED_CIDRS` | vide | Adresses autorisées sur `/admin/` (Django). **Vide : 403 pour tous** (§ 5) |
 | `NGINX_RELOAD_INTERVAL` | `6h` | Rechargement périodique de nginx, qui lui fait servir le certificat renouvelé par certbot |
 
-Un staging sur un autre domaine ne change que `DOMAIN` et les variables qui en dépendent (`ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`, `BACKEND_BASE_URL`, `FRONTEND_BASE_URL`, `PUBLIC_BASE_URL`, `MEDIA_BASE_URL`). `DEFAULT_FROM_EMAIL` reste en `@anitche.com`, domaine d'envoi imposé par `prod.py`. La CI fait tourner toute la pile sur `staging.exemple.test`.
+Un staging sur un autre domaine ne change que `DOMAIN` et les variables qui en dépendent (`ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`, `BACKEND_BASE_URL`, `FRONTEND_BASE_URL`, `PUBLIC_BASE_URL`). `DEFAULT_FROM_EMAIL` reste en `@anitche.com`, domaine d'envoi imposé par `prod.py`. La CI fait tourner toute la pile sur `staging.exemple.test`.
 
 Comportement de nginx :
 
