@@ -25,6 +25,7 @@ ROUTES = (
     "/vendeur/produits/{id}",
     "/vendeur/retours/{uuid}",
     "/vendeur/reversements",
+    "/moderation/retours/{uuid}",
     "/administration/retours/{uuid}",
     "/administration/remboursements",
     "/administration/reversements",
@@ -80,6 +81,12 @@ def lien_retour_vendeur(demande):
 
 def lien_reversements_vendeur():
     return "/vendeur/reversements"
+
+
+# --- Modération --------------------------------------------------------
+
+def lien_retour_moderation(demande):
+    return f"/moderation/retours/{demande.pk}"
 
 
 # --- Administration ----------------------------------------------------

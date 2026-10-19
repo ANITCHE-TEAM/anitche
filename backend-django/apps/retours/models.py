@@ -1,5 +1,8 @@
 import uuid
+from datetime import timedelta
+
 from django.db import models
+from django.db.models import Q
 from django.conf import settings
 from django.utils import timezone
 
@@ -28,6 +31,10 @@ class DemandeRetour(models.Model):
         REMBOURSE = "rembourse", "Remboursé"
         CLOTURE = "cloture", "Clôturé"
         ANNULE = "annule", "Annulée par le client"
+        REFUSE_VENDEUR = "refuse_vendeur", "Refusée par le vendeur (contestable)"
+        EN_MODERATION = "en_moderation", "En examen par la modération"
+        REFUSE_MODERATION = "refuse_moderation", "Refusée par la modération (contestable)"
+        EN_ARBITRAGE = "en_arbitrage", "En arbitrage par l'administration"
 
     class TypeResolution(models.TextChoices):
         REMBOURSEMENT = "remboursement", "Remboursement"
@@ -83,15 +90,44 @@ class DemandeRetour(models.Model):
     date_cloture = models.DateTimeField(null=True, blank=True)
     date_mise_a_jour = models.DateTimeField(auto_now=True)
 
+    # Échéances du circuit de décision (apps.retours.services) : réponse du
+    # vendeur (statut demande), contestation d'un refus (statuts refuse_*).
+    date_limite_vendeur = models.DateTimeField(null=True, blank=True)
+    date_limite_contestation = models.DateTimeField(null=True, blank=True)
+    # Entrée en modération (escalade ou contestation) : la demande devient
+    # visible des modérateurs. Entrée en arbitrage par l'administration.
+    date_moderation = models.DateTimeField(null=True, blank=True)
+    date_arbitrage = models.DateTimeField(null=True, blank=True)
+    # Rappel ou alerte envoyé pour le statut actuel (une seule fois par
+    # statut) ; remis à vide à chaque changement de statut.
+    date_relance = models.DateTimeField(null=True, blank=True)
+
     class Meta:
         verbose_name = "Demande de retour"
         verbose_name_plural = "Demandes de retour"
         ordering = ["-date_creation"]
+        constraints = [
+            # Sans échéance, une demande sans réponse ou un refus non contesté
+            # bloquerait le retour et le reversement du vendeur sans fin.
+            models.CheckConstraint(
+                condition=~Q(statut="demande") | Q(date_limite_vendeur__isnull=False),
+                name="retour_demande_avec_echeance_vendeur",
+            ),
+            models.CheckConstraint(
+                condition=~Q(statut__in=("refuse_vendeur", "refuse_moderation"))
+                | Q(date_limite_contestation__isnull=False),
+                name="retour_refus_avec_echeance_contestation",
+            ),
+        ]
 
     def save(self, *args, **kwargs):
         if not self.numero_retour:
             annee = timezone.now().year
             self.numero_retour = f"RET-{annee}-{uuid.uuid4().hex[:8].upper()}"
+        if self._state.adding and self.statut == self.Statut.DEMANDE and self.date_limite_vendeur is None:
+            # Le vendeur a RETOUR_DELAI_REPONSE_VENDEUR_HEURES pour répondre
+            # à partir de la création.
+            self.date_limite_vendeur = timezone.now() + timedelta(hours=settings.RETOUR_DELAI_REPONSE_VENDEUR_HEURES)
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -154,3 +190,52 @@ class PhotoRetour(models.Model):
 
     def __str__(self):
         return f"Photo de preuve ({self.demande_retour.numero_retour})"
+
+
+class RetourHistorique(models.Model):
+    """Trace chaque étape d'une demande de retour : qui, quand, depuis quel
+    statut, vers quel statut, pourquoi.
+
+    Écrit uniquement par apps.retours.services, dans la transaction du
+    changement. Lecture seule : jamais modifié ni supprimé (sauf avec la
+    demande elle-même). La première ligne (création) n'a pas d'ancien
+    statut ; les demandes antérieures à l'historique n'ont de lignes qu'à
+    partir de leur changement de statut suivant.
+    """
+
+    class Source(models.TextChoices):
+        """Au titre de quoi l'étape a été faite, seule information d'acteur
+        montrée aux parties (un modérateur n'est jamais nommé)."""
+        CLIENT = "client", "Client"
+        VENDEUR = "vendeur", "Vendeur"
+        MODERATION = "moderation", "Modération"
+        ADMINISTRATION = "administration", "Administration"
+        SYSTEME = "systeme", "Système"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    demande_retour = models.ForeignKey(DemandeRetour, on_delete=models.CASCADE, related_name="historique")
+    ancien_statut = models.CharField(max_length=20, choices=DemandeRetour.Statut.choices, blank=True)
+    nouveau_statut = models.CharField(max_length=20, choices=DemandeRetour.Statut.choices)
+    action = models.CharField(max_length=32)
+    source = models.CharField(max_length=20, choices=Source.choices)
+    # Compte à l'origine de l'étape ; vide pour le système. Réservé à
+    # l'administration : les parties ne voient que `source`.
+    auteur = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="etapes_retour",
+    )
+    # Motif du refus, de la contestation ou de la décision : texte libre,
+    # lu par l'autre partie et par la modération.
+    commentaire = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+        verbose_name = "historique de retour"
+        verbose_name_plural = "historique des retours"
+
+    def __str__(self):
+        return f"{self.demande_retour_id} : {self.ancien_statut or '∅'} → {self.nouveau_statut} ({self.action})"

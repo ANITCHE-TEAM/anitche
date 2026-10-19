@@ -5,13 +5,14 @@ from rest_framework.exceptions import ValidationError
 
 from .models import DemandeRetour, RetourItem, PhotoRetour
 from .services import (
-    TRANSITIONS,
+    ACTIONS_UTILISATEUR,
     RetourRefuse,
     frais_livraison_a_rembourser,
     montant_a_rembourser,
     verifier_eligibilite,
 )
 from apps.commandes.models import Commande, CommandeItem
+from apps.utilisateurs.models import Role
 
 
 class PhotoRetourSerializer(serializers.ModelSerializer):
@@ -60,7 +61,8 @@ class RetourItemSerializer(serializers.ModelSerializer):
 
 
 class DemandeRetourSerializer(serializers.ModelSerializer):
-    client_email = serializers.EmailField(source="client.email", read_only=True)
+    # Vide (null) pour un modérateur (to_representation).
+    client_email = serializers.EmailField(source="client.email", read_only=True, allow_null=True)
     boutique_nom = serializers.CharField(source="boutique.nom", read_only=True)
     motif_display = serializers.CharField(source="get_motif_display", read_only=True)
     type_resolution_display = serializers.CharField(source="get_type_resolution_display", read_only=True)
@@ -95,6 +97,15 @@ class DemandeRetourSerializer(serializers.ModelSerializer):
             "date_cloture",
         ]
         read_only_fields = fields
+
+    def to_representation(self, instance):
+        donnees = super().to_representation(instance)
+        requete = self.context.get("request")
+        # Le modérateur juge sur la description, les photos et les motifs :
+        # jamais sur les coordonnées du client.
+        if requete is not None and getattr(requete.user, "role", None) == Role.MODERATEUR:
+            donnees["client_email"] = None
+        return donnees
 
 
 class ArticleRetourInputSerializer(serializers.Serializer):
@@ -188,6 +199,6 @@ class CreerDemandeRetourSerializer(serializers.Serializer):
 
 
 class TraiterDemandeRetourSerializer(serializers.Serializer):
-    action = serializers.ChoiceField(choices=list(TRANSITIONS))
+    action = serializers.ChoiceField(choices=list(ACTIONS_UTILISATEUR))
     reponse = serializers.CharField(required=False, allow_blank=True, default="", max_length=2000)
     restock = serializers.BooleanField(default=True)

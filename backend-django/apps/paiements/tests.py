@@ -1834,7 +1834,9 @@ class ReversementTests(DonneesReversement, APITestCase):
         self.assertEqual(reversements.rendre_disponibles(attendu), 1)
 
     @override_settings(RETOUR_DELAI_JOURS=30)
-    def test_retour_ouvert_suspend_puis_rejet_reprend(self):
+    def test_retour_ouvert_suspend_puis_refus_definitif_reprend(self):
+        from apps.retours.services import appliquer_echeances
+
         # Délai de retour configuré plus long que la rétractation : un retour
         # peut s'ouvrir sur un reversement déjà disponible.
         self.livrer(il_y_a_jours=8)
@@ -1850,6 +1852,10 @@ class ReversementTests(DonneesReversement, APITestCase):
         r = self.api(self.vendeur1).patch(f"/api/retours/{r.data['id']}/traiter/",
                                           {"action": "rejeter", "reponse": "Article intact au déballage."}, format="json")
         self.assertEqual(r.status_code, 200, r.data)
+        # Refus contestable : le reversement attend la décision définitive.
+        self.reversement.refresh_from_db()
+        self.assertEqual(self.reversement.statut, Reversement.Statut.SUSPENDU)
+        self.assertEqual(appliquer_echeances(timezone.now() + timedelta(hours=73))[1], 1)
         self.reversement.refresh_from_db()
         self.assertEqual(self.reversement.statut, Reversement.Statut.DISPONIBLE)
 

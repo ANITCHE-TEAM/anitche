@@ -118,9 +118,12 @@ class EspaceVendeurRetoursListView(generics.ListAPIView):
 @extend_schema(
     summary="Faire avancer une demande de retour",
     description=(
-        "Boutique (vendeur propriétaire ou administration) : approuver, rejeter (motif `reponse` obligatoire), "
-        "en_transit, receptionner, rembourser, cloturer. Client : en_transit, annuler. "
-        "Action non permise à ce compte : 403 ; transition invalide : 400."
+        "Vendeur : approuver ou rejeter (motif `reponse` obligatoire) une demande avant son échéance "
+        "(`date_limite_vendeur`), rejeter sa propre approbation. Client : contester un refus avant "
+        "`date_limite_contestation` (motif de 10 caractères au moins), en_transit, annuler avant l'expédition. "
+        "Modérateur (dossier en_moderation) et administration (dossier en_arbitrage) : approuver ou rejeter, "
+        "motif obligatoire. Vendeur et administration : en_transit, receptionner, rembourser, cloturer. "
+        "Action qui ne revient pas à ce compte : 403 ; transition invalide ou délai écoulé : 400."
     ),
     request=TraiterDemandeRetourSerializer,
     responses={200: DemandeRetourSerializer, **erreurs(403, 404)},
@@ -128,9 +131,9 @@ class EspaceVendeurRetoursListView(generics.ListAPIView):
 class TraiterDemandeRetourView(APIView):
     """Actions sur une demande (table des transitions : apps.retours.services).
 
-    Boutique (vendeur propriétaire ou administration) : approuver, rejeter
-    (motif obligatoire), en_transit, receptionner, rembourser, cloturer.
-    Client de la demande : en_transit (« j'ai expédié le colis »), annuler.
+    Le vendeur décide, le client peut contester devant la modération puis
+    devant l'administration ; vendeur et administration font avancer le
+    colis et le remboursement.
     """
 
     permission_classes = [IsAuthenticated]

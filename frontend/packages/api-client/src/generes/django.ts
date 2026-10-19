@@ -1768,7 +1768,7 @@ export interface paths {
         head?: never;
         /**
          * Faire avancer une demande de retour
-         * @description Boutique (vendeur propriétaire ou administration) : approuver, rejeter (motif `reponse` obligatoire), en_transit, receptionner, rembourser, cloturer. Client : en_transit, annuler. Action non permise à ce compte : 403 ; transition invalide : 400.
+         * @description Vendeur : approuver ou rejeter (motif `reponse` obligatoire) une demande avant son échéance (`date_limite_vendeur`), rejeter sa propre approbation. Client : contester un refus avant `date_limite_contestation` (motif de 10 caractères au moins), en_transit, annuler avant l'expédition. Modérateur (dossier en_moderation) et administration (dossier en_arbitrage) : approuver ou rejeter, motif obligatoire. Vendeur et administration : en_transit, receptionner, rembourser, cloturer. Action qui ne revient pas à ce compte : 403 ; transition invalide ou délai écoulé : 400.
          */
         patch: operations["retours_traiter_partial_update"];
         trace?: never;
@@ -2626,6 +2626,7 @@ export interface components {
         /**
          * @description * `approuver` - approuver
          *     * `rejeter` - rejeter
+         *     * `contester` - contester
          *     * `en_transit` - en_transit
          *     * `receptionner` - receptionner
          *     * `rembourser` - rembourser
@@ -2633,7 +2634,7 @@ export interface components {
          *     * `annuler` - annuler
          * @enum {string}
          */
-        ActionEnum: "approuver" | "rejeter" | "en_transit" | "receptionner" | "rembourser" | "cloturer" | "annuler";
+        ActionEnum: "approuver" | "rejeter" | "contester" | "en_transit" | "receptionner" | "rembourser" | "cloturer" | "annuler";
         /**
          * @description Adresse du carnet, vue et écrite par son propriétaire.
          *
@@ -3534,7 +3535,7 @@ export interface components {
             readonly commande: string;
             readonly client: number;
             /** Format: email */
-            readonly client_email: string;
+            readonly client_email: string | null;
             /** Boutique concernée */
             readonly boutique: number;
             readonly boutique_nom: string;
@@ -4091,7 +4092,7 @@ export interface components {
             readonly est_lu: boolean;
             /** Format: date-time */
             readonly date_lecture: string | null;
-            /** @description Route logique de la ressource, à associer à une page par chaque portail : un chemin (jamais une URL, ni un hôte, ni une requête), ou vide si la notification ne mène nulle part. Liste fermée (apps/notifications/liens.py) : /commandes, /commandes/{uuid}, /livraisons/{uuid}, /retours/{uuid}, /paiements/{uuid}, /fidelite/mon-compte, /support/tickets/{uuid}, /vendeur/commandes/{uuid}, /vendeur/produits/{id}, /vendeur/retours/{uuid}, /vendeur/reversements, /administration/retours/{uuid}, /administration/remboursements, /administration/reversements, /administration/livraisons/{uuid}. Un préfixe inconnu mène au centre de notifications. */
+            /** @description Route logique de la ressource, à associer à une page par chaque portail : un chemin (jamais une URL, ni un hôte, ni une requête), ou vide si la notification ne mène nulle part. Liste fermée (apps/notifications/liens.py) : /commandes, /commandes/{uuid}, /livraisons/{uuid}, /retours/{uuid}, /paiements/{uuid}, /fidelite/mon-compte, /support/tickets/{uuid}, /vendeur/commandes/{uuid}, /vendeur/produits/{id}, /vendeur/retours/{uuid}, /vendeur/reversements, /moderation/retours/{uuid}, /administration/retours/{uuid}, /administration/remboursements, /administration/reversements, /administration/livraisons/{uuid}. Un préfixe inconnu mène au centre de notifications. */
             readonly lien_redirection: string;
             /** @description Données contextuelles additionnelles (IDs techniques, totaux, etc.) */
             readonly metadata: unknown;
@@ -5973,9 +5974,13 @@ export interface components {
          *     * `rembourse` - Remboursé
          *     * `cloture` - Clôturé
          *     * `annule` - Annulée par le client
+         *     * `refuse_vendeur` - Refusée par le vendeur (contestable)
+         *     * `en_moderation` - En examen par la modération
+         *     * `refuse_moderation` - Refusée par la modération (contestable)
+         *     * `en_arbitrage` - En arbitrage par l'administration
          * @enum {string}
          */
-        StatutRetourEnum: "demande" | "approuve" | "rejete" | "en_transit" | "receptionne" | "rembourse" | "cloture" | "annule";
+        StatutRetourEnum: "demande" | "approuve" | "rejete" | "en_transit" | "receptionne" | "rembourse" | "cloture" | "annule" | "refuse_vendeur" | "en_moderation" | "refuse_moderation" | "en_arbitrage";
         /**
          * @description * `en_attente_livraison` - En attente de livraison
          *     * `en_retractation` - Délai de rétractation en cours

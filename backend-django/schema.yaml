@@ -6506,10 +6506,14 @@ paths:
   /api/retours/{id}/traiter/:
     patch:
       operationId: retours_traiter_partial_update
-      description: 'Boutique (vendeur propriétaire ou administration) : approuver,
-        rejeter (motif `reponse` obligatoire), en_transit, receptionner, rembourser,
-        cloturer. Client : en_transit, annuler. Action non permise à ce compte : 403
-        ; transition invalide : 400.'
+      description: 'Vendeur : approuver ou rejeter (motif `reponse` obligatoire) une
+        demande avant son échéance (`date_limite_vendeur`), rejeter sa propre approbation.
+        Client : contester un refus avant `date_limite_contestation` (motif de 10
+        caractères au moins), en_transit, annuler avant l''expédition. Modérateur
+        (dossier en_moderation) et administration (dossier en_arbitrage) : approuver
+        ou rejeter, motif obligatoire. Vendeur et administration : en_transit, receptionner,
+        rembourser, cloturer. Action qui ne revient pas à ce compte : 403 ; transition
+        invalide ou délai écoulé : 400.'
       summary: Faire avancer une demande de retour
       parameters:
       - in: path
@@ -9440,6 +9444,7 @@ components:
       enum:
       - approuver
       - rejeter
+      - contester
       - en_transit
       - receptionner
       - rembourser
@@ -9449,6 +9454,7 @@ components:
       description: |-
         * `approuver` - approuver
         * `rejeter` - rejeter
+        * `contester` - contester
         * `en_transit` - en_transit
         * `receptionner` - receptionner
         * `rembourser` - rembourser
@@ -11516,7 +11522,9 @@ components:
           type: integer
           readOnly: true
         client_email:
-          type: string
+          type:
+          - string
+          - 'null'
           format: email
           readOnly: true
         boutique:
@@ -12882,9 +12890,9 @@ components:
             : /commandes, /commandes/{uuid}, /livraisons/{uuid}, /retours/{uuid},
             /paiements/{uuid}, /fidelite/mon-compte, /support/tickets/{uuid}, /vendeur/commandes/{uuid},
             /vendeur/produits/{id}, /vendeur/retours/{uuid}, /vendeur/reversements,
-            /administration/retours/{uuid}, /administration/remboursements, /administration/reversements,
-            /administration/livraisons/{uuid}. Un préfixe inconnu mène au centre de
-            notifications.'
+            /moderation/retours/{uuid}, /administration/retours/{uuid}, /administration/remboursements,
+            /administration/reversements, /administration/livraisons/{uuid}. Un préfixe
+            inconnu mène au centre de notifications.'
         metadata:
           readOnly: true
           description: Données contextuelles additionnelles (IDs techniques, totaux,
@@ -16489,6 +16497,10 @@ components:
       - rembourse
       - cloture
       - annule
+      - refuse_vendeur
+      - en_moderation
+      - refuse_moderation
+      - en_arbitrage
       type: string
       description: |-
         * `demande` - Demande soumise
@@ -16499,6 +16511,10 @@ components:
         * `rembourse` - Remboursé
         * `cloture` - Clôturé
         * `annule` - Annulée par le client
+        * `refuse_vendeur` - Refusée par le vendeur (contestable)
+        * `en_moderation` - En examen par la modération
+        * `refuse_moderation` - Refusée par la modération (contestable)
+        * `en_arbitrage` - En arbitrage par l'administration
     StatutReversementEnum:
       enum:
       - en_attente_livraison
