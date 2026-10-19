@@ -4,6 +4,7 @@ from django.conf import settings
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.db.models import Q
+from django.db.models.functions import Floor
 from django.utils import timezone
 
 from apps.core.fields import EncryptedCharField
@@ -211,6 +212,11 @@ class Remboursement(models.Model):
                 fields=["paiement", "commande"],
                 condition=Q(retour__isnull=True),
                 name="unique_remboursement_paiement_commande",
+            ),
+            # Argent rendu au client : un nombre entier et positif de FCFA.
+            models.CheckConstraint(
+                condition=Q(montant__gt=0) & Q(montant=Floor("montant")),
+                name="remboursement_montant_entier_positif",
             ),
         ]
 

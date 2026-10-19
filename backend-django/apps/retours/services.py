@@ -30,12 +30,12 @@ from django.utils import timezone
 from apps.catalogue.models import Stock
 from apps.commandes.models import Commande
 from apps.paiements.reversements import reprendre_reversement, suspendre_reversement
-from apps.paiements.services import rembourser_retour
+from apps.paiements.services import PaiementRefuse, rembourser_retour
 from apps.utilisateurs.models import Role
 from apps.vendeurs.permissions import ROLES_ADMINISTRATION
 
 from .models import DemandeRetour, RetourHistorique, RetourItem
-from .signals import notifier_nouvelle_demande, notifier_relance, retour_status_change
+from .signals import notifier_nouvelle_demande, notifier_relance, notifier_remboursement_impossible, retour_status_change
 
 logger = logging.getLogger(__name__)
 logger_securite = logging.getLogger("securite")
@@ -483,17 +483,24 @@ def traiter(demande_id, acteur, action, reponse="", restock=True):
     if action not in ACTIONS_UTILISATEUR:
         raise RetourRefuse("Action inconnue.")
 
-    with transaction.atomic():
-        demande = _verrouiller(demande_id)
-        if demande is None:
-            raise RetourRefuse("Demande de retour introuvable.", 404)
-        qualites = qualites_de(acteur, demande)
-        if not qualites:
-            raise RetourRefuse("Demande de retour introuvable.", 404)
-        maintenant = timezone.now()
-        regle, source = regle_applicable(demande, qualites, action, maintenant)
-        commentaire = _motif(regle, action, reponse)
-        ancien_statut = _appliquer(demande, action, regle, source, acteur, commentaire, maintenant, restock)
+    try:
+        with transaction.atomic():
+            demande = _verrouiller(demande_id)
+            if demande is None:
+                raise RetourRefuse("Demande de retour introuvable.", 404)
+            qualites = qualites_de(acteur, demande)
+            if not qualites:
+                raise RetourRefuse("Demande de retour introuvable.", 404)
+            maintenant = timezone.now()
+            regle, source = regle_applicable(demande, qualites, action, maintenant)
+            commentaire = _motif(regle, action, reponse)
+            ancien_statut = _appliquer(demande, action, regle, source, acteur, commentaire, maintenant, restock)
+    except PaiementRefuse as refus:
+        # Remboursement impossible : toute l'étape est annulée (statut,
+        # historique, part du vendeur), l'administration est prévenue.
+        logger_securite.error("Retour %s non remboursé (acteur_id=%s) : %s", demande.numero_retour, acteur.pk, refus)
+        notifier_remboursement_impossible(demande, str(refus))
+        raise RetourRefuse(str(refus))
 
     logger.info("Retour %s : %s → %s (acteur_id=%s)", demande.numero_retour, ancien_statut, demande.statut, acteur.pk)
     _signaler(demande, ancien_statut, action, source, commentaire)

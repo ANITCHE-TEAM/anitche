@@ -3,6 +3,7 @@ from datetime import timedelta
 
 from django.db import models
 from django.db.models import Q
+from django.db.models.functions import Floor
 from django.conf import settings
 from django.utils import timezone
 
@@ -117,6 +118,12 @@ class DemandeRetour(models.Model):
                 condition=~Q(statut__in=("refuse_vendeur", "refuse_moderation"))
                 | Q(date_limite_contestation__isnull=False),
                 name="retour_refus_avec_echeance_contestation",
+            ),
+            # Montant rendu au client : un nombre entier de FCFA, jamais négatif.
+            models.CheckConstraint(
+                condition=Q(montant_remboursement__isnull=True)
+                | (Q(montant_remboursement__gte=0) & Q(montant_remboursement=Floor("montant_remboursement"))),
+                name="retour_montant_entier_positif",
             ),
         ]
 

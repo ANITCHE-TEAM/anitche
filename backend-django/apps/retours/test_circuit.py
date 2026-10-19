@@ -26,7 +26,7 @@ from apps.fidelite.services import gains_echus, ouvrir_gain
 from apps.livraison.models import Livraison
 from apps.notifications.models import Notification
 from apps.paiements import reversements
-from apps.paiements.models import Paiement, Reversement
+from apps.paiements.models import Paiement, Remboursement, Reversement
 from apps.utilisateurs.models import Role, StatutKYC, Utilisateur
 from apps.vendeurs.models import Boutique
 
@@ -605,7 +605,7 @@ class GardeFouStatutTests(TestCase):
 # REVERSEMENT ET FIDÉLITÉ PENDANT LE CIRCUIT
 # =====================================================================
 
-class ArgentCircuitTests(CircuitBase):
+class CommandePayee:
     def commande_payee(self):
         """Commande livrée et payée, reversement en rétractation (date de
         disponibilité dans 7 jours), une ligne de 20 000."""
@@ -636,6 +636,8 @@ class ArgentCircuitTests(CircuitBase):
     def statut_reversement(self, commande):
         return Reversement.objects.get(commande=commande).statut
 
+
+class ArgentCircuitTests(CommandePayee, CircuitBase):
     def test_refus_du_vendeur_ou_de_la_moderation_garde_le_reversement_suspendu(self):
         for statut, utilisateur in ((Statut.DEMANDE, self.vendeur1), (Statut.EN_MODERATION, self.moderateur)):
             with self.subTest(statut=statut):
@@ -673,6 +675,72 @@ class ArgentCircuitTests(CircuitBase):
                 self.assertFalse(gains_echus(plus_tard).filter(commande=commande).exists())
         DemandeRetour.objects.filter(pk=demande.pk).update(statut=Statut.REJETE)
         self.assertTrue(gains_echus(plus_tard).filter(commande=commande).exists())
+
+
+class RemboursementRetourTests(CommandePayee, CircuitBase):
+    def rembourser(self, demande):
+        return self.agir(demande.id, self.vendeur1, "rembourser")
+
+    def rien_rembourse(self, demande, commande):
+        self.assertEqual(self.statut_de(demande), Statut.RECEPTIONNE)
+        self.assertFalse(Remboursement.objects.filter(commande=commande).exists())
+        self.assertFalse(self.etapes(demande, "rembourser").exists())
+        self.assertEqual(Reversement.objects.get(commande=commande).montant_retours, 0)
+
+    def test_sans_paiement_encaisse_refuse_et_alerte(self):
+        commande, article = self.commande_payee()
+        Paiement.objects.filter(commandes=commande).update(statut=Paiement.Statut.ECHOUE)
+        demande = self.retour_sur(commande, article, Statut.RECEPTIONNE)
+        with self.assertLogs("securite", "ERROR") as journaux:
+            r = self.rembourser(demande)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("Aucun paiement encaissé", str(r.data))
+        self.rien_rembourse(demande, commande)
+        self.assertIn(f"Retour {demande.numero_retour} non remboursé", "\n".join(journaux.output))
+        self.assertTrue(Notification.objects.filter(
+            destinataire=self.admin, titre=f"Retour {demande.numero_retour} non remboursable").exists())
+
+    def test_montant_nul_refuse(self):
+        commande, article = self.commande_payee()
+        demande = self.retour_sur(commande, article, Statut.RECEPTIONNE)
+        DemandeRetour.objects.filter(pk=demande.pk).update(montant_remboursement=Decimal("0"))
+        with self.assertLogs("securite", "ERROR"):
+            self.assertEqual(self.rembourser(demande).status_code, 400)
+        self.rien_rembourse(demande, commande)
+
+    def test_montant_non_entier_refuse_par_le_service(self):
+        from apps.paiements.services import PaiementRefuse, creer_remboursement
+
+        commande, article = self.commande_payee()
+        demande = self.retour_sur(commande, article, Statut.RECEPTIONNE)
+        paiement = Paiement.objects.get(commandes=commande)
+        for retour in (demande, None):
+            with self.subTest(retour=retour), self.assertRaisesMessage(PaiementRefuse, "nombre entier de FCFA"):
+                creer_remboursement(paiement, commande, "retour", montant=Decimal("1000.50"), retour=retour)
+        self.assertFalse(Remboursement.objects.exists())
+
+    def test_montants_contraints_en_base(self):
+        from django.db import IntegrityError
+
+        commande, article = self.commande_payee()
+        demande = self.retour_sur(commande, article, Statut.RECEPTIONNE)
+        paiement = Paiement.objects.get(commandes=commande)
+        for montant in (Decimal("-1"), Decimal("1000.50")):
+            with self.subTest(retour=montant), self.assertRaises(IntegrityError), transaction.atomic():
+                DemandeRetour.objects.filter(pk=demande.pk).update(montant_remboursement=montant)
+        for montant in (Decimal("0"), Decimal("-5"), Decimal("1000.50")):
+            with self.subTest(remboursement=montant), self.assertRaises(IntegrityError), transaction.atomic():
+                Remboursement.objects.create(paiement=paiement, commande=commande, motif="retour",
+                                             montant=montant, retour=demande)
+
+    def test_decision_de_la_moderation_rembourse_le_montant_demande(self):
+        commande, article = self.commande_payee()
+        demande = self.retour_sur(commande, article, Statut.EN_MODERATION)
+        self.assertEqual(self.agir(demande.id, self.moderateur, "approuver", reponse=MOTIF).status_code, 200)
+        for utilisateur, action in ((self.client1, "en_transit"), (self.vendeur1, "receptionner"),
+                                    (self.vendeur1, "rembourser")):
+            self.assertEqual(self.agir(demande.id, utilisateur, action).status_code, 200, action)
+        self.assertEqual(Remboursement.objects.get(retour=demande).montant, Decimal("20000"))
 
 
 # =====================================================================

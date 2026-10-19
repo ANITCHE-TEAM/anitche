@@ -1433,7 +1433,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Traiter un remboursement (administration) */
+        /**
+         * Traiter un remboursement (administration)
+         * @description effectue (référence obligatoire) ou refuse. Un remboursement de retour ne se refuse pas : 400. Remboursement déjà traité : 409.
+         */
         post: operations["paiements_admin_remboursements_traiter_create"];
         delete?: never;
         options?: never;

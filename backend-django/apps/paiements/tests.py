@@ -2064,6 +2064,94 @@ class ReversementTests(DonneesReversement, APITestCase):
             self.assertEqual(api.get("/api/paiements/vendeur/reversements/").data["count"], 2)
 
 
+class RetourPendantLeVersementTests(DonneesReversement, APITestCase):
+    """Retour remboursé alors que le reversement de la commande est en cours
+    de transfert ou déjà versé : la part du vendeur ne bouge plus, la
+    déduction passe par un ajustement imputé une seule fois."""
+
+    def setUp(self):
+        super().setUp()
+        self.livrer(il_y_a_jours=8)
+
+    def transfert_en_attente(self):
+        from .fournisseurs.base import ResultatTransfert
+
+        with mock.patch.object(FournisseurSimule, "transferer",
+                               return_value=ResultatTransfert(statut=EN_ATTENTE, identifiant_externe="T1")):
+            self.api(self.admin).post(self.URL_TRANSFERER.format(self.reversement.pk), {"operateur": "wave"})
+        self.reversement.refresh_from_db()
+        self.assertEqual(self.reversement.statut, Reversement.Statut.EN_COURS)
+
+    def issue_du_transfert(self, statut, montant=None):
+        from .fournisseurs.base import ResultatTransfert
+
+        etat = ResultatTransfert(statut=statut, identifiant_externe="T1", montant=montant, devise="XOF")
+        return reversements.appliquer_etat_transfert(self.reversement.pk, etat, "immediat")
+
+    def retour_rembourse(self):
+        demande = DemandeRetour.objects.create(
+            commande=self.commande, client=self.client1, boutique=self.boutique1, description="x",
+            montant_remboursement=Decimal("5000"), statut=DemandeRetour.Statut.RECEPTIONNE,
+        )
+        RetourItem.objects.create(demande_retour=demande, commande_item=self.commande.article.get(), quantite=1)
+        r = self.api(self.vendeur1).patch(f"/api/retours/{demande.pk}/traiter/", {"action": "rembourser"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        return demande
+
+    def test_transfert_en_cours_puis_echoue(self):
+        anterieur = AjustementVendeur.objects.create(boutique=self.boutique1, montant=Decimal("-1000"), motif="x")
+        self.transfert_en_attente()
+        ajustement = AjustementVendeur.objects.get(retour=self.retour_rembourse())
+        self.reversement.refresh_from_db()
+        # Montant figé pendant le transfert : seule la déduction en attente.
+        self.assertEqual((ajustement.montant, ajustement.reversement_impute, self.reversement.montant_net,
+                          self.reversement.montant_retours, self.reversement.montant_a_verser),
+                         (Decimal("-4300"), None, Decimal("8200"), Decimal("0"), Decimal("7200")))
+        self.assertEqual(self.issue_du_transfert(ECHEC).reversement.statut, Reversement.Statut.DISPONIBLE)
+        # Nouveau transfert du même reversement : 8 200 − 1 000 − 4 300.
+        r = self.transferer_avec(montant=2900, devise="XOF")
+        self.assertEqual((r.data["statut"], Decimal(r.data["montant_a_verser"])), ("verse", Decimal("2900")))
+        for dette in (anterieur, ajustement):
+            dette.refresh_from_db()
+            self.assertEqual(dette.reversement_impute_id, self.reversement.pk)
+
+    def test_transfert_en_cours_puis_reussi_impute_au_suivant_une_fois(self):
+        self.transfert_en_attente()
+        ajustement = AjustementVendeur.objects.get(retour=self.retour_rembourse())
+        self.assertTrue(self.issue_du_transfert(SUCCES, 8200).change)
+        ajustement.refresh_from_db()
+        self.assertIsNone(ajustement.reversement_impute)
+        imputes = []
+        for _ in range(2):
+            (suivante,) = self.commander((self.variante1, 2))
+            self.notifier_succes(self.payer(suivante))
+            self.livrer(suivante, il_y_a_jours=8)
+            suivant = Reversement.objects.get(commande=suivante)
+            r = self.api(self.admin).post(f"/api/paiements/admin/reversements/{suivant.pk}/verser/",
+                                          {"reference_externe": f"OM-{suivant.pk}"})
+            imputes.append(Decimal(r.data["montant_ajustements"]))
+        self.assertEqual(imputes, [Decimal("-4300"), Decimal("0")])
+
+    def test_apres_versement_un_seul_ajustement(self):
+        self.api(self.admin).post(f"/api/paiements/admin/reversements/{self.reversement.pk}/verser/",
+                                  {"reference_externe": "OM-1"})
+        demande = self.retour_rembourse()
+        reversements.appliquer_retour_rembourse(demande)
+        self.assertEqual(list(AjustementVendeur.objects.values_list("montant", flat=True)), [Decimal("-4300")])
+
+    def test_remboursement_de_retour_ne_se_refuse_pas(self):
+        remboursement = Remboursement.objects.get(retour=self.retour_rembourse())
+        url = f"/api/paiements/admin/remboursements/{remboursement.pk}/traiter/"
+        admin = self.api(self.admin)
+        r = admin.post(url, {"decision": "refuse", "commentaire": "Échec chez le fournisseur"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("ne peut pas être refusé", str(r.data))
+        remboursement.refresh_from_db()
+        self.assertEqual(remboursement.statut, Remboursement.Statut.A_TRAITER)
+        r = admin.post(url, {"decision": "effectue", "reference_externe": "WAVE-R1", "commentaire": "Remboursé à la main"})
+        self.assertEqual((r.status_code, r.data["statut"]), (200, "effectue"))
+
+
 class TransfertIncertainTests(DonneesReversement, APITestCase):
     """Après l'envoi d'un transfert, seul un refus certain ou un échec
     confirmé rend le reversement disponible : toute autre erreur laisse

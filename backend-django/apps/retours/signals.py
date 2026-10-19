@@ -124,6 +124,18 @@ def notifier_relance(demande):
         logger.exception("Relance du retour %s impossible.", getattr(demande, "numero_retour", "?"))
 
 
+def notifier_remboursement_impossible(demande, raison):
+    """Alerte de l'administration : un retour n'a pas pu être remboursé
+    (aucun paiement encaissé, montant invalide). Le retour reste réceptionné."""
+    _notifier_groupe(
+        "administration",
+        f"Retour {demande.numero_retour} non remboursable",
+        f"Le remboursement du retour {demande.numero_retour} a été refusé : {raison}",
+        demande,
+        liens.lien_retour_administration(demande),
+    )
+
+
 @receiver(retour_status_change)
 def notifier_changement_statut_retour(sender, demande_retour, ancien_statut, nouveau_statut, action=None,
                                        par_client=False, source=None, commentaire="", **kwargs):

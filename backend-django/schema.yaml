@@ -5192,6 +5192,8 @@ paths:
   /api/paiements/admin/remboursements/{id}/traiter/:
     post:
       operationId: paiements_admin_remboursements_traiter_create
+      description: 'effectue (référence obligatoire) ou refuse. Un remboursement de
+        retour ne se refuse pas : 400. Remboursement déjà traité : 409.'
       summary: Traiter un remboursement (administration)
       parameters:
       - in: path

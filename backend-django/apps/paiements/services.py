@@ -19,6 +19,7 @@ la réconciliation (reconcilier_paiement) quand le webhook n'arrive pas.
 
 import logging
 from datetime import timedelta
+from decimal import Decimal
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
@@ -537,8 +538,19 @@ def reconcilier_paiements_en_suspens(maintenant=None):
 
 def creer_remboursement(paiement, commande, motif, montant=None, retour=None):
     """Remboursement à traiter (une seule fois par paiement et commande, ou
-    par retour) + alerte de l'administration. Renvoie (remboursement, cree)."""
-    montant = commande.montant_total if montant is None else montant
+    par retour) + alerte de l'administration. Renvoie (remboursement, cree).
+
+    Montant en FCFA entiers, sinon PaiementRefuse. Un montant nul : refusé
+    pour un retour ; ailleurs (annulation, doublon), rien n'est à rendre et
+    rien n'est créé : (None, False)."""
+    montant = Decimal(commande.montant_total if montant is None else montant)
+    if montant != montant.to_integral_value():
+        raise PaiementRefuse(f"Montant de remboursement invalide ({montant}) : un nombre entier de FCFA est attendu.")
+    if montant <= 0:
+        if retour is not None:
+            raise PaiementRefuse("Montant de remboursement nul : rien ne peut être remboursé pour ce retour.")
+        logger_securite.warning("Remboursement de la commande %s ignoré : montant nul.", commande.numero_commande)
+        return None, False
     with transaction.atomic():
         if retour is not None:
             remboursement, cree = Remboursement.objects.get_or_create(
@@ -578,7 +590,12 @@ def alerter_administration(remboursement):
 
 def traiter_remboursement(remboursement, administrateur, decision, reference_externe="", commentaire=""):
     """L'administration a remboursé depuis le tableau de bord du fournisseur
-    (effectue, référence obligatoire) ou refuse le remboursement (refuse)."""
+    (effectue, référence obligatoire) ou refuse le remboursement (refuse).
+
+    Un remboursement de retour ne se refuse pas (PaiementRefuse) : le fond
+    est tranché dans le circuit du retour, et la part du vendeur et les
+    points du client sont déjà repris. Un échec technique se règle par une
+    nouvelle tentative, ou à la main (effectue, référence et commentaire)."""
     from apps.notifications import liens
     from apps.notifications.models import Notification
     from apps.notifications.services import ServiceNotification
@@ -587,6 +604,11 @@ def traiter_remboursement(remboursement, administrateur, decision, reference_ext
         verrouille = Remboursement.objects.select_for_update().select_related("paiement__client").get(pk=remboursement.pk)
         if verrouille.statut != Remboursement.Statut.A_TRAITER:
             raise TransitionPaiementImpossible("Ce remboursement a déjà été traité.")
+        if verrouille.motif == Remboursement.Motif.RETOUR and decision != Remboursement.Statut.EFFECTUE:
+            raise PaiementRefuse(
+                "Un remboursement de retour décidé ne peut pas être refusé : en cas d'échec, recommencez le "
+                "remboursement ou marquez-le effectué avec la référence et un commentaire."
+            )
         verrouille.statut = decision
         verrouille.reference_externe = reference_externe
         verrouille.commentaire = commentaire
@@ -635,12 +657,15 @@ def rembourser_retour(demande_retour):
     """Retour remboursé : remboursement à traiter pour le client (articles,
     et frais de livraison si le motif est imputable au vendeur), part du
     vendeur réduite (avant versement) ou ajustement négatif (après), et
-    frais de livraison remboursés facturés au vendeur (ajustement)."""
+    frais de livraison remboursés facturés au vendeur (ajustement).
+
+    Sans paiement encaissé, ou montant invalide : PaiementRefuse, et la
+    transaction du retour est annulée (aucun retour « remboursé » sans
+    Remboursement)."""
     commande = demande_retour.commande
     paiement = paiement_valide_de(commande)
     if paiement is None:
-        logger_securite.error("Retour %s remboursé sans paiement encaissé.", demande_retour.numero_retour)
-        return None
+        raise PaiementRefuse("Aucun paiement encaissé pour cette commande : le retour ne peut pas être remboursé.")
     remboursement, cree = creer_remboursement(
         paiement, commande, Remboursement.Motif.RETOUR,
         montant=demande_retour.montant_remboursement, retour=demande_retour,
