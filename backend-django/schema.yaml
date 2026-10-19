@@ -6380,6 +6380,56 @@ paths:
                 $ref: '#/components/schemas/Erreur'
           description: 'Limite de débit atteinte : réessayer après le délai indiqué
             par l''en-tête Retry-After.'
+  /api/retours/{id}/historique/:
+    get:
+      operationId: retours_historique_list
+      description: 'Étapes de la demande, de la plus ancienne à la plus récente :
+        statuts, action, origine (`source`) et motif. Le compte auteur (`auteur`)
+        n''est renvoyé qu''à l''administration. 404 pour un tiers.'
+      summary: Historique d'une demande de retour
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - Retours
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedRetourHistoriqueList'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
   /api/retours/{id}/photos/:
     post:
       operationId: retours_photos_create
@@ -6569,6 +6619,68 @@ paths:
               schema:
                 $ref: '#/components/schemas/Erreur'
           description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/retours/moderation/liste/:
+    get:
+      operationId: retours_moderation_liste_list
+      description: 'Demandes passées par la modération (escalade ou contestation),
+        toutes boutiques : en_moderation puis en_arbitrage d''abord, les plus anciennes
+        en tête. Filtre `statut`. Sans e-mail du client pour un modérateur. Autres
+        rôles : 403.'
+      summary: File des retours en recours (modération et administration)
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      - in: query
+        name: statut
+        schema:
+          type: string
+          enum:
+          - annule
+          - approuve
+          - cloture
+          - demande
+          - en_arbitrage
+          - en_moderation
+          - en_transit
+          - receptionne
+          - refuse_moderation
+          - refuse_vendeur
+          - rejete
+          - rembourse
+      tags:
+      - Retours
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedDemandeRetourList'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
         '429':
           content:
             application/json:
@@ -9440,7 +9552,7 @@ components:
           maxLength: 255
       required:
       - commentaire
-    ActionEnum:
+    ActionRetourEnum:
       enum:
       - approuver
       - rejeter
@@ -11605,7 +11717,25 @@ components:
           - 'null'
           format: date-time
           readOnly: true
+        date_limite_vendeur:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          readOnly: true
+        date_limite_contestation:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          readOnly: true
+        actions_possibles:
+          type: array
+          items:
+            $ref: '#/components/schemas/ActionRetourEnum'
+          readOnly: true
       required:
+      - actions_possibles
       - articles
       - boutique
       - boutique_nom
@@ -11614,6 +11744,8 @@ components:
       - commande
       - date_cloture
       - date_creation
+      - date_limite_contestation
+      - date_limite_vendeur
       - date_traitement
       - description
       - frais_livraison_rembourses
@@ -13730,6 +13862,29 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/RemboursementAdmin'
+    PaginatedRetourHistoriqueList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/RetourHistorique'
     PaginatedReversementAdminList:
       type: object
       required:
@@ -14987,7 +15142,7 @@ components:
       type: object
       properties:
         action:
-          $ref: '#/components/schemas/ActionEnum'
+          $ref: '#/components/schemas/ActionRetourEnum'
         reponse:
           type: string
           default: ''
@@ -15735,6 +15890,46 @@ components:
       - nombre_en_retractation
       - nombre_verse
       - verse
+    RetourHistorique:
+      type: object
+      description: |-
+        Parties et modération : l'origine de l'étape (`source`) et son motif,
+        jamais le compte qui l'a faite.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        ancien_statut:
+          allOf:
+          - $ref: '#/components/schemas/StatutRetourEnum'
+          readOnly: true
+        nouveau_statut:
+          allOf:
+          - $ref: '#/components/schemas/StatutRetourEnum'
+          readOnly: true
+        action:
+          type: string
+          readOnly: true
+        source:
+          allOf:
+          - $ref: '#/components/schemas/SourceHistoriqueRetourEnum'
+          readOnly: true
+        commentaire:
+          type: string
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - action
+      - ancien_statut
+      - commentaire
+      - created_at
+      - id
+      - nouveau_statut
+      - source
     RetourItem:
       type: object
       properties:
@@ -16268,6 +16463,20 @@ components:
         * `admin` - Administration
         * `paiement` - Paiement
         * `livraison` - Livraison
+        * `systeme` - Système
+    SourceHistoriqueRetourEnum:
+      enum:
+      - client
+      - vendeur
+      - moderation
+      - administration
+      - systeme
+      type: string
+      description: |-
+        * `client` - Client
+        * `vendeur` - Vendeur
+        * `moderation` - Modération
+        * `administration` - Administration
         * `systeme` - Système
     SousCategorie:
       type: object

@@ -15,7 +15,7 @@ from unittest.mock import patch
 from django.apps import apps as registre_apps
 from django.conf import settings
 from django.contrib import admin
-from django.db import connection
+from django.db import connection, transaction
 from django.test import RequestFactory, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from django.utils.module_loading import import_string
@@ -761,3 +761,116 @@ class MigrationEcheancesTests(CircuitBase):
         rejetee.refresh_from_db()
         self.assertIsNone(rejetee.date_limite_vendeur)
         self.assertEqual(self.agir(rejetee.id, self.client1, "contester", reponse=CONTESTATION).status_code, 400)
+
+
+# =====================================================================
+# API DE LECTURE : HISTORIQUE, FILE DE MODÉRATION, ACTIONS POSSIBLES
+# =====================================================================
+
+class Annulee(Exception):
+    """Fait annuler la transaction d'un essai de traiter."""
+
+
+class ApiLectureTests(CircuitBase):
+    def setUp(self):
+        super().setUp()
+        paiement = Paiement.objects.create(client=self.client1, fournisseur="simule", montant=Decimal("40000"),
+                                           statut=Paiement.Statut.VALIDE, date_validation=timezone.now())
+        paiement.commandes.add(self.commande1)
+
+    def get(self, utilisateur, url, **parametres):
+        self.client.force_authenticate(user=utilisateur)
+        return self.client.get(url, parametres)
+
+    def acceptees_par_traiter(self, demande, utilisateur):
+        acceptees = set()
+        for action in services.ACTIONS_UTILISATEUR:
+            try:
+                with transaction.atomic():
+                    services.traiter(demande.pk, utilisateur, action, reponse=CONTESTATION, restock=False)
+                    raise Annulee
+            except Annulee:
+                acceptees.add(action)
+            except services.RetourRefuse:
+                pass
+        return acceptees
+
+    def test_actions_possibles_egales_aux_actions_acceptees(self):
+        cas = [(statut, {}) for statut in Statut.values]
+        cas.append((Statut.DEMANDE, {"date_limite_vendeur": timezone.now() - timedelta(minutes=1)}))
+        cas.append((Statut.REFUSE_VENDEUR, {"date_limite_contestation": timezone.now() - timedelta(minutes=1)}))
+        moderee = self.au_statut(Statut.EN_MODERATION)
+        self.agir(moderee.id, self.moderateur, "approuver", reponse="Défaut confirmé.")
+        utilisateurs = (self.client1, self.vendeur1, self.moderateur, self.admin, self.client2)
+        demandes = [(statut, self.au_statut(statut, **champs)) for statut, champs in cas] + [("approuvee en recours", moderee)]
+        for nom, demande in demandes:
+            for utilisateur in utilisateurs:
+                with self.subTest(cas=nom, utilisateur=utilisateur.email):
+                    attendu = self.acceptees_par_traiter(demande, utilisateur)
+                    r = self.get(utilisateur, f"{URL_RETOURS}{demande.id}/")
+                    if r.status_code == 404:
+                        self.assertEqual(attendu, set())
+                        continue
+                    self.assertEqual(set(r.data["actions_possibles"]), attendu)
+
+    def test_echeances_dans_la_representation(self):
+        demande = self.au_statut(Statut.REFUSE_VENDEUR)
+        r = self.get(self.client1, f"{URL_RETOURS}{demande.id}/")
+        self.assertIsNotNone(r.data["date_limite_vendeur"])
+        self.assertIsNotNone(r.data["date_limite_contestation"])
+        self.assertEqual(r.data["actions_possibles"], ["contester", "annuler"])
+
+    def test_historique_reserve_aux_parties_auteur_pour_l_administration(self):
+        r = self.demander()
+        demande = DemandeRetour.objects.get(pk=r.data["id"])
+        self.agir(demande.id, self.vendeur1, "rejeter", reponse=MOTIF)
+        url = f"{URL_RETOURS}{demande.id}/historique/"
+        for utilisateur in (self.client1, self.vendeur1):
+            with self.subTest(utilisateur=utilisateur.email):
+                lignes = self.get(utilisateur, url).data["results"]
+                self.assertEqual([ligne["action"] for ligne in lignes], ["creer", "rejeter"])
+                self.assertEqual(lignes[1]["source"], "vendeur")
+                self.assertEqual(lignes[1]["commentaire"], MOTIF)
+                self.assertNotIn("auteur", lignes[1])
+        lignes = self.get(self.admin, url).data["results"]
+        self.assertEqual(lignes[1]["auteur"], self.vendeur1.pk)
+        for tiers in (self.client2, self.vendeur2, self.moderateur):
+            with self.subTest(tiers=tiers.email):
+                self.assertEqual(self.get(tiers, url).status_code, 404)
+
+    def test_file_de_moderation(self):
+        # Ordre de création sans rapport avec l'ordre attendu de la file.
+        ancienne = self.au_statut(Statut.EN_MODERATION, date_moderation=timezone.now() - timedelta(days=1))
+        jamais = self.au_statut(Statut.DEMANDE)
+        approuvee = self.au_statut(Statut.APPROUVE, date_moderation=timezone.now() - timedelta(days=3))
+        recente = self.au_statut(Statut.EN_MODERATION, date_moderation=timezone.now())
+        arbitrage = self.au_statut(Statut.EN_ARBITRAGE, date_moderation=timezone.now() - timedelta(days=2))
+        url = f"{URL_RETOURS}moderation/liste/"
+        for utilisateur in (self.moderateur, self.admin):
+            with self.subTest(utilisateur=utilisateur.email):
+                r = self.get(utilisateur, url)
+                self.assertEqual([d["id"] for d in r.data["results"]],
+                                 [str(d.id) for d in (ancienne, recente, arbitrage, approuvee)])
+        self.assertNotIn(str(jamais.id), str(r.data))
+        r = self.get(self.moderateur, url, statut="en_arbitrage")
+        self.assertEqual([d["id"] for d in r.data["results"]], [str(arbitrage.id)])
+        self.assertIsNone(r.data["results"][0]["client_email"])
+        self.assertEqual(self.get(self.moderateur, url, statut="inconnu").status_code, 400)
+        for utilisateur in (self.client1, self.vendeur1):
+            with self.subTest(utilisateur=utilisateur.email):
+                self.assertEqual(self.get(utilisateur, url).status_code, 403)
+
+    def test_liste_sans_requete_par_demande(self):
+        from django.db import connection as connexion
+        from django.test.utils import CaptureQueriesContext
+
+        def requetes():
+            with CaptureQueriesContext(connexion) as contexte:
+                self.assertEqual(self.get(self.vendeur1, f"{URL_RETOURS}vendeur/liste/").status_code, 200)
+            return len(contexte.captured_queries)
+
+        self.au_statut(Statut.APPROUVE)
+        une = requetes()
+        for _ in range(3):
+            self.au_statut(Statut.APPROUVE)
+        self.assertEqual(requetes(), une)

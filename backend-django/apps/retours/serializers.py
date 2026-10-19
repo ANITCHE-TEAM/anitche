@@ -3,10 +3,13 @@ from rest_framework import serializers
 from django.urls import reverse
 from rest_framework.exceptions import ValidationError
 
-from .models import DemandeRetour, RetourItem, PhotoRetour
+from drf_spectacular.utils import extend_schema_field
+
+from .models import DemandeRetour, RetourHistorique, RetourItem, PhotoRetour
 from .services import (
     ACTIONS_UTILISATEUR,
     RetourRefuse,
+    actions_possibles,
     frais_livraison_a_rembourser,
     montant_a_rembourser,
     verifier_eligibilite,
@@ -69,6 +72,7 @@ class DemandeRetourSerializer(serializers.ModelSerializer):
     statut_display = serializers.CharField(source="get_statut_display", read_only=True)
     articles = RetourItemSerializer(many=True, read_only=True)
     photos = PhotoRetourSerializer(many=True, read_only=True)
+    actions_possibles = serializers.SerializerMethodField()
 
     class Meta:
         model = DemandeRetour
@@ -95,8 +99,20 @@ class DemandeRetourSerializer(serializers.ModelSerializer):
             "date_creation",
             "date_traitement",
             "date_cloture",
+            "date_limite_vendeur",
+            "date_limite_contestation",
+            "actions_possibles",
         ]
         read_only_fields = fields
+
+    @extend_schema_field(serializers.ListField(child=serializers.ChoiceField(choices=list(ACTIONS_UTILISATEUR))))
+    def get_actions_possibles(self, instance):
+        """Actions de PATCH traiter/ que l'appelant peut faire maintenant
+        (même table que le service) ; celles à motif obligatoire comprises."""
+        requete = self.context.get("request")
+        if requete is None or not getattr(requete.user, "is_authenticated", False):
+            return []
+        return actions_possibles(instance, requete.user)
 
     def to_representation(self, instance):
         donnees = super().to_representation(instance)
@@ -106,6 +122,22 @@ class DemandeRetourSerializer(serializers.ModelSerializer):
         if requete is not None and getattr(requete.user, "role", None) == Role.MODERATEUR:
             donnees["client_email"] = None
         return donnees
+
+
+class RetourHistoriqueSerializer(serializers.ModelSerializer):
+    """Parties et modération : l'origine de l'étape (`source`) et son motif,
+    jamais le compte qui l'a faite."""
+
+    class Meta:
+        model = RetourHistorique
+        fields = ["id", "ancien_statut", "nouveau_statut", "action", "source", "commentaire", "created_at"]
+        read_only_fields = fields
+
+
+class RetourHistoriqueAdministrationSerializer(RetourHistoriqueSerializer):
+    class Meta(RetourHistoriqueSerializer.Meta):
+        fields = RetourHistoriqueSerializer.Meta.fields + ["auteur"]
+        read_only_fields = fields
 
 
 class ArticleRetourInputSerializer(serializers.Serializer):

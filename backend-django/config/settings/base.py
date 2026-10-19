@@ -330,6 +330,7 @@ SPECTACULAR_SETTINGS = {
     # plusieurs modèles (sans eux : StatusC4bEnum, Statut8cbEnum...).
     'ENUM_NAME_OVERRIDES': {
         'StatutCommandeEnum': 'apps.commandes.models.Commande.Status',
+        'SourceEnum': 'apps.commandes.models.CommandeHistorique.Source',
         'StatutLivraisonEnum': 'apps.livraison.models.Livraison.Status',
         'StatutContestationEnum': 'apps.livraison.models.ContestationLivraison.Statut',
         'StatutPaiementEnum': 'apps.paiements.models.Paiement.Statut',
@@ -339,6 +340,8 @@ SPECTACULAR_SETTINGS = {
         'CanalReversementEnum': 'apps.paiements.models.Reversement.Canal',
         'StatutRetourEnum': 'apps.retours.models.DemandeRetour.Statut',
         'MotifRetourEnum': 'apps.retours.models.DemandeRetour.Motif',
+        'ActionRetourEnum': 'apps.retours.services.ACTIONS_UTILISATEUR',
+        'SourceHistoriqueRetourEnum': 'apps.retours.models.RetourHistorique.Source',
         'StatutGainFideliteEnum': 'apps.fidelite.models.GainFidelite.Statut',
         'StatutTicketEnum': 'apps.support.models.SupportTicket.Status',
         'CanalNotificationEnum': 'apps.notifications.models.Notification.Canal',

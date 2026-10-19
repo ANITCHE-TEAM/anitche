@@ -24,7 +24,7 @@ from decimal import ROUND_DOWN, Decimal
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import OuterRef, Q, Subquery
 from django.utils import timezone
 
 from apps.catalogue.models import Stock
@@ -50,6 +50,9 @@ MOTIFS_FRAIS_REMBOURSES = (
     DemandeRetour.Motif.PRODUIT_DEFECTUEUX,
     DemandeRetour.Motif.NON_CONFORME,
 )
+
+#: Rôles qui accèdent à la file des dossiers de recours (moderation/liste/).
+ROLES_MODERATION = (Role.MODERATEUR, *ROLES_ADMINISTRATION)
 
 #: Refus contestables par le client jusqu'à date_limite_contestation.
 STATUTS_REFUS = (Statut.REFUSE_VENDEUR, Statut.REFUSE_MODERATION)
@@ -269,9 +272,18 @@ def verifier_ajout_photo(demande_id, client):
 def demandes_visibles(utilisateur):
     """Client : les siennes ; vendeur : celles de sa boutique ET les siennes
     comme acheteur ; modérateur : celles passées par la modération, toutes
-    boutiques ; administration : toutes."""
-    qs = DemandeRetour.objects.select_related("commande", "boutique", "client").prefetch_related(
-        "articles__commande_item", "photos",
+    boutiques ; administration : toutes.
+
+    Chaque demande porte la source de sa dernière approbation : le calcul de
+    actions_possibles d'une liste ne fait aucune requête par demande."""
+    derniere_approbation = (
+        RetourHistorique.objects.filter(demande_retour=OuterRef("pk"), nouveau_statut=Statut.APPROUVE)
+        .order_by("-created_at", "-id").values("source")[:1]
+    )
+    qs = (
+        DemandeRetour.objects.select_related("commande", "boutique", "client")
+        .prefetch_related("articles__commande_item", "photos")
+        .annotate(source_derniere_approbation=Subquery(derniere_approbation))
     )
     if utilisateur.role in ROLES_ADMINISTRATION:
         return qs
@@ -303,10 +315,13 @@ def qualites_de(utilisateur, demande):
 def _derniere_approbation_par_le_vendeur(demande):
     """Une demande approuvée avant l'historique n'a pu l'être qu'au niveau de
     la boutique : elle compte comme approuvée par le vendeur."""
-    source = (
-        RetourHistorique.objects.filter(demande_retour=demande, nouveau_statut=Statut.APPROUVE)
-        .order_by("-created_at", "-id").values_list("source", flat=True).first()
-    )
+    if hasattr(demande, "source_derniere_approbation"):  # annotée par demandes_visibles
+        source = demande.source_derniere_approbation
+    else:
+        source = (
+            RetourHistorique.objects.filter(demande_retour=demande, nouveau_statut=Statut.APPROUVE)
+            .order_by("-created_at", "-id").values_list("source", flat=True).first()
+        )
     return source in (None, Source.VENDEUR)
 
 
