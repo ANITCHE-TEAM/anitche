@@ -16,6 +16,7 @@ Ce dossier centralise la documentation vivante du projet ANITCHE :
 - [`MODULE_PANIER.md`](./MODULE_PANIER.md) — panier connecté ou anonyme, article devenu indisponible, concurrence, contrat des endpoints `/api/panier/`.
 - [`MODULE_PASSEPORT_QR.md`](./MODULE_PASSEPORT_QR.md) — passeports d'authenticité, vérification publique d'un QR, contrat des endpoints `/api/passeports/`, IP et limite de débit derrière Nginx/Cloudflare.
 - [`MODULE_RETOURS.md`](./MODULE_RETOURS.md) — retours sous 7 jours après livraison, photos, traitement par la boutique, remboursement, contrat des endpoints `/api/retours/`.
+- [`MODULE_STATISTIQUES.md`](./MODULE_STATISTIQUES.md) — statistiques en lecture seule du vendeur et de l'administration : définition d'une vente, période en Africa/Abidjan, contrat des endpoints `/api/statistiques/`.
 - [`MODULE_FIDELITE.md`](./MODULE_FIDELITE.md) — points crédités après le délai de rétractation, conversion en coupons, contrat des endpoints `/api/fidelite/`.
 - [`MODULE_NOTIFICATIONS.md`](./MODULE_NOTIFICATIONS.md) — notifications en base, emails asynchrones, préférences, contrat des endpoints `/api/notifications/`.
 - [`MODULE_SUPPORT.md`](./MODULE_SUPPORT.md) — tickets, messages, pièces jointes, file de l'équipe support, contrat des endpoints `/api/support/`.
