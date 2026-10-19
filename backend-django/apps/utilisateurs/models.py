@@ -1,5 +1,6 @@
 import secrets
 import logging
+import uuid
 from django.db import models, transaction
 from django.db.models.functions import Lower
 from datetime import timedelta
@@ -447,5 +448,63 @@ class JournalConnexion(models.Model):
                     | (models.Q(reussie=False) & ~models.Q(motif_echec=''))
                 ),
                 name='journalconn_motif_si_echec',
+            ),
+        ]
+
+
+# ============================
+# CARNET D'ADRESSES
+# ============================
+
+#: Nombre maximal d'adresses enregistrées par client.
+ADRESSES_MAX_PAR_CLIENT = 10
+
+
+class AdresseClient(models.Model):
+    """Une adresse de livraison enregistrée par un client, pour la choisir au
+    checkout sans la ressaisir.
+
+    Lue et modifiée par son seul propriétaire. Une commande n'y est jamais
+    liée : le checkout en recopie les champs dans le groupe de commandes
+    (commandes.GroupeCommande), que le livreur lit à la place du carnet.
+    Au plus `ADRESSES_MAX_PAR_CLIENT` par client (apps.utilisateurs.services)
+    et une seule par défaut (contrainte en base).
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    client = models.ForeignKey(Utilisateur, on_delete=models.CASCADE, related_name='adresses')
+    libelle = models.CharField(max_length=50)
+    destinataire = models.CharField(max_length=150)
+    telephone = models.CharField(max_length=20)
+    commune = models.CharField(max_length=100)
+    quartier = models.CharField(max_length=150)
+    point_de_repere = models.CharField(max_length=500)
+    indications = models.CharField(max_length=500, blank=True)
+    latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    par_defaut = models.BooleanField(default=False)
+    date_creation = models.DateTimeField(auto_now_add=True)
+    date_modification = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.libelle} — {self.commune}, {self.quartier}"
+
+    class Meta:
+        verbose_name = "Adresse client"
+        verbose_name_plural = "Adresses clients"
+        ordering = ['-par_defaut', '-date_creation', 'id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['client'],
+                condition=models.Q(par_defaut=True),
+                name='adresseclient_une_seule_par_defaut',
+            ),
+            # Un point est complet ou absent : jamais une latitude sans longitude.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(latitude__isnull=True, longitude__isnull=True)
+                    | models.Q(latitude__isnull=False, longitude__isnull=False)
+                ),
+                name='adresseclient_position_complete_ou_absente',
             ),
         ]

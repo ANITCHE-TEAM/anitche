@@ -167,7 +167,12 @@ class CommandeHistorique(models.Model):
 
 class GroupeCommande(models.Model):
     """Un checkout : les commandes (une par boutique) d'un même panier,
-    et l'adresse de livraison saisie au moment de la validation."""
+    et l'adresse de livraison au moment de la validation.
+
+    Les champs `livraison_*` sont une copie figée : saisis au checkout ou
+    recopiés depuis le carnet du client (utilisateurs.AdresseClient), sans
+    lien vers lui. Modifier ou supprimer une adresse du carnet ne change donc
+    jamais une commande passée."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     client = models.ForeignKey(
@@ -185,6 +190,10 @@ class GroupeCommande(models.Model):
     # Choisi par le client pour cette livraison : visible par le vendeur
     # et le livreur (jamais le téléphone du profil).
     livraison_telephone = models.CharField(max_length=20, blank=True)
+    # Personne qui reçoit le colis et consignes d'accès, facultatifs : pour le
+    # livreur, jamais pour le vendeur.
+    livraison_destinataire = models.CharField(max_length=150, blank=True)
+    livraison_indications = models.CharField(max_length=500, blank=True)
     # Zone tarifaire (apps.livraison.models.TarifLivraison.Zone), vide pour
     # les groupes créés avant les frais de livraison.
     livraison_zone = models.CharField(max_length=20, blank=True)

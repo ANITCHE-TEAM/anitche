@@ -2766,7 +2766,6 @@ paths:
           multipart/form-data:
             schema:
               $ref: '#/components/schemas/SimulerFraisRequest'
-        required: true
       security:
       - jwtAuth: []
       responses:
@@ -2807,9 +2806,12 @@ paths:
       operationId: commandes_valider_panier_create
       description: 'Crée une commande par boutique (statut `creee`, à payer sous 30
         minutes), décrémente le stock et vide le panier. Mêmes montants que `simuler-frais/`.
-        Stock insuffisant ou panier vide : 400 (`errors.non_field_errors`). Panier
-        contenant un article de la boutique du client : 400, `errors.code = ["auto_achat_interdit"]`,
-        aucune commande créée.'
+        L''adresse est une adresse du carnet du client (`adresse_id`, 404 si elle
+        n''est pas la sienne) OU une adresse saisie (`adresse_livraison`) : l''une
+        des deux. Dans les deux cas la commande en garde une copie, que le carnet
+        ne modifie plus ensuite. Stock insuffisant ou panier vide : 400 (`errors.non_field_errors`).
+        Panier contenant un article de la boutique du client : 400, `errors.code =
+        ["auto_achat_interdit"]`, aucune commande créée.'
       summary: Valider le panier (checkout)
       tags:
       - Commandes
@@ -2824,7 +2826,6 @@ paths:
           multipart/form-data:
             schema:
               $ref: '#/components/schemas/SimulerFraisRequest'
-        required: true
       security:
       - jwtAuth: []
       responses:
@@ -7534,6 +7535,293 @@ paths:
                 $ref: '#/components/schemas/Erreur'
           description: 'Limite de débit atteinte : réessayer après le délai indiqué
             par l''en-tête Retry-After.'
+  /api/utilisateurs/adresses/:
+    get:
+      operationId: utilisateurs_adresses_list
+      description: Les adresses de livraison enregistrées par le client connecté,
+        la plus récente d'abord (celle par défaut en tête).
+      summary: Mon carnet d'adresses
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - Utilisateurs
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedAdresseClientList'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+    post:
+      operationId: utilisateurs_adresses_create
+      description: '10 adresses au plus par client : au-delà, 400 avec `errors.code
+        = ["carnet_plein"]`. `par_defaut: true` retire le statut par défaut à l''adresse
+        qui l''avait.'
+      summary: Ajouter une adresse au carnet
+      tags:
+      - Utilisateurs
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdresseClientRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/AdresseClientRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/AdresseClientRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdresseClient'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/utilisateurs/adresses/{id}/:
+    get:
+      operationId: utilisateurs_adresses_retrieve
+      description: 404 si l'adresse n'existe pas ou n'est pas la mienne.
+      summary: Une adresse de mon carnet
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Utilisateurs
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdresseClient'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+    put:
+      operationId: utilisateurs_adresses_update
+      description: Les commandes déjà passées gardent l'adresse qu'elles avaient.
+        404 si l'adresse n'est pas la mienne.
+      summary: Remplacer une adresse de mon carnet
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Utilisateurs
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdresseClientRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/AdresseClientRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/AdresseClientRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdresseClient'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+    patch:
+      operationId: utilisateurs_adresses_partial_update
+      description: Les commandes déjà passées gardent l'adresse qu'elles avaient.
+        404 si l'adresse n'est pas la mienne.
+      summary: Modifier une adresse de mon carnet
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Utilisateurs
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedAdresseClientRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedAdresseClientRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedAdresseClientRequest'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdresseClient'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+    delete:
+      operationId: utilisateurs_adresses_destroy
+      description: Les commandes déjà passées gardent l'adresse qu'elles avaient.
+        404 si l'adresse n'est pas la mienne.
+      summary: Supprimer une adresse de mon carnet
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Utilisateurs
+      security:
+      - jwtAuth: []
+      responses:
+        '204':
+          description: No response body
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
   /api/utilisateurs/changement-contact/:
     post:
       operationId: utilisateurs_changement_contact_create
@@ -9036,11 +9324,148 @@ components:
         * `rembourser` - rembourser
         * `cloturer` - cloturer
         * `annuler` - annuler
+    AdresseClient:
+      type: object
+      description: |-
+        Adresse du carnet, vue et écrite par son propriétaire.
+
+        Les mêmes règles que l'adresse saisie au checkout : téléphone de 8 à 15
+        chiffres, point GPS facultatif mais complet, dans la Côte d'Ivoire. Le
+        propriétaire vient de la session, jamais du corps de la requête.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        libelle:
+          type: string
+          maxLength: 50
+        destinataire:
+          type: string
+          maxLength: 150
+        telephone:
+          type: string
+          maxLength: 20
+        commune:
+          type: string
+          maxLength: 100
+        quartier:
+          type: string
+          maxLength: 150
+        point_de_repere:
+          type: string
+          maxLength: 500
+        indications:
+          type: string
+          maxLength: 500
+        latitude:
+          type:
+          - number
+          - 'null'
+          format: double
+          maximum: 11.0
+          minimum: 4.0
+          description: Facultatif, avec `longitude`. Degrés décimaux, arrondis à 6
+            décimales.
+        longitude:
+          type:
+          - number
+          - 'null'
+          format: double
+          maximum: -2.0
+          minimum: -9.0
+          description: Facultatif, avec `latitude`. Degrés décimaux, arrondis à 6
+            décimales.
+        par_defaut:
+          type: boolean
+        date_creation:
+          type: string
+          format: date-time
+          readOnly: true
+        date_modification:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - commune
+      - date_creation
+      - date_modification
+      - destinataire
+      - id
+      - libelle
+      - point_de_repere
+      - quartier
+      - telephone
+    AdresseClientRequest:
+      type: object
+      description: |-
+        Adresse du carnet, vue et écrite par son propriétaire.
+
+        Les mêmes règles que l'adresse saisie au checkout : téléphone de 8 à 15
+        chiffres, point GPS facultatif mais complet, dans la Côte d'Ivoire. Le
+        propriétaire vient de la session, jamais du corps de la requête.
+      properties:
+        libelle:
+          type: string
+          minLength: 1
+          maxLength: 50
+        destinataire:
+          type: string
+          minLength: 1
+          maxLength: 150
+        telephone:
+          type: string
+          minLength: 1
+          maxLength: 20
+        commune:
+          type: string
+          minLength: 1
+          maxLength: 100
+        quartier:
+          type: string
+          minLength: 1
+          maxLength: 150
+        point_de_repere:
+          type: string
+          minLength: 1
+          maxLength: 500
+        indications:
+          type: string
+          maxLength: 500
+        latitude:
+          type:
+          - number
+          - 'null'
+          format: double
+          maximum: 11.0
+          minimum: 4.0
+          description: Facultatif, avec `longitude`. Degrés décimaux, arrondis à 6
+            décimales.
+        longitude:
+          type:
+          - number
+          - 'null'
+          format: double
+          maximum: -2.0
+          minimum: -9.0
+          description: Facultatif, avec `latitude`. Degrés décimaux, arrondis à 6
+            décimales.
+        par_defaut:
+          type: boolean
+      required:
+      - commune
+      - destinataire
+      - libelle
+      - point_de_repere
+      - quartier
+      - telephone
     AdresseLivraisonAvecPositionLecture:
       type: object
       description: |-
         Adresse renvoyée au client, au livreur assigné et à l'administration :
-        avec le point GPS, `null` quand le client ne l'a pas donné.
+        avec le point GPS (`null` quand le client ne l'a pas donné), le
+        destinataire et les indications d'accès (vides quand le client n'en a
+        pas donné).
       properties:
         zone:
           type: string
@@ -9051,6 +9476,10 @@ components:
         point_de_repere:
           type: string
         telephone:
+          type: string
+        destinataire:
+          type: string
+        indications:
           type: string
         latitude:
           type:
@@ -9064,6 +9493,8 @@ components:
           format: double
       required:
       - commune
+      - destinataire
+      - indications
       - latitude
       - longitude
       - point_de_repere
@@ -9108,6 +9539,9 @@ components:
 
         `latitude` et `longitude` : point GPS facultatif (bouton « ma position »),
         les deux ou aucune. Il ne change pas le tarif, qui dépend de la commune.
+
+        `destinataire` et `indications` : facultatifs, pour le livreur (personne
+        qui reçoit le colis, consignes d'accès).
       properties:
         commune:
           type: string
@@ -9125,6 +9559,12 @@ components:
           type: string
           minLength: 1
           maxLength: 20
+        destinataire:
+          type: string
+          maxLength: 150
+        indications:
+          type: string
+          maxLength: 500
         latitude:
           type:
           - number
@@ -12334,6 +12774,29 @@ components:
         * `100_PTS_10PCT` - 100_PTS_10PCT
         * `250_PTS_2500FCFA` - 250_PTS_2500FCFA
         * `500_PTS_6000FCFA` - 500_PTS_6000FCFA
+    PaginatedAdresseClientList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdresseClient'
     PaginatedArticleANoterList:
       type: object
       required:
@@ -13951,6 +14414,62 @@ components:
       oneOf:
       - $ref: '#/components/schemas/PasseportPublic'
       - $ref: '#/components/schemas/PasseportRevoque'
+    PatchedAdresseClientRequest:
+      type: object
+      description: |-
+        Adresse du carnet, vue et écrite par son propriétaire.
+
+        Les mêmes règles que l'adresse saisie au checkout : téléphone de 8 à 15
+        chiffres, point GPS facultatif mais complet, dans la Côte d'Ivoire. Le
+        propriétaire vient de la session, jamais du corps de la requête.
+      properties:
+        libelle:
+          type: string
+          minLength: 1
+          maxLength: 50
+        destinataire:
+          type: string
+          minLength: 1
+          maxLength: 150
+        telephone:
+          type: string
+          minLength: 1
+          maxLength: 20
+        commune:
+          type: string
+          minLength: 1
+          maxLength: 100
+        quartier:
+          type: string
+          minLength: 1
+          maxLength: 150
+        point_de_repere:
+          type: string
+          minLength: 1
+          maxLength: 500
+        indications:
+          type: string
+          maxLength: 500
+        latitude:
+          type:
+          - number
+          - 'null'
+          format: double
+          maximum: 11.0
+          minimum: 4.0
+          description: Facultatif, avec `longitude`. Degrés décimaux, arrondis à 6
+            décimales.
+        longitude:
+          type:
+          - number
+          - 'null'
+          format: double
+          maximum: -2.0
+          minimum: -9.0
+          description: Facultatif, avec `latitude`. Degrés décimaux, arrondis à 6
+            décimales.
+        par_defaut:
+          type: boolean
     PatchedBaremeFraisRequest:
       type: object
       description: |-
@@ -15507,15 +16026,23 @@ components:
       - remise
     SimulerFraisRequest:
       type: object
-      description: Entrée de la simulation du checkout (mêmes champs que la validation).
+      description: |-
+        Entrée de la simulation du checkout (mêmes champs que la validation).
+
+        L'adresse est choisie dans le carnet du client (`adresse_id`) OU saisie
+        (`adresse_livraison`) : l'une des deux, pas les deux.
       properties:
+        adresse_id:
+          type: string
+          format: uuid
+          description: Adresse du carnet du client. Exclusif avec `adresse_livraison`.
         adresse_livraison:
-          $ref: '#/components/schemas/AdresseLivraisonRequest'
+          allOf:
+          - $ref: '#/components/schemas/AdresseLivraisonRequest'
+          description: Adresse saisie. Exclusif avec `adresse_id`.
         coupon_code:
           type: string
           maxLength: 30
-      required:
-      - adresse_livraison
     SourceEnum:
       enum:
       - client

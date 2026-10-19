@@ -711,7 +711,7 @@ export interface paths {
         put?: never;
         /**
          * Valider le panier (checkout)
-         * @description Crée une commande par boutique (statut `creee`, à payer sous 30 minutes), décrémente le stock et vide le panier. Mêmes montants que `simuler-frais/`. Stock insuffisant ou panier vide : 400 (`errors.non_field_errors`). Panier contenant un article de la boutique du client : 400, `errors.code = ["auto_achat_interdit"]`, aucune commande créée.
+         * @description Crée une commande par boutique (statut `creee`, à payer sous 30 minutes), décrémente le stock et vide le panier. Mêmes montants que `simuler-frais/`. L'adresse est une adresse du carnet du client (`adresse_id`, 404 si elle n'est pas la sienne) OU une adresse saisie (`adresse_livraison`) : l'une des deux. Dans les deux cas la commande en garde une copie, que le carnet ne modifie plus ensuite. Stock insuffisant ou panier vide : 400 (`errors.non_field_errors`). Panier contenant un article de la boutique du client : 400, `errors.code = ["auto_achat_interdit"]`, aucune commande créée.
          */
         post: operations["commandes_valider_panier_create"];
         delete?: never;
@@ -2016,6 +2016,62 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/utilisateurs/adresses/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Mon carnet d'adresses
+         * @description Les adresses de livraison enregistrées par le client connecté, la plus récente d'abord (celle par défaut en tête).
+         */
+        get: operations["utilisateurs_adresses_list"];
+        put?: never;
+        /**
+         * Ajouter une adresse au carnet
+         * @description 10 adresses au plus par client : au-delà, 400 avec `errors.code = ["carnet_plein"]`. `par_defaut: true` retire le statut par défaut à l'adresse qui l'avait.
+         */
+        post: operations["utilisateurs_adresses_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/utilisateurs/adresses/{id}/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Une adresse de mon carnet
+         * @description 404 si l'adresse n'existe pas ou n'est pas la mienne.
+         */
+        get: operations["utilisateurs_adresses_retrieve"];
+        /**
+         * Remplacer une adresse de mon carnet
+         * @description Les commandes déjà passées gardent l'adresse qu'elles avaient. 404 si l'adresse n'est pas la mienne.
+         */
+        put: operations["utilisateurs_adresses_update"];
+        post?: never;
+        /**
+         * Supprimer une adresse de mon carnet
+         * @description Les commandes déjà passées gardent l'adresse qu'elles avaient. 404 si l'adresse n'est pas la mienne.
+         */
+        delete: operations["utilisateurs_adresses_destroy"];
+        options?: never;
+        head?: never;
+        /**
+         * Modifier une adresse de mon carnet
+         * @description Les commandes déjà passées gardent l'adresse qu'elles avaient. 404 si l'adresse n'est pas la mienne.
+         */
+        patch: operations["utilisateurs_adresses_partial_update"];
+        trace?: never;
+    };
     "/api/utilisateurs/changement-contact/": {
         parameters: {
             query?: never;
@@ -2539,8 +2595,70 @@ export interface components {
          */
         ActionEnum: "approuver" | "rejeter" | "en_transit" | "receptionner" | "rembourser" | "cloturer" | "annuler";
         /**
+         * @description Adresse du carnet, vue et écrite par son propriétaire.
+         *
+         *     Les mêmes règles que l'adresse saisie au checkout : téléphone de 8 à 15
+         *     chiffres, point GPS facultatif mais complet, dans la Côte d'Ivoire. Le
+         *     propriétaire vient de la session, jamais du corps de la requête.
+         */
+        AdresseClient: {
+            /** Format: uuid */
+            readonly id: string;
+            libelle: string;
+            destinataire: string;
+            telephone: string;
+            commune: string;
+            quartier: string;
+            point_de_repere: string;
+            indications?: string;
+            /**
+             * Format: double
+             * @description Facultatif, avec `longitude`. Degrés décimaux, arrondis à 6 décimales.
+             */
+            latitude?: number | null;
+            /**
+             * Format: double
+             * @description Facultatif, avec `latitude`. Degrés décimaux, arrondis à 6 décimales.
+             */
+            longitude?: number | null;
+            par_defaut?: boolean;
+            /** Format: date-time */
+            readonly date_creation: string;
+            /** Format: date-time */
+            readonly date_modification: string;
+        };
+        /**
+         * @description Adresse du carnet, vue et écrite par son propriétaire.
+         *
+         *     Les mêmes règles que l'adresse saisie au checkout : téléphone de 8 à 15
+         *     chiffres, point GPS facultatif mais complet, dans la Côte d'Ivoire. Le
+         *     propriétaire vient de la session, jamais du corps de la requête.
+         */
+        AdresseClientRequest: {
+            libelle: string;
+            destinataire: string;
+            telephone: string;
+            commune: string;
+            quartier: string;
+            point_de_repere: string;
+            indications?: string;
+            /**
+             * Format: double
+             * @description Facultatif, avec `longitude`. Degrés décimaux, arrondis à 6 décimales.
+             */
+            latitude?: number | null;
+            /**
+             * Format: double
+             * @description Facultatif, avec `latitude`. Degrés décimaux, arrondis à 6 décimales.
+             */
+            longitude?: number | null;
+            par_defaut?: boolean;
+        };
+        /**
          * @description Adresse renvoyée au client, au livreur assigné et à l'administration :
-         *     avec le point GPS, `null` quand le client ne l'a pas donné.
+         *     avec le point GPS (`null` quand le client ne l'a pas donné), le
+         *     destinataire et les indications d'accès (vides quand le client n'en a
+         *     pas donné).
          */
         AdresseLivraisonAvecPositionLecture: {
             zone: string;
@@ -2548,6 +2666,8 @@ export interface components {
             quartier: string;
             point_de_repere: string;
             telephone: string;
+            destinataire: string;
+            indications: string;
             /** Format: double */
             latitude: number | null;
             /** Format: double */
@@ -2578,12 +2698,17 @@ export interface components {
          *
          *     `latitude` et `longitude` : point GPS facultatif (bouton « ma position »),
          *     les deux ou aucune. Il ne change pas le tarif, qui dépend de la commune.
+         *
+         *     `destinataire` et `indications` : facultatifs, pour le livreur (personne
+         *     qui reçoit le colis, consignes d'accès).
          */
         AdresseLivraisonRequest: {
             commune: string;
             quartier: string;
             point_de_repere: string;
             telephone: string;
+            destinataire?: string;
+            indications?: string;
             /**
              * Format: double
              * @description Facultatif, avec `longitude`. Degrés décimaux, arrondis à 6 décimales.
@@ -3937,6 +4062,21 @@ export interface components {
          * @enum {string}
          */
         OptionEnum: "50_PTS_5PCT" | "100_PTS_10PCT" | "250_PTS_2500FCFA" | "500_PTS_6000FCFA";
+        PaginatedAdresseClientList: {
+            /** @example 123 */
+            count: number;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=4
+             */
+            next?: string | null;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=2
+             */
+            previous?: string | null;
+            results: components["schemas"]["AdresseClient"][];
+        };
         PaginatedArticleANoterList: {
             /** @example 123 */
             count: number;
@@ -4829,6 +4969,33 @@ export interface components {
         };
         PasseportVerifie: components["schemas"]["PasseportPublic"] | components["schemas"]["PasseportRevoque"];
         /**
+         * @description Adresse du carnet, vue et écrite par son propriétaire.
+         *
+         *     Les mêmes règles que l'adresse saisie au checkout : téléphone de 8 à 15
+         *     chiffres, point GPS facultatif mais complet, dans la Côte d'Ivoire. Le
+         *     propriétaire vient de la session, jamais du corps de la requête.
+         */
+        PatchedAdresseClientRequest: {
+            libelle?: string;
+            destinataire?: string;
+            telephone?: string;
+            commune?: string;
+            quartier?: string;
+            point_de_repere?: string;
+            indications?: string;
+            /**
+             * Format: double
+             * @description Facultatif, avec `longitude`. Degrés décimaux, arrondis à 6 décimales.
+             */
+            latitude?: number | null;
+            /**
+             * Format: double
+             * @description Facultatif, avec `latitude`. Degrés décimaux, arrondis à 6 décimales.
+             */
+            longitude?: number | null;
+            par_defaut?: boolean;
+        };
+        /**
          * @description Barème pas encore commencé : tout se modifie, date_debut maintenant ou
          *     plus tard. Barème commencé (date_debut passée) : seule sa clôture est
          *     possible (PUT et PATCH).
@@ -5581,9 +5748,20 @@ export interface components {
             livraison_offerte: boolean;
             montant_total: number;
         };
-        /** @description Entrée de la simulation du checkout (mêmes champs que la validation). */
+        /**
+         * @description Entrée de la simulation du checkout (mêmes champs que la validation).
+         *
+         *     L'adresse est choisie dans le carnet du client (`adresse_id`) OU saisie
+         *     (`adresse_livraison`) : l'une des deux, pas les deux.
+         */
         SimulerFraisRequest: {
-            adresse_livraison: components["schemas"]["AdresseLivraisonRequest"];
+            /**
+             * Format: uuid
+             * @description Adresse du carnet du client. Exclusif avec `adresse_livraison`.
+             */
+            adresse_id?: string;
+            /** @description Adresse saisie. Exclusif avec `adresse_id`. */
+            adresse_livraison?: components["schemas"]["AdresseLivraisonRequest"];
             coupon_code?: string;
         };
         /**
@@ -9324,7 +9502,7 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody: {
+        requestBody?: {
             content: {
                 "application/json": components["schemas"]["SimulerFraisRequest"];
                 "application/x-www-form-urlencoded": components["schemas"]["SimulerFraisRequest"];
@@ -9385,7 +9563,7 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody: {
+        requestBody?: {
             content: {
                 "application/json": components["schemas"]["SimulerFraisRequest"];
                 "application/x-www-form-urlencoded": components["schemas"]["SimulerFraisRequest"];
@@ -14461,6 +14639,319 @@ export interface operations {
             };
             /** @description Action non autorisée pour ce compte. */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    utilisateurs_adresses_list: {
+        parameters: {
+            query?: {
+                /** @description Un numéro de page de l'ensemble des résultats. */
+                page?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaginatedAdresseClientList"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    utilisateurs_adresses_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdresseClientRequest"];
+                "application/x-www-form-urlencoded": components["schemas"]["AdresseClientRequest"];
+                "multipart/form-data": components["schemas"]["AdresseClientRequest"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdresseClient"];
+                };
+            };
+            /** @description Requête invalide (erreurs par champ dans `errors`) ou refus métier (message dans `detail`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    utilisateurs_adresses_retrieve: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdresseClient"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    utilisateurs_adresses_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdresseClientRequest"];
+                "application/x-www-form-urlencoded": components["schemas"]["AdresseClientRequest"];
+                "multipart/form-data": components["schemas"]["AdresseClientRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdresseClient"];
+                };
+            };
+            /** @description Requête invalide (erreurs par champ dans `errors`) ou refus métier (message dans `detail`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    utilisateurs_adresses_destroy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No response body */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    utilisateurs_adresses_partial_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["PatchedAdresseClientRequest"];
+                "application/x-www-form-urlencoded": components["schemas"]["PatchedAdresseClientRequest"];
+                "multipart/form-data": components["schemas"]["PatchedAdresseClientRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdresseClient"];
+                };
+            };
+            /** @description Requête invalide (erreurs par champ dans `errors`) ou refus métier (message dans `detail`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

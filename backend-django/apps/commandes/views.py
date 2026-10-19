@@ -16,6 +16,8 @@ from rest_framework import status
 
 from .models import Commande, CommandeHistorique, GroupeCommande, CommandeItem
 from .serializers import (
+    MESSAGE_ADRESSE_EN_DOUBLE,
+    MESSAGE_ADRESSE_OBLIGATOIRE,
     AdresseLivraisonSerializer,
     CommandeAdministrationSerializer,
     CommandeHistoriqueAdministrationSerializer,
@@ -50,6 +52,7 @@ from apps.livraison.frais import TarifIntrouvable
 from apps.notifications.services import alerter_stock_bas
 from apps.paiements.frais import BaremeIntrouvable, bareme_en_vigueur, calculer_frais_ligne
 from apps.utilisateurs.permissions import EmailVerifie
+from apps.utilisateurs.services import adresse_du_checkout
 from apps.vendeurs.permissions import BoutiqueNonSuspendue, EstAdministrateur, EstVendeurValide
 
 logger_securite = logging.getLogger('securite')
@@ -60,11 +63,38 @@ class ServiceIndisponible(APIException):
     default_detail = "La validation des commandes est momentanément indisponible."
 
 
+def adresse_du_corps(request):
+    """Adresse de livraison de la validation du panier : celle du carnet du
+    client (`adresse_id`) ou celle qu'il saisit (`adresse_livraison`), l'une
+    des deux. Contrôlée avant toute écriture ; 404 pour une adresse qui n'est
+    pas la sienne. La commande en garde une copie : rien ne la relie au carnet."""
+    saisie = request.data.get("adresse_livraison")
+    if "adresse_id" in request.data:
+        if saisie is not None:
+            raise ValidationError({"adresse_id": MESSAGE_ADRESSE_EN_DOUBLE})
+        try:
+            adresse_id = serializers.UUIDField().run_validation(request.data["adresse_id"])
+        except ValidationError as erreur:
+            raise ValidationError({"adresse_id": erreur.detail})
+        return adresse_du_checkout(request.user, adresse_id)
+
+    if saisie is None:
+        raise ValidationError({"adresse_livraison": MESSAGE_ADRESSE_OBLIGATOIRE})
+    adresse = AdresseLivraisonSerializer(data=saisie)
+    if not adresse.is_valid():
+        # Clés à points, comme la simulation : « adresse_livraison.latitude ».
+        raise ValidationError({"adresse_livraison": adresse.errors})
+    return adresse.validated_data
+
+
 @extend_schema(
     summary="Valider le panier (checkout)",
     description=(
         "Crée une commande par boutique (statut `creee`, à payer sous 30 minutes), décrémente le stock "
-        "et vide le panier. Mêmes montants que `simuler-frais/`. Stock insuffisant ou panier vide : "
+        "et vide le panier. Mêmes montants que `simuler-frais/`. L'adresse est une adresse du carnet du client "
+        "(`adresse_id`, 404 si elle n'est pas la sienne) OU une adresse saisie (`adresse_livraison`) : l'une des "
+        "deux. Dans les deux cas la commande en garde une copie, que le carnet ne modifie plus ensuite. "
+        "Stock insuffisant ou panier vide : "
         "400 (`errors.non_field_errors`). Panier contenant un article de la boutique du client : 400, "
         "`errors.code = [\"auto_achat_interdit\"]`, aucune commande créée."
     ),
@@ -90,13 +120,7 @@ class ValiderPanierView(APIView):
         serializers.Serializer(data=request.data).is_valid(raise_exception=True)
 
         # Adresse de livraison obligatoire, validée avant toute écriture.
-        adresse = AdresseLivraisonSerializer(data=request.data.get("adresse_livraison"))
-        if request.data.get("adresse_livraison") is None:
-            raise ValidationError({"adresse_livraison": "L'adresse de livraison est obligatoire."})
-        if not adresse.is_valid():
-            # Clés à points, comme la simulation : « adresse_livraison.latitude ».
-            raise ValidationError({"adresse_livraison": adresse.errors})
-        adresse = adresse.validated_data
+        adresse = adresse_du_corps(request)
 
         panier = get_or_create_panier(request)
 
@@ -155,6 +179,8 @@ class ValiderPanierView(APIView):
                 livraison_quartier=adresse["quartier"],
                 livraison_point_de_repere=adresse["point_de_repere"],
                 livraison_telephone=adresse["telephone"],
+                livraison_destinataire=adresse.get("destinataire", ""),
+                livraison_indications=adresse.get("indications", ""),
                 livraison_latitude=adresse.get("latitude"),
                 livraison_longitude=adresse.get("longitude"),
             )
@@ -250,12 +276,14 @@ class SimulerFraisView(APIView):
     def post(self, request):
         entree = SimulerFraisSerializer(data=request.data)
         entree.is_valid(raise_exception=True)
+        if "adresse_id" in entree.validated_data:
+            adresse = adresse_du_checkout(request.user, entree.validated_data["adresse_id"])
+        else:
+            adresse = entree.validated_data["adresse_livraison"]
         panier = get_or_create_panier(request)
         try:
             coupon = trouver_coupon(entree.validated_data.get("coupon_code"))
-            checkout = calculer_checkout(
-                list(panier.items.avec_details()), entree.validated_data["adresse_livraison"], request.user, coupon,
-            )
+            checkout = calculer_checkout(list(panier.items.avec_details()), adresse, request.user, coupon)
         except CheckoutRefuse as refus:
             raise ValidationError(refus.detail)
         except TarifIntrouvable:

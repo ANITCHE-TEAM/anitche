@@ -3,6 +3,8 @@ import logging
 from contextlib import contextmanager
 
 from django.db import transaction
+from django.shortcuts import get_object_or_404
+from rest_framework.exceptions import ValidationError
 from rest_framework_simplejwt.token_blacklist.models import (
     BlacklistedToken,
     OutstandingToken,
@@ -10,7 +12,14 @@ from rest_framework_simplejwt.token_blacklist.models import (
 
 from apps.core.reseau import adresse_ip_client
 
-from .models import JournalConnexion, MethodeConnexion, MotifEchecConnexion, Utilisateur
+from .models import (
+    ADRESSES_MAX_PAR_CLIENT,
+    AdresseClient,
+    JournalConnexion,
+    MethodeConnexion,
+    MotifEchecConnexion,
+    Utilisateur,
+)
 
 logger_securite = logging.getLogger('securite')
 
@@ -227,3 +236,64 @@ def enregistrer_echec_mot_de_passe(request, email):
             request, methode=MethodeConnexion.MOT_DE_PASSE, reussie=False,
             utilisateur=utilisateur, email=email, motif_echec=motif,
         )
+
+
+# =====================================================
+# CARNET D'ADRESSES
+# =====================================================
+
+CODE_CARNET_PLEIN = 'carnet_plein'
+
+
+def _verrouiller_carnet(client):
+    """Sérialise les écritures du carnet d'un même client (limite de taille,
+    adresse par défaut) : deux requêtes simultanées s'exécutent l'une après
+    l'autre au lieu de lire toutes deux le même état."""
+    Utilisateur.objects.select_for_update().get(pk=client.pk)
+
+
+def creer_adresse(client, donnees):
+    """Ajoute une adresse au carnet du client. `par_defaut` fait de cette
+    adresse la seule par défaut."""
+    with transaction.atomic():
+        _verrouiller_carnet(client)
+        if AdresseClient.objects.filter(client=client).count() >= ADRESSES_MAX_PAR_CLIENT:
+            raise ValidationError({
+                'detail': f"Votre carnet contient déjà {ADRESSES_MAX_PAR_CLIENT} adresses : supprimez-en une pour en ajouter.",
+                'code': CODE_CARNET_PLEIN,
+            })
+        if donnees.get('par_defaut'):
+            AdresseClient.objects.filter(client=client, par_defaut=True).update(par_defaut=False)
+        return AdresseClient.objects.create(client=client, **donnees)
+
+
+def modifier_adresse(adresse, donnees):
+    """Met à jour une adresse du carnet. `par_defaut` à vrai en fait la seule
+    par défaut du client ; à faux, le client n'a plus d'adresse par défaut."""
+    with transaction.atomic():
+        _verrouiller_carnet(adresse.client)
+        if donnees.get('par_defaut'):
+            AdresseClient.objects.filter(client=adresse.client, par_defaut=True).exclude(pk=adresse.pk).update(
+                par_defaut=False,
+            )
+        for champ, valeur in donnees.items():
+            setattr(adresse, champ, valeur)
+        adresse.save()
+        return adresse
+
+
+def adresse_du_checkout(client, adresse_id):
+    """Adresse du carnet du client, au format de l'adresse saisie au checkout
+    (la commande en garde une copie). 404 quand elle n'existe pas ou n'est pas
+    la sienne : les deux cas sont indiscernables."""
+    adresse = get_object_or_404(AdresseClient, pk=adresse_id, client=client)
+    return {
+        'commune': adresse.commune,
+        'quartier': adresse.quartier,
+        'point_de_repere': adresse.point_de_repere,
+        'telephone': adresse.telephone,
+        'destinataire': adresse.destinataire,
+        'indications': adresse.indications,
+        'latitude': adresse.latitude,
+        'longitude': adresse.longitude,
+    }

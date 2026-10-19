@@ -770,9 +770,11 @@ class IsolationEtSuiviTests(DonneesLivraison, APITestCase):
         donnees = self.detail(self.client_user).data
         self.assertEqual(donnees["livreur"], {"prenom": "User", "telephone": None})
         self.assertEqual(donnees["date_livraison_estimee"], demain.isoformat())
-        # Point GPS : null, ce checkout n'en a pas (PositionLivraisonTests).
+        # Point GPS : null, ce checkout n'en a pas (PositionLivraisonTests) ;
+        # destinataire et indications vides, le client n'en a pas donné.
         self.assertEqual(donnees["adresse"], {"zone": "abidjan", "commune": "Cocody", "quartier": "Angré",
                                               "point_de_repere": "Face pharmacie", "telephone": "0700000000",
+                                              "destinataire": "", "indications": "",
                                               "latitude": None, "longitude": None})
         self.mettre_en_cours()
         self.assertEqual(self.detail(self.client_user).data["livreur"]["telephone"], "0102030405")
