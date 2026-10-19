@@ -1,49 +1,17 @@
-import math
-import re
-from decimal import ROUND_HALF_UP, Decimal
-
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
+from apps.core.adresses import (
+    champ_latitude,
+    champ_longitude,
+    valider_position_complete,
+    valider_telephone,
+)
+
 from .models import Commande, CommandeHistorique, GroupeCommande, CommandeItem
 
-# Point de livraison : territoire de la Côte d'Ivoire avec une marge
-# (environ 4,3 à 10,7° N et 8,6 à 2,5° O).
-LATITUDE_MIN, LATITUDE_MAX = 4.0, 11.0
-LONGITUDE_MIN, LONGITUDE_MAX = -9.0, -2.0
-# 6 décimales : environ 11 cm, la précision des colonnes de GroupeCommande.
-PRECISION_COORDONNEE = Decimal("0.000001")
-
-
-class CoordonneeGpsField(serializers.FloatField):
-    """Latitude ou longitude en degrés décimaux (celles de
-    navigator.geolocation) : un nombre JSON, jamais une chaîne ni un
-    booléen, fini, entre min_value et max_value. Renvoie un Decimal arrondi
-    à 6 décimales."""
-
-    default_error_messages = {
-        "invalid": "Un nombre est attendu (ex. 5.359952), pas une chaîne.",
-        "non_fini": "Valeur non finie refusée (NaN, Infinity).",
-        "min_value": "Position hors de la Côte d'Ivoire : valeur minimale {min_value}.",
-        "max_value": "Position hors de la Côte d'Ivoire : valeur maximale {max_value}.",
-    }
-
-    def to_internal_value(self, data):
-        # bool est un int en Python : true n'est pas une coordonnée.
-        if isinstance(data, bool) or not isinstance(data, (int, float)):
-            self.fail("invalid")
-        if isinstance(data, float) and not math.isfinite(data):
-            self.fail("non_fini")
-        # str() garde la valeur écrite dans le JSON (5.3, pas 5.2999…).
-        valeur = Decimal(str(data))
-        # Bornes contrôlées avant l'arrondi : quantize() échouerait sur un
-        # entier démesuré (1e40). Les validateurs de FloatField, qui portent
-        # les bornes dans le schéma OpenAPI, repassent ensuite sans effet.
-        if valeur < self.min_value:
-            self.fail("min_value", min_value=self.min_value)
-        if valeur > self.max_value:
-            self.fail("max_value", max_value=self.max_value)
-        return valeur.quantize(PRECISION_COORDONNEE, rounding=ROUND_HALF_UP)
+MESSAGE_ADRESSE_OBLIGATOIRE = "L'adresse de livraison est obligatoire."
+MESSAGE_ADRESSE_EN_DOUBLE = "Envoyez soit `adresse_id` (carnet), soit `adresse_livraison` (saisie), pas les deux."
 
 
 class AdresseLivraisonSerializer(serializers.Serializer):
@@ -59,35 +27,25 @@ class AdresseLivraisonSerializer(serializers.Serializer):
 
     `latitude` et `longitude` : point GPS facultatif (bouton « ma position »),
     les deux ou aucune. Il ne change pas le tarif, qui dépend de la commune.
+
+    `destinataire` et `indications` : facultatifs, pour le livreur (personne
+    qui reçoit le colis, consignes d'accès).
     """
 
     commune = serializers.CharField(max_length=100)
     quartier = serializers.CharField(max_length=150)
     point_de_repere = serializers.CharField(max_length=500)
     telephone = serializers.CharField(max_length=20)
-    latitude = CoordonneeGpsField(
-        min_value=LATITUDE_MIN, max_value=LATITUDE_MAX, required=False, allow_null=True,
-        help_text="Facultatif, avec `longitude`. Degrés décimaux, arrondis à 6 décimales.",
-    )
-    longitude = CoordonneeGpsField(
-        min_value=LONGITUDE_MIN, max_value=LONGITUDE_MAX, required=False, allow_null=True,
-        help_text="Facultatif, avec `latitude`. Degrés décimaux, arrondis à 6 décimales.",
-    )
+    destinataire = serializers.CharField(max_length=150, required=False, allow_blank=True)
+    indications = serializers.CharField(max_length=500, required=False, allow_blank=True)
+    latitude = champ_latitude()
+    longitude = champ_longitude()
 
     def validate_telephone(self, telephone):
-        compact = re.sub(r"[\s.\-]", "", telephone)
-        if not re.fullmatch(r"\+?\d{8,15}", compact):
-            raise serializers.ValidationError("Numéro de téléphone invalide (8 à 15 chiffres, « + » initial accepté).")
-        return compact
+        return valider_telephone(telephone)
 
     def validate(self, attrs):
-        latitude, longitude = attrs.get("latitude"), attrs.get("longitude")
-        if (latitude is None) != (longitude is None):
-            manquante = "longitude" if longitude is None else "latitude"
-            raise serializers.ValidationError(
-                {manquante: "La latitude et la longitude vont ensemble : envoyez les deux, ou aucune."}
-            )
-        return attrs
+        return valider_position_complete(attrs)
 
 
 class AdresseLivraisonLectureSerializer(serializers.Serializer):
@@ -104,8 +62,12 @@ class AdresseLivraisonLectureSerializer(serializers.Serializer):
 
 class AdresseLivraisonAvecPositionLectureSerializer(AdresseLivraisonLectureSerializer):
     """Adresse renvoyée au client, au livreur assigné et à l'administration :
-    avec le point GPS, `null` quand le client ne l'a pas donné."""
+    avec le point GPS (`null` quand le client ne l'a pas donné), le
+    destinataire et les indications d'accès (vides quand le client n'en a
+    pas donné)."""
 
+    destinataire = serializers.CharField(allow_blank=True)
+    indications = serializers.CharField(allow_blank=True)
     latitude = serializers.FloatField(allow_null=True)
     longitude = serializers.FloatField(allow_null=True)
 
@@ -117,10 +79,11 @@ def _degres(valeur):
 def adresse_du_groupe(groupe, avec_position=False):
     """Adresse du checkout, ou None pour un groupe sans adresse.
 
-    `avec_position` ajoute le point GPS (nombres, ou null). Réservé au client
-    de la commande, au livreur assigné (masqué avec toute l'adresse une fois
-    la livraison terminée) et à l'administration : jamais au vendeur, pour
-    qui l'adresse texte suffit à préparer le colis.
+    `avec_position` ajoute le point GPS (nombres, ou null), le destinataire et
+    les indications d'accès. Réservé au client de la commande, au livreur
+    assigné (masqué avec toute l'adresse une fois la livraison terminée) et à
+    l'administration : jamais au vendeur, pour qui l'adresse texte suffit à
+    préparer le colis.
     """
     if groupe is None or not groupe.a_une_adresse:
         return None
@@ -132,6 +95,8 @@ def adresse_du_groupe(groupe, avec_position=False):
         "telephone": groupe.livraison_telephone,
     }
     if avec_position:
+        adresse["destinataire"] = groupe.livraison_destinataire
+        adresse["indications"] = groupe.livraison_indications
         adresse["latitude"] = _degres(groupe.livraison_latitude)
         adresse["longitude"] = _degres(groupe.livraison_longitude)
     return adresse
@@ -271,10 +236,25 @@ class CommandeHistoriqueAdministrationSerializer(CommandeHistoriqueSerializer):
 
 
 class SimulerFraisSerializer(serializers.Serializer):
-    """Entrée de la simulation du checkout (mêmes champs que la validation)."""
+    """Entrée de la simulation du checkout (mêmes champs que la validation).
 
-    adresse_livraison = AdresseLivraisonSerializer()
+    L'adresse est choisie dans le carnet du client (`adresse_id`) OU saisie
+    (`adresse_livraison`) : l'une des deux, pas les deux."""
+
+    adresse_id = serializers.UUIDField(
+        required=False, help_text="Adresse du carnet du client. Exclusif avec `adresse_livraison`.",
+    )
+    adresse_livraison = AdresseLivraisonSerializer(
+        required=False, help_text="Adresse saisie. Exclusif avec `adresse_id`.",
+    )
     coupon_code = serializers.CharField(max_length=30, required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        if "adresse_id" in attrs and "adresse_livraison" in attrs:
+            raise serializers.ValidationError({"adresse_id": MESSAGE_ADRESSE_EN_DOUBLE})
+        if "adresse_id" not in attrs and "adresse_livraison" not in attrs:
+            raise serializers.ValidationError({"adresse_livraison": MESSAGE_ADRESSE_OBLIGATOIRE})
+        return attrs
 
 
 # ---------------------------------------------------------------------

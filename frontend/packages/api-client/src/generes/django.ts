@@ -711,7 +711,7 @@ export interface paths {
         put?: never;
         /**
          * Valider le panier (checkout)
-         * @description Crée une commande par boutique (statut `creee`, à payer sous 30 minutes), décrémente le stock et vide le panier. Mêmes montants que `simuler-frais/`. Stock insuffisant ou panier vide : 400 (`errors.non_field_errors`). Panier contenant un article de la boutique du client : 400, `errors.code = ["auto_achat_interdit"]`, aucune commande créée.
+         * @description Crée une commande par boutique (statut `creee`, à payer sous 30 minutes), décrémente le stock et vide le panier. Mêmes montants que `simuler-frais/`. L'adresse est une adresse du carnet du client (`adresse_id`, 404 si elle n'est pas la sienne) OU une adresse saisie (`adresse_livraison`) : l'une des deux. Dans les deux cas la commande en garde une copie, que le carnet ne modifie plus ensuite. Stock insuffisant ou panier vide : 400 (`errors.non_field_errors`). Panier contenant un article de la boutique du client : 400, `errors.code = ["auto_achat_interdit"]`, aucune commande créée.
          */
         post: operations["commandes_valider_panier_create"];
         delete?: never;
@@ -1793,6 +1793,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/statistiques/administration/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Statistiques de la plateforme (administration)
+         * @description Volume des ventes, commissions ANITCHE, commandes par statut, nouveaux clients, vendeurs actifs, reversements en cours et versés, avis signalés en attente (état actuel, sans filtre de période). `date_debut` et `date_fin` (AAAA-MM-JJ) sont inclusives, en jours entiers Africa/Abidjan ; sans elles, les 30 derniers jours. Valeur invalide, `date_fin` avant `date_debut` ou période de plus de 366 jours : 400. Une commande compte si elle est payée et non annulée ; elle se rattache à la période par sa date de création. Montants en entiers XOF, calculés depuis les montants figés dans les commandes.
+         */
+        get: operations["statistiques_administration_retrieve"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/statistiques/vendeur/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Statistiques de ma boutique
+         * @description Chiffre d'affaires, commandes par statut, panier moyen, top 5 des produits, note et nombre d'avis, taux de retour, montants reversés et à venir. Toujours la boutique du compte connecté. `date_debut` et `date_fin` (AAAA-MM-JJ) sont inclusives, en jours entiers Africa/Abidjan ; sans elles, les 30 derniers jours. Valeur invalide, `date_fin` avant `date_debut` ou période de plus de 366 jours : 400. Une commande compte si elle est payée et non annulée ; elle se rattache à la période par sa date de création. Montants en entiers XOF, calculés depuis les montants figés dans les commandes.
+         */
+        get: operations["statistiques_vendeur_retrieve"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/support/attachments/{id}/": {
         parameters: {
             query?: never;
@@ -2014,6 +2054,62 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/utilisateurs/adresses/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Mon carnet d'adresses
+         * @description Les adresses de livraison enregistrées par le client connecté, la plus récente d'abord (celle par défaut en tête).
+         */
+        get: operations["utilisateurs_adresses_list"];
+        put?: never;
+        /**
+         * Ajouter une adresse au carnet
+         * @description 10 adresses au plus par client : au-delà, 400 avec `errors.code = ["carnet_plein"]`. `par_defaut: true` retire le statut par défaut à l'adresse qui l'avait.
+         */
+        post: operations["utilisateurs_adresses_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/utilisateurs/adresses/{id}/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Une adresse de mon carnet
+         * @description 404 si l'adresse n'existe pas ou n'est pas la mienne.
+         */
+        get: operations["utilisateurs_adresses_retrieve"];
+        /**
+         * Remplacer une adresse de mon carnet
+         * @description Les commandes déjà passées gardent l'adresse qu'elles avaient. 404 si l'adresse n'est pas la mienne.
+         */
+        put: operations["utilisateurs_adresses_update"];
+        post?: never;
+        /**
+         * Supprimer une adresse de mon carnet
+         * @description Les commandes déjà passées gardent l'adresse qu'elles avaient. 404 si l'adresse n'est pas la mienne.
+         */
+        delete: operations["utilisateurs_adresses_destroy"];
+        options?: never;
+        head?: never;
+        /**
+         * Modifier une adresse de mon carnet
+         * @description Les commandes déjà passées gardent l'adresse qu'elles avaient. 404 si l'adresse n'est pas la mienne.
+         */
+        patch: operations["utilisateurs_adresses_partial_update"];
         trace?: never;
     };
     "/api/utilisateurs/changement-contact/": {
@@ -2539,8 +2635,70 @@ export interface components {
          */
         ActionEnum: "approuver" | "rejeter" | "en_transit" | "receptionner" | "rembourser" | "cloturer" | "annuler";
         /**
+         * @description Adresse du carnet, vue et écrite par son propriétaire.
+         *
+         *     Les mêmes règles que l'adresse saisie au checkout : téléphone de 8 à 15
+         *     chiffres, point GPS facultatif mais complet, dans la Côte d'Ivoire. Le
+         *     propriétaire vient de la session, jamais du corps de la requête.
+         */
+        AdresseClient: {
+            /** Format: uuid */
+            readonly id: string;
+            libelle: string;
+            destinataire: string;
+            telephone: string;
+            commune: string;
+            quartier: string;
+            point_de_repere: string;
+            indications?: string;
+            /**
+             * Format: double
+             * @description Facultatif, avec `longitude`. Degrés décimaux, arrondis à 6 décimales.
+             */
+            latitude?: number | null;
+            /**
+             * Format: double
+             * @description Facultatif, avec `latitude`. Degrés décimaux, arrondis à 6 décimales.
+             */
+            longitude?: number | null;
+            par_defaut?: boolean;
+            /** Format: date-time */
+            readonly date_creation: string;
+            /** Format: date-time */
+            readonly date_modification: string;
+        };
+        /**
+         * @description Adresse du carnet, vue et écrite par son propriétaire.
+         *
+         *     Les mêmes règles que l'adresse saisie au checkout : téléphone de 8 à 15
+         *     chiffres, point GPS facultatif mais complet, dans la Côte d'Ivoire. Le
+         *     propriétaire vient de la session, jamais du corps de la requête.
+         */
+        AdresseClientRequest: {
+            libelle: string;
+            destinataire: string;
+            telephone: string;
+            commune: string;
+            quartier: string;
+            point_de_repere: string;
+            indications?: string;
+            /**
+             * Format: double
+             * @description Facultatif, avec `longitude`. Degrés décimaux, arrondis à 6 décimales.
+             */
+            latitude?: number | null;
+            /**
+             * Format: double
+             * @description Facultatif, avec `latitude`. Degrés décimaux, arrondis à 6 décimales.
+             */
+            longitude?: number | null;
+            par_defaut?: boolean;
+        };
+        /**
          * @description Adresse renvoyée au client, au livreur assigné et à l'administration :
-         *     avec le point GPS, `null` quand le client ne l'a pas donné.
+         *     avec le point GPS (`null` quand le client ne l'a pas donné), le
+         *     destinataire et les indications d'accès (vides quand le client n'en a
+         *     pas donné).
          */
         AdresseLivraisonAvecPositionLecture: {
             zone: string;
@@ -2548,6 +2706,8 @@ export interface components {
             quartier: string;
             point_de_repere: string;
             telephone: string;
+            destinataire: string;
+            indications: string;
             /** Format: double */
             latitude: number | null;
             /** Format: double */
@@ -2578,12 +2738,17 @@ export interface components {
          *
          *     `latitude` et `longitude` : point GPS facultatif (bouton « ma position »),
          *     les deux ou aucune. Il ne change pas le tarif, qui dépend de la commune.
+         *
+         *     `destinataire` et `indications` : facultatifs, pour le livreur (personne
+         *     qui reçoit le colis, consignes d'accès).
          */
         AdresseLivraisonRequest: {
             commune: string;
             quartier: string;
             point_de_repere: string;
             telephone: string;
+            destinataire?: string;
+            indications?: string;
             /**
              * Format: double
              * @description Facultatif, avec `longitude`. Degrés décimaux, arrondis à 6 décimales.
@@ -2662,6 +2827,14 @@ export interface components {
             /** @description Fin du délai de modification par l'auteur (ISO 8601). */
             readonly modifiable_jusqu_au: string;
             readonly reponse_vendeur: components["schemas"]["ReponseVendeur"] | null;
+        };
+        AvisBoutique: {
+            /**
+             * Format: double
+             * @description `null` sans avis publié dans la période.
+             */
+            note_moyenne: number | null;
+            nombre: number;
         };
         /** @description Avis signalé, tel que la modération le lit. */
         AvisModeration: {
@@ -3144,6 +3317,14 @@ export interface components {
             /** @description Prénom + initiale du nom (ex. « Awa K. »). */
             readonly client: string;
             readonly adresse_livraison: components["schemas"]["AdresseLivraisonLecture"] | null;
+        };
+        CommandesParStatut: {
+            creee: number;
+            confirmee: number;
+            preparation: number;
+            expediee: number;
+            livree: number;
+            annulee: number;
         };
         CompteDecision: {
             id: number;
@@ -3937,6 +4118,21 @@ export interface components {
          * @enum {string}
          */
         OptionEnum: "50_PTS_5PCT" | "100_PTS_10PCT" | "250_PTS_2500FCFA" | "500_PTS_6000FCFA";
+        PaginatedAdresseClientList: {
+            /** @example 123 */
+            count: number;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=4
+             */
+            next?: string | null;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=2
+             */
+            previous?: string | null;
+            results: components["schemas"]["AdresseClient"][];
+        };
         PaginatedArticleANoterList: {
             /** @example 123 */
             count: number;
@@ -4829,6 +5025,33 @@ export interface components {
         };
         PasseportVerifie: components["schemas"]["PasseportPublic"] | components["schemas"]["PasseportRevoque"];
         /**
+         * @description Adresse du carnet, vue et écrite par son propriétaire.
+         *
+         *     Les mêmes règles que l'adresse saisie au checkout : téléphone de 8 à 15
+         *     chiffres, point GPS facultatif mais complet, dans la Côte d'Ivoire. Le
+         *     propriétaire vient de la session, jamais du corps de la requête.
+         */
+        PatchedAdresseClientRequest: {
+            libelle?: string;
+            destinataire?: string;
+            telephone?: string;
+            commune?: string;
+            quartier?: string;
+            point_de_repere?: string;
+            indications?: string;
+            /**
+             * Format: double
+             * @description Facultatif, avec `longitude`. Degrés décimaux, arrondis à 6 décimales.
+             */
+            latitude?: number | null;
+            /**
+             * Format: double
+             * @description Facultatif, avec `latitude`. Degrés décimaux, arrondis à 6 décimales.
+             */
+            longitude?: number | null;
+            par_defaut?: boolean;
+        };
+        /**
          * @description Barème pas encore commencé : tout se modifie, date_debut maintenant ou
          *     plus tard. Barème commencé (date_debut passée) : seule sa clôture est
          *     possible (PUT et PATCH).
@@ -5055,6 +5278,12 @@ export interface components {
             poids_kg?: string | null;
             /** @description Désactiver cette déclinaison sans toucher aux autres */
             est_active?: boolean;
+        };
+        Periode: {
+            /** Format: date */
+            date_debut: string;
+            /** Format: date */
+            date_fin: string;
         };
         /**
          * @description `image` en sortie : l'URL de téléchargement authentifiée
@@ -5518,6 +5747,18 @@ export interface components {
             readonly canal: components["schemas"]["CanalReversementEnum"];
             readonly reference_externe: string;
         };
+        ReversementsAdministration: {
+            /** @description Montants nets pas encore versés (XOF). */
+            en_cours: number;
+            /** @description Montants versés aux vendeurs (XOF). */
+            verses: number;
+        };
+        ReversementsVendeur: {
+            /** @description Montants versés au vendeur (XOF). */
+            verses: number;
+            /** @description Montants nets pas encore versés (XOF). */
+            a_venir: number;
+        };
         /**
          * @description * `client` - Client
          *     * `vendeur` - Vendeur
@@ -5581,9 +5822,20 @@ export interface components {
             livraison_offerte: boolean;
             montant_total: number;
         };
-        /** @description Entrée de la simulation du checkout (mêmes champs que la validation). */
+        /**
+         * @description Entrée de la simulation du checkout (mêmes champs que la validation).
+         *
+         *     L'adresse est choisie dans le carnet du client (`adresse_id`) OU saisie
+         *     (`adresse_livraison`) : l'une des deux, pas les deux.
+         */
         SimulerFraisRequest: {
-            adresse_livraison: components["schemas"]["AdresseLivraisonRequest"];
+            /**
+             * Format: uuid
+             * @description Adresse du carnet du client. Exclusif avec `adresse_livraison`.
+             */
+            adresse_id?: string;
+            /** @description Adresse saisie. Exclusif avec `adresse_id`. */
+            adresse_livraison?: components["schemas"]["AdresseLivraisonRequest"];
             coupon_code?: string;
         };
         /**
@@ -5607,6 +5859,46 @@ export interface components {
             est_active?: boolean;
             /** @description Ordre d'affichage (du plus petit au plus grand). */
             ordre?: number;
+        };
+        StatistiquesAdministration: {
+            periode: components["schemas"]["Periode"];
+            /** @description Ventes brutes moins les retours remboursés (XOF). */
+            volume_ventes: number;
+            /** @description Valeur des articles retournés et remboursés, déduite (XOF). */
+            montant_retours: number;
+            /** @description Commissions et frais fixes des articles vendus, moins la commission rendue sur les retours (XOF). */
+            commissions: number;
+            /** @description Commandes comptées : payées, non annulées. */
+            nombre_commandes: number;
+            /** @description Toutes les commandes créées dans la période. */
+            commandes_par_statut: components["schemas"]["CommandesParStatut"];
+            nouveaux_clients: number;
+            /** @description Boutiques avec au moins une commande comptée. */
+            vendeurs_actifs: number;
+            reversements: components["schemas"]["ReversementsAdministration"];
+            /** @description Signalements ouverts, sans filtre de période. */
+            avis_signales_en_attente: number;
+        };
+        StatistiquesVendeur: {
+            periode: components["schemas"]["Periode"];
+            /** @description Ventes brutes moins les retours remboursés (XOF). */
+            chiffre_affaires: number;
+            /** @description Valeur des articles retournés et remboursés, déduite (XOF). */
+            montant_retours: number;
+            /** @description Commandes comptées : payées, non annulées. */
+            nombre_commandes: number;
+            /** @description Toutes les commandes créées dans la période. */
+            commandes_par_statut: components["schemas"]["CommandesParStatut"];
+            /** @description Ventes brutes ÷ commandes comptées (XOF). */
+            panier_moyen: number;
+            top_produits: components["schemas"]["TopProduit"][];
+            avis: components["schemas"]["AvisBoutique"];
+            /**
+             * Format: double
+             * @description Pourcentage de commandes livrées avec un retour accepté.
+             */
+            taux_retour: number;
+            reversements: components["schemas"]["ReversementsVendeur"];
         };
         /**
          * @description * `certifie_authentique` - Certifié Authentique ANITCHE
@@ -5935,6 +6227,13 @@ export interface components {
         };
         TokenRefreshRequest: {
             refresh: string;
+        };
+        TopProduit: {
+            produit: number;
+            nom: string;
+            quantite: number;
+            /** @description Ventes brutes (XOF) des commandes comptées. */
+            ventes: number;
         };
         /**
          * @description * `effectue` - effectue
@@ -9324,7 +9623,7 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody: {
+        requestBody?: {
             content: {
                 "application/json": components["schemas"]["SimulerFraisRequest"];
                 "application/x-www-form-urlencoded": components["schemas"]["SimulerFraisRequest"];
@@ -9385,7 +9684,7 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody: {
+        requestBody?: {
             content: {
                 "application/json": components["schemas"]["SimulerFraisRequest"];
                 "application/x-www-form-urlencoded": components["schemas"]["SimulerFraisRequest"];
@@ -13552,6 +13851,135 @@ export interface operations {
             };
         };
     };
+    statistiques_administration_retrieve: {
+        parameters: {
+            query?: {
+                /** @description Premier jour inclus. Défaut : 29 jours avant `date_fin`. */
+                date_debut?: string;
+                /** @description Dernier jour inclus. Défaut : aujourd'hui (Abidjan). */
+                date_fin?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StatistiquesAdministration"];
+                };
+            };
+            /** @description Requête invalide (erreurs par champ dans `errors`) ou refus métier (message dans `detail`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Action non autorisée pour ce compte. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    statistiques_vendeur_retrieve: {
+        parameters: {
+            query?: {
+                /** @description Premier jour inclus. Défaut : 29 jours avant `date_fin`. */
+                date_debut?: string;
+                /** @description Dernier jour inclus. Défaut : aujourd'hui (Abidjan). */
+                date_fin?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StatistiquesVendeur"];
+                };
+            };
+            /** @description Requête invalide (erreurs par champ dans `errors`) ou refus métier (message dans `detail`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Action non autorisée pour ce compte. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
     support_attachments_retrieve: {
         parameters: {
             query?: never;
@@ -14461,6 +14889,319 @@ export interface operations {
             };
             /** @description Action non autorisée pour ce compte. */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    utilisateurs_adresses_list: {
+        parameters: {
+            query?: {
+                /** @description Un numéro de page de l'ensemble des résultats. */
+                page?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaginatedAdresseClientList"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    utilisateurs_adresses_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdresseClientRequest"];
+                "application/x-www-form-urlencoded": components["schemas"]["AdresseClientRequest"];
+                "multipart/form-data": components["schemas"]["AdresseClientRequest"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdresseClient"];
+                };
+            };
+            /** @description Requête invalide (erreurs par champ dans `errors`) ou refus métier (message dans `detail`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    utilisateurs_adresses_retrieve: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdresseClient"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    utilisateurs_adresses_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdresseClientRequest"];
+                "application/x-www-form-urlencoded": components["schemas"]["AdresseClientRequest"];
+                "multipart/form-data": components["schemas"]["AdresseClientRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdresseClient"];
+                };
+            };
+            /** @description Requête invalide (erreurs par champ dans `errors`) ou refus métier (message dans `detail`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    utilisateurs_adresses_destroy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No response body */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    utilisateurs_adresses_partial_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["PatchedAdresseClientRequest"];
+                "application/x-www-form-urlencoded": components["schemas"]["PatchedAdresseClientRequest"];
+                "multipart/form-data": components["schemas"]["PatchedAdresseClientRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdresseClient"];
+                };
+            };
+            /** @description Requête invalide (erreurs par champ dans `errors`) ou refus métier (message dans `detail`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

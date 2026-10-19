@@ -3,7 +3,10 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 
+from apps.core.adresses import champ_latitude, champ_longitude, valider_position_complete, valider_telephone
+
 from .models import (
+    AdresseClient,
     JournalConnexion,
     Utilisateur,
     TypeUsageOTP,
@@ -102,6 +105,39 @@ class UtilisateurAdministrationSerializer(serializers.ModelSerializer):
 # =====================================================
 # JOURNAL DES CONNEXIONS
 # =====================================================
+
+class AdresseClientSerializer(serializers.ModelSerializer):
+    """Adresse du carnet, vue et écrite par son propriétaire.
+
+    Les mêmes règles que l'adresse saisie au checkout : téléphone de 8 à 15
+    chiffres, point GPS facultatif mais complet, dans la Côte d'Ivoire. Le
+    propriétaire vient de la session, jamais du corps de la requête.
+    """
+
+    telephone = serializers.CharField(max_length=20)
+    latitude = champ_latitude()
+    longitude = champ_longitude()
+
+    class Meta:
+        model = AdresseClient
+        fields = [
+            'id', 'libelle', 'destinataire', 'telephone', 'commune', 'quartier',
+            'point_de_repere', 'indications', 'latitude', 'longitude', 'par_defaut',
+            'date_creation', 'date_modification',
+        ]
+        read_only_fields = ['id', 'date_creation', 'date_modification']
+
+    def validate_telephone(self, telephone):
+        return valider_telephone(telephone)
+
+    def validate(self, attrs):
+        # Modification partielle : le point se juge avec ce qui est déjà enregistré.
+        valider_position_complete({
+            champ: attrs[champ] if champ in attrs else getattr(self.instance, champ, None)
+            for champ in ('latitude', 'longitude')
+        })
+        return attrs
+
 
 class JournalConnexionSerializer(serializers.ModelSerializer):
     """Connexion vue par son titulaire : date, résultat, méthode, IP et

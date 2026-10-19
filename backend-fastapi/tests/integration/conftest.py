@@ -165,9 +165,10 @@ class Seed:
                     INSERT INTO commandes_groupecommande
                         (id, created_at, client_id, livraison_commune, livraison_point_de_repere,
                          livraison_quartier, livraison_telephone, livraison_zone,
-                         livraison_latitude, livraison_longitude)
+                         livraison_latitude, livraison_longitude,
+                         livraison_destinataire, livraison_indications)
                     VALUES ($1, now(), $2, 'Cocody', 'Test', 'Angré', '+2250700000000', 'abidjan',
-                            $3, $4)
+                            $3, $4, '', '')
                     """,
                     group_id, self.users[client], latitude, longitude,
                 )

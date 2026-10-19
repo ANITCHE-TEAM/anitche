@@ -21,6 +21,7 @@ urlpatterns = [
     path("api/avis/", include("apps.avis.urls")),
     path("api/fidelite/", include("apps.fidelite.urls")),
     path("api/passeports/", include("apps.passeport_qr.urls")),
+    path("api/statistiques/", include("apps.statistiques.urls")),
 ]
 
 # Documentation d'API interactive (drf-spectacular) : jamais en production

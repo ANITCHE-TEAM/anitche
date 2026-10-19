@@ -49,6 +49,7 @@ INSTALLED_APPS = [
     'apps.notifications',
     'apps.support',
     'apps.passeport_qr',
+    'apps.statistiques',
 ]
 
 MIDDLEWARE = [
@@ -323,6 +324,7 @@ SPECTACULAR_SETTINGS = {
         {'name': 'Notifications', 'description': "Notifications de l'utilisateur connecté, compteur de non lues, préférences d'envoi par email."},
         {'name': 'Support', 'description': "Tickets, messages, pièces jointes et notation ; file et assignation pour l'équipe support."},
         {'name': 'Passeports QR', 'description': "Passeports d'authenticité : vérification publique d'un QR, gestion par le vendeur."},
+        {'name': 'Statistiques', 'description': "Statistiques en lecture seule : ventes de la boutique du vendeur, activité de la plateforme pour l'administration, sur une période en Africa/Abidjan."},
     ],
     # Noms stables des énumérations dont le nom de champ revient dans
     # plusieurs modèles (sans eux : StatusC4bEnum, Statut8cbEnum...).

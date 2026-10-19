@@ -18,6 +18,8 @@ from .views import (
     UtilisateurAdministrationListView,
     MesConnexionsListView,
     JournalConnexionAdministrationListView,
+    AdresseClientListCreateView,
+    AdresseClientDetailView,
 )
 
 # =====================================================
@@ -132,4 +134,8 @@ urlpatterns = [
         JournalConnexionAdministrationListView.as_view(),
         name='administration-connexions',
     ),
+
+    # Carnet d'adresses de livraison du client connecté.
+    path('adresses/', AdresseClientListCreateView.as_view(), name='adresses'),
+    path('adresses/<uuid:pk>/', AdresseClientDetailView.as_view(), name='adresse-detail'),
 ]

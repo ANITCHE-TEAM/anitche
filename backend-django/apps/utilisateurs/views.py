@@ -18,7 +18,13 @@ import logging
 from apps.core.exceptions import ErreurMetier
 from apps.core.reseau import adresse_ip_client
 from django.db.models import Q
-from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, inline_serializer
+from drf_spectacular.utils import (
+    OpenApiParameter,
+    OpenApiResponse,
+    extend_schema,
+    extend_schema_view,
+    inline_serializer,
+)
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, TokenRefreshSerializer
 
@@ -32,8 +38,10 @@ logger_securite = logging.getLogger('securite')
 
 from .tasks import envoyer_code_otp_email, envoyer_notification_connexion
 from .services import (
+    creer_adresse,
     enregistrer_connexion,
     enregistrer_echec_mot_de_passe,
+    modifier_adresse,
     resoudre_utilisateur_google,
     revoquer_tokens_actifs,
     InfosGoogleIncompletes,
@@ -47,6 +55,7 @@ from django.shortcuts import get_object_or_404
 from rest_framework.exceptions import AuthenticationFailed, PermissionDenied, ValidationError
 
 from .models import (
+    AdresseClient,
     Utilisateur,
     CodeOTP,
     TypeUsageOTP,
@@ -58,6 +67,7 @@ from .models import (
 )
 
 from .serializers import (
+    AdresseClientSerializer,
     InscriptionSerializer,
     ProfilSerializer,
     DemandeChangementContactSerializer,
@@ -588,6 +598,70 @@ class JournalConnexionAdministrationListView(generics.ListAPIView):
 def _debut_du_jour(jour):
     """Minuit (heure du serveur) du jour donné."""
     return timezone.make_aware(datetime.combine(jour, time.min))
+
+
+# =====================================================
+# CARNET D'ADRESSES
+# =====================================================
+
+@extend_schema_view(
+    get=extend_schema(
+        summary="Mon carnet d'adresses",
+        description="Les adresses de livraison enregistrées par le client connecté, la plus récente d'abord (celle par défaut en tête).",
+        responses={200: AdresseClientSerializer(many=True), **erreurs(401)},
+    ),
+    post=extend_schema(
+        summary="Ajouter une adresse au carnet",
+        description=(
+            "10 adresses au plus par client : au-delà, 400 avec `errors.code = [\"carnet_plein\"]`. "
+            "`par_defaut: true` retire le statut par défaut à l'adresse qui l'avait."
+        ),
+        responses={201: AdresseClientSerializer, **erreurs(400, 401)},
+    ),
+)
+class AdresseClientListCreateView(generics.ListCreateAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = AdresseClientSerializer
+
+    def get_queryset(self):
+        return AdresseClient.objects.filter(client=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.instance = creer_adresse(self.request.user, serializer.validated_data)
+
+
+@extend_schema_view(
+    get=extend_schema(
+        summary="Une adresse de mon carnet",
+        description="404 si l'adresse n'existe pas ou n'est pas la mienne.",
+        responses={200: AdresseClientSerializer, **erreurs(401, 404)},
+    ),
+    put=extend_schema(
+        summary="Remplacer une adresse de mon carnet",
+        description="Les commandes déjà passées gardent l'adresse qu'elles avaient. 404 si l'adresse n'est pas la mienne.",
+        responses={200: AdresseClientSerializer, **erreurs(400, 401, 404)},
+    ),
+    patch=extend_schema(
+        summary="Modifier une adresse de mon carnet",
+        description="Les commandes déjà passées gardent l'adresse qu'elles avaient. 404 si l'adresse n'est pas la mienne.",
+        responses={200: AdresseClientSerializer, **erreurs(400, 401, 404)},
+    ),
+    delete=extend_schema(
+        summary="Supprimer une adresse de mon carnet",
+        description="Les commandes déjà passées gardent l'adresse qu'elles avaient. 404 si l'adresse n'est pas la mienne.",
+        responses={204: None, **erreurs(401, 404)},
+    ),
+)
+class AdresseClientDetailView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = AdresseClientSerializer
+
+    def get_queryset(self):
+        # Filtré sur le client connecté : l'adresse d'un autre n'existe pas (404).
+        return AdresseClient.objects.filter(client=self.request.user)
+
+    def perform_update(self, serializer):
+        serializer.instance = modifier_adresse(serializer.instance, serializer.validated_data)
 
 
 # =====================================================

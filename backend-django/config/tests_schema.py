@@ -182,7 +182,7 @@ class SchemaOpenAPITests(SimpleTestCase):
 
     def test_tags_par_module_decrits(self):
         tags = {tag["name"]: tag["description"] for tag in self.schema["tags"]}
-        self.assertEqual(len(tags), 13)
+        self.assertEqual(len(tags), 14)
         for chemin, methodes in self.schema["paths"].items():
             for methode, operation in methodes.items():
                 if methode in ("get", "post", "put", "patch", "delete"):
