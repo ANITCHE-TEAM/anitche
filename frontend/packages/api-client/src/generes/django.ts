@@ -1793,6 +1793,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/statistiques/administration/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Statistiques de la plateforme (administration)
+         * @description Volume des ventes, commissions ANITCHE, commandes par statut, nouveaux clients, vendeurs actifs, reversements en cours et versés, avis signalés en attente (état actuel, sans filtre de période). `date_debut` et `date_fin` (AAAA-MM-JJ) sont inclusives, en jours entiers Africa/Abidjan ; sans elles, les 30 derniers jours. Valeur invalide, `date_fin` avant `date_debut` ou période de plus de 366 jours : 400. Une commande compte si elle est payée et non annulée ; elle se rattache à la période par sa date de création. Montants en entiers XOF, calculés depuis les montants figés dans les commandes.
+         */
+        get: operations["statistiques_administration_retrieve"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/statistiques/vendeur/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Statistiques de ma boutique
+         * @description Chiffre d'affaires, commandes par statut, panier moyen, top 5 des produits, note et nombre d'avis, taux de retour, montants reversés et à venir. Toujours la boutique du compte connecté. `date_debut` et `date_fin` (AAAA-MM-JJ) sont inclusives, en jours entiers Africa/Abidjan ; sans elles, les 30 derniers jours. Valeur invalide, `date_fin` avant `date_debut` ou période de plus de 366 jours : 400. Une commande compte si elle est payée et non annulée ; elle se rattache à la période par sa date de création. Montants en entiers XOF, calculés depuis les montants figés dans les commandes.
+         */
+        get: operations["statistiques_vendeur_retrieve"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/support/attachments/{id}/": {
         parameters: {
             query?: never;
@@ -2788,6 +2828,14 @@ export interface components {
             readonly modifiable_jusqu_au: string;
             readonly reponse_vendeur: components["schemas"]["ReponseVendeur"] | null;
         };
+        AvisBoutique: {
+            /**
+             * Format: double
+             * @description `null` sans avis publié dans la période.
+             */
+            note_moyenne: number | null;
+            nombre: number;
+        };
         /** @description Avis signalé, tel que la modération le lit. */
         AvisModeration: {
             /** Format: uuid */
@@ -3269,6 +3317,14 @@ export interface components {
             /** @description Prénom + initiale du nom (ex. « Awa K. »). */
             readonly client: string;
             readonly adresse_livraison: components["schemas"]["AdresseLivraisonLecture"] | null;
+        };
+        CommandesParStatut: {
+            creee: number;
+            confirmee: number;
+            preparation: number;
+            expediee: number;
+            livree: number;
+            annulee: number;
         };
         CompteDecision: {
             id: number;
@@ -5223,6 +5279,12 @@ export interface components {
             /** @description Désactiver cette déclinaison sans toucher aux autres */
             est_active?: boolean;
         };
+        Periode: {
+            /** Format: date */
+            date_debut: string;
+            /** Format: date */
+            date_fin: string;
+        };
         /**
          * @description `image` en sortie : l'URL de téléchargement authentifiée
          *     (GET /api/retours/<id>/photos/<photo_id>/), jamais le chemin /media/
@@ -5685,6 +5747,18 @@ export interface components {
             readonly canal: components["schemas"]["CanalReversementEnum"];
             readonly reference_externe: string;
         };
+        ReversementsAdministration: {
+            /** @description Montants nets pas encore versés (XOF). */
+            en_cours: number;
+            /** @description Montants versés aux vendeurs (XOF). */
+            verses: number;
+        };
+        ReversementsVendeur: {
+            /** @description Montants versés au vendeur (XOF). */
+            verses: number;
+            /** @description Montants nets pas encore versés (XOF). */
+            a_venir: number;
+        };
         /**
          * @description * `client` - Client
          *     * `vendeur` - Vendeur
@@ -5785,6 +5859,46 @@ export interface components {
             est_active?: boolean;
             /** @description Ordre d'affichage (du plus petit au plus grand). */
             ordre?: number;
+        };
+        StatistiquesAdministration: {
+            periode: components["schemas"]["Periode"];
+            /** @description Ventes brutes moins les retours remboursés (XOF). */
+            volume_ventes: number;
+            /** @description Valeur des articles retournés et remboursés, déduite (XOF). */
+            montant_retours: number;
+            /** @description Commissions et frais fixes des articles vendus, moins la commission rendue sur les retours (XOF). */
+            commissions: number;
+            /** @description Commandes comptées : payées, non annulées. */
+            nombre_commandes: number;
+            /** @description Toutes les commandes créées dans la période. */
+            commandes_par_statut: components["schemas"]["CommandesParStatut"];
+            nouveaux_clients: number;
+            /** @description Boutiques avec au moins une commande comptée. */
+            vendeurs_actifs: number;
+            reversements: components["schemas"]["ReversementsAdministration"];
+            /** @description Signalements ouverts, sans filtre de période. */
+            avis_signales_en_attente: number;
+        };
+        StatistiquesVendeur: {
+            periode: components["schemas"]["Periode"];
+            /** @description Ventes brutes moins les retours remboursés (XOF). */
+            chiffre_affaires: number;
+            /** @description Valeur des articles retournés et remboursés, déduite (XOF). */
+            montant_retours: number;
+            /** @description Commandes comptées : payées, non annulées. */
+            nombre_commandes: number;
+            /** @description Toutes les commandes créées dans la période. */
+            commandes_par_statut: components["schemas"]["CommandesParStatut"];
+            /** @description Ventes brutes ÷ commandes comptées (XOF). */
+            panier_moyen: number;
+            top_produits: components["schemas"]["TopProduit"][];
+            avis: components["schemas"]["AvisBoutique"];
+            /**
+             * Format: double
+             * @description Pourcentage de commandes livrées avec un retour accepté.
+             */
+            taux_retour: number;
+            reversements: components["schemas"]["ReversementsVendeur"];
         };
         /**
          * @description * `certifie_authentique` - Certifié Authentique ANITCHE
@@ -6113,6 +6227,13 @@ export interface components {
         };
         TokenRefreshRequest: {
             refresh: string;
+        };
+        TopProduit: {
+            produit: number;
+            nom: string;
+            quantite: number;
+            /** @description Ventes brutes (XOF) des commandes comptées. */
+            ventes: number;
         };
         /**
          * @description * `effectue` - effectue
@@ -13712,6 +13833,135 @@ export interface operations {
             };
             /** @description Authentification absente, jeton invalide ou expiré. */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    statistiques_administration_retrieve: {
+        parameters: {
+            query?: {
+                /** @description Premier jour inclus. Défaut : 29 jours avant `date_fin`. */
+                date_debut?: string;
+                /** @description Dernier jour inclus. Défaut : aujourd'hui (Abidjan). */
+                date_fin?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StatistiquesAdministration"];
+                };
+            };
+            /** @description Requête invalide (erreurs par champ dans `errors`) ou refus métier (message dans `detail`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Action non autorisée pour ce compte. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    statistiques_vendeur_retrieve: {
+        parameters: {
+            query?: {
+                /** @description Premier jour inclus. Défaut : 29 jours avant `date_fin`. */
+                date_debut?: string;
+                /** @description Dernier jour inclus. Défaut : aujourd'hui (Abidjan). */
+                date_fin?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StatistiquesVendeur"];
+                };
+            };
+            /** @description Requête invalide (erreurs par champ dans `errors`) ou refus métier (message dans `detail`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Action non autorisée pour ce compte. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

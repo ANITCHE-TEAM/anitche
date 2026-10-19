@@ -6609,6 +6609,136 @@ paths:
                 $ref: '#/components/schemas/Erreur'
           description: 'Limite de débit atteinte : réessayer après le délai indiqué
             par l''en-tête Retry-After.'
+  /api/statistiques/administration/:
+    get:
+      operationId: statistiques_administration_retrieve
+      description: 'Volume des ventes, commissions ANITCHE, commandes par statut,
+        nouveaux clients, vendeurs actifs, reversements en cours et versés, avis signalés
+        en attente (état actuel, sans filtre de période). `date_debut` et `date_fin`
+        (AAAA-MM-JJ) sont inclusives, en jours entiers Africa/Abidjan ; sans elles,
+        les 30 derniers jours. Valeur invalide, `date_fin` avant `date_debut` ou période
+        de plus de 366 jours : 400. Une commande compte si elle est payée et non annulée
+        ; elle se rattache à la période par sa date de création. Montants en entiers
+        XOF, calculés depuis les montants figés dans les commandes.'
+      summary: Statistiques de la plateforme (administration)
+      parameters:
+      - in: query
+        name: date_debut
+        schema:
+          type: string
+          format: date
+        description: 'Premier jour inclus. Défaut : 29 jours avant `date_fin`.'
+      - in: query
+        name: date_fin
+        schema:
+          type: string
+          format: date
+        description: 'Dernier jour inclus. Défaut : aujourd''hui (Abidjan).'
+      tags:
+      - Statistiques
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatistiquesAdministration'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/statistiques/vendeur/:
+    get:
+      operationId: statistiques_vendeur_retrieve
+      description: 'Chiffre d''affaires, commandes par statut, panier moyen, top 5
+        des produits, note et nombre d''avis, taux de retour, montants reversés et
+        à venir. Toujours la boutique du compte connecté. `date_debut` et `date_fin`
+        (AAAA-MM-JJ) sont inclusives, en jours entiers Africa/Abidjan ; sans elles,
+        les 30 derniers jours. Valeur invalide, `date_fin` avant `date_debut` ou période
+        de plus de 366 jours : 400. Une commande compte si elle est payée et non annulée
+        ; elle se rattache à la période par sa date de création. Montants en entiers
+        XOF, calculés depuis les montants figés dans les commandes.'
+      summary: Statistiques de ma boutique
+      parameters:
+      - in: query
+        name: date_debut
+        schema:
+          type: string
+          format: date
+        description: 'Premier jour inclus. Défaut : 29 jours avant `date_fin`.'
+      - in: query
+        name: date_fin
+        schema:
+          type: string
+          format: date
+        description: 'Dernier jour inclus. Défaut : aujourd''hui (Abidjan).'
+      tags:
+      - Statistiques
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatistiquesVendeur'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
   /api/support/attachments/{id}/:
     get:
       operationId: support_attachments_retrieve
@@ -9755,6 +9885,20 @@ components:
       - produit_slug
       - reponse_vendeur
       - statut
+    AvisBoutique:
+      type: object
+      properties:
+        note_moyenne:
+          type:
+          - number
+          - 'null'
+          format: double
+          description: '`null` sans avis publié dans la période.'
+        nombre:
+          type: integer
+      required:
+      - nombre
+      - note_moyenne
     AvisModeration:
       type: object
       description: Avis signalé, tel que la modération le lit.
@@ -10884,6 +11028,28 @@ components:
       - motif_annulation
       - numero_commande
       - status
+    CommandesParStatut:
+      type: object
+      properties:
+        creee:
+          type: integer
+        confirmee:
+          type: integer
+        preparation:
+          type: integer
+        expediee:
+          type: integer
+        livree:
+          type: integer
+        annulee:
+          type: integer
+      required:
+      - annulee
+      - confirmee
+      - creee
+      - expediee
+      - livree
+      - preparation
     CompteDecision:
       type: object
       properties:
@@ -14855,6 +15021,18 @@ components:
         est_active:
           type: boolean
           description: Désactiver cette déclinaison sans toucher aux autres
+    Periode:
+      type: object
+      properties:
+        date_debut:
+          type: string
+          format: date
+        date_fin:
+          type: string
+          format: date
+      required:
+      - date_debut
+      - date_fin
     PhotoRetour:
       type: object
       description: |-
@@ -15865,6 +16043,30 @@ components:
       - reference_externe
       - statut
       - statut_display
+    ReversementsAdministration:
+      type: object
+      properties:
+        en_cours:
+          type: integer
+          description: Montants nets pas encore versés (XOF).
+        verses:
+          type: integer
+          description: Montants versés aux vendeurs (XOF).
+      required:
+      - en_cours
+      - verses
+    ReversementsVendeur:
+      type: object
+      properties:
+        verses:
+          type: integer
+          description: Montants versés au vendeur (XOF).
+        a_venir:
+          type: integer
+          description: Montants nets pas encore versés (XOF).
+      required:
+      - a_venir
+      - verses
     RoleEnum:
       enum:
       - client
@@ -16094,6 +16296,93 @@ components:
       required:
       - id
       - nom
+    StatistiquesAdministration:
+      type: object
+      properties:
+        periode:
+          $ref: '#/components/schemas/Periode'
+        volume_ventes:
+          type: integer
+          description: Ventes brutes moins les retours remboursés (XOF).
+        montant_retours:
+          type: integer
+          description: Valeur des articles retournés et remboursés, déduite (XOF).
+        commissions:
+          type: integer
+          description: Commissions et frais fixes des articles vendus, moins la commission
+            rendue sur les retours (XOF).
+        nombre_commandes:
+          type: integer
+          description: 'Commandes comptées : payées, non annulées.'
+        commandes_par_statut:
+          allOf:
+          - $ref: '#/components/schemas/CommandesParStatut'
+          description: Toutes les commandes créées dans la période.
+        nouveaux_clients:
+          type: integer
+        vendeurs_actifs:
+          type: integer
+          description: Boutiques avec au moins une commande comptée.
+        reversements:
+          $ref: '#/components/schemas/ReversementsAdministration'
+        avis_signales_en_attente:
+          type: integer
+          description: Signalements ouverts, sans filtre de période.
+      required:
+      - avis_signales_en_attente
+      - commandes_par_statut
+      - commissions
+      - montant_retours
+      - nombre_commandes
+      - nouveaux_clients
+      - periode
+      - reversements
+      - vendeurs_actifs
+      - volume_ventes
+    StatistiquesVendeur:
+      type: object
+      properties:
+        periode:
+          $ref: '#/components/schemas/Periode'
+        chiffre_affaires:
+          type: integer
+          description: Ventes brutes moins les retours remboursés (XOF).
+        montant_retours:
+          type: integer
+          description: Valeur des articles retournés et remboursés, déduite (XOF).
+        nombre_commandes:
+          type: integer
+          description: 'Commandes comptées : payées, non annulées.'
+        commandes_par_statut:
+          allOf:
+          - $ref: '#/components/schemas/CommandesParStatut'
+          description: Toutes les commandes créées dans la période.
+        panier_moyen:
+          type: integer
+          description: Ventes brutes ÷ commandes comptées (XOF).
+        top_produits:
+          type: array
+          items:
+            $ref: '#/components/schemas/TopProduit'
+        avis:
+          $ref: '#/components/schemas/AvisBoutique'
+        taux_retour:
+          type: number
+          format: double
+          description: Pourcentage de commandes livrées avec un retour accepté.
+        reversements:
+          $ref: '#/components/schemas/ReversementsVendeur'
+      required:
+      - avis
+      - chiffre_affaires
+      - commandes_par_statut
+      - montant_retours
+      - nombre_commandes
+      - panier_moyen
+      - periode
+      - reversements
+      - taux_retour
+      - top_produits
     StatutCertificationEnum:
       enum:
       - certifie_authentique
@@ -16730,6 +17019,23 @@ components:
           minLength: 1
       required:
       - refresh
+    TopProduit:
+      type: object
+      properties:
+        produit:
+          type: integer
+        nom:
+          type: string
+        quantite:
+          type: integer
+        ventes:
+          type: integer
+          description: Ventes brutes (XOF) des commandes comptées.
+      required:
+      - nom
+      - produit
+      - quantite
+      - ventes
     TraiterRemboursementDecisionEnum:
       enum:
       - effectue
@@ -17434,3 +17740,6 @@ tags:
 - name: Passeports QR
   description: 'Passeports d''authenticité : vérification publique d''un QR, gestion
     par le vendeur.'
+- name: Statistiques
+  description: 'Statistiques en lecture seule : ventes de la boutique du vendeur,
+    activité de la plateforme pour l''administration, sur une période en Africa/Abidjan.'

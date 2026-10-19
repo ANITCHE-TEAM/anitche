@@ -118,6 +118,7 @@ TAGS_PAR_PREFIXE = {
     "notifications": "Notifications",
     "support": "Support",
     "passeports": "Passeports QR",
+    "statistiques": "Statistiques",
 }
 
 METHODES_AVEC_CORPS = {"POST", "PUT", "PATCH"}
