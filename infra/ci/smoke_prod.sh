@@ -883,8 +883,17 @@ certificat() {
     appel "Requête vérifiée avec le nouveau certificat" GET "$URL/api/catalogue/categories/"
     statut_attendu 200; conclure
 
+    # Le rechargement a déjà eu lieu (nouveau certificat servi), mais sa ligne
+    # peut arriver dans le journal un peu après : on l'attend jusqu'à 15 s.
     marquer "Rechargement périodique écrit dans le journal de nginx"
-    compose logs --no-color nginx 2>/dev/null | grep -q "rechargement périodique de nginx" || ko "aucun rechargement journalisé"
+    limite=$((SECONDS + 15))
+    until compose logs --no-color nginx 2>/dev/null | grep -q "rechargement périodique de nginx"; do
+        if [ "$SECONDS" -ge "$limite" ]; then
+            ko "aucun rechargement journalisé après 15 s"
+            break
+        fi
+        sleep 1
+    done
     conclure
 }
 
