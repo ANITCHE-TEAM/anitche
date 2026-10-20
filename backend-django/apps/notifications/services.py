@@ -78,6 +78,20 @@ class ServiceNotification:
         ])
 
     @staticmethod
+    def notifier_moderation(titre, message, type_notification=Type.SYSTEME, lien_redirection="", metadata=None):
+        """Nouveau dossier pour chaque modérateur actif, in-app seulement
+        (même règle que notifier_administration)."""
+        from apps.utilisateurs.models import Role, Utilisateur
+
+        moderateurs = Utilisateur.objects.filter(role=Role.MODERATEUR, is_active=True).only("pk")
+        return Notification.objects.bulk_create([
+            Notification(destinataire=moderateur, titre=titre[:200], message=message,
+                         type_notification=type_notification, lien_redirection=lien_redirection[:255],
+                         metadata=metadata or {})
+            for moderateur in moderateurs
+        ])
+
+    @staticmethod
     def marquer_toutes_lues(destinataire):
         """Marque toutes les notifications non lues d'un utilisateur comme lues."""
         return Notification.objects.filter(destinataire=destinataire, est_lu=False).update(

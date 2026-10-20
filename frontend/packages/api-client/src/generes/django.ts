@@ -1433,7 +1433,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Traiter un remboursement (administration) */
+        /**
+         * Traiter un remboursement (administration)
+         * @description effectue (référence obligatoire) ou refuse. Un remboursement de retour ne se refuse pas : 400. Remboursement déjà traité : 409.
+         */
         post: operations["paiements_admin_remboursements_traiter_create"];
         delete?: never;
         options?: never;
@@ -1711,6 +1714,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/retours/{id}/historique/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Historique d'une demande de retour
+         * @description Étapes de la demande, de la plus ancienne à la plus récente : statuts, action, origine (`source`) et motif. Le compte auteur (`auteur`) n'est renvoyé qu'à l'administration. 404 pour un tiers.
+         */
+        get: operations["retours_historique_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/retours/{id}/photos/": {
         parameters: {
             query?: never;
@@ -1768,9 +1791,29 @@ export interface paths {
         head?: never;
         /**
          * Faire avancer une demande de retour
-         * @description Boutique (vendeur propriétaire ou administration) : approuver, rejeter (motif `reponse` obligatoire), en_transit, receptionner, rembourser, cloturer. Client : en_transit, annuler. Action non permise à ce compte : 403 ; transition invalide : 400.
+         * @description Vendeur : approuver ou rejeter (motif `reponse` obligatoire) une demande avant son échéance (`date_limite_vendeur`), rejeter sa propre approbation. Client : contester un refus avant `date_limite_contestation` (motif de 10 caractères au moins), en_transit, annuler avant l'expédition. Modérateur (dossier en_moderation) et administration (dossier en_arbitrage) : approuver ou rejeter, motif obligatoire. Vendeur et administration : en_transit, receptionner, rembourser, cloturer. Action qui ne revient pas à ce compte : 403 ; transition invalide ou délai écoulé : 400.
          */
         patch: operations["retours_traiter_partial_update"];
+        trace?: never;
+    };
+    "/api/retours/moderation/liste/": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * File des retours en recours (modération et administration)
+         * @description Demandes passées par la modération (escalade ou contestation), toutes boutiques : en_moderation puis en_arbitrage d'abord, les plus anciennes en tête. Filtre `statut`. Sans e-mail du client pour un modérateur. Autres rôles : 403.
+         */
+        get: operations["retours_moderation_liste_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/retours/vendeur/liste/": {
@@ -2626,6 +2669,7 @@ export interface components {
         /**
          * @description * `approuver` - approuver
          *     * `rejeter` - rejeter
+         *     * `contester` - contester
          *     * `en_transit` - en_transit
          *     * `receptionner` - receptionner
          *     * `rembourser` - rembourser
@@ -2633,7 +2677,7 @@ export interface components {
          *     * `annuler` - annuler
          * @enum {string}
          */
-        ActionEnum: "approuver" | "rejeter" | "en_transit" | "receptionner" | "rembourser" | "cloturer" | "annuler";
+        ActionRetourEnum: "approuver" | "rejeter" | "contester" | "en_transit" | "receptionner" | "rembourser" | "cloturer" | "annuler";
         /**
          * @description Adresse du carnet, vue et écrite par son propriétaire.
          *
@@ -3534,7 +3578,7 @@ export interface components {
             readonly commande: string;
             readonly client: number;
             /** Format: email */
-            readonly client_email: string;
+            readonly client_email: string | null;
             /** Boutique concernée */
             readonly boutique: number;
             readonly boutique_nom: string;
@@ -3567,6 +3611,11 @@ export interface components {
             readonly date_traitement: string | null;
             /** Format: date-time */
             readonly date_cloture: string | null;
+            /** Format: date-time */
+            readonly date_limite_vendeur: string | null;
+            /** Format: date-time */
+            readonly date_limite_contestation: string | null;
+            readonly actions_possibles: components["schemas"]["ActionRetourEnum"][];
         };
         /**
          * @description * `remboursement` - Remboursement
@@ -4091,7 +4140,7 @@ export interface components {
             readonly est_lu: boolean;
             /** Format: date-time */
             readonly date_lecture: string | null;
-            /** @description Route logique de la ressource, à associer à une page par chaque portail : un chemin (jamais une URL, ni un hôte, ni une requête), ou vide si la notification ne mène nulle part. Liste fermée (apps/notifications/liens.py) : /commandes, /commandes/{uuid}, /livraisons/{uuid}, /retours/{uuid}, /paiements/{uuid}, /fidelite/mon-compte, /support/tickets/{uuid}, /vendeur/commandes/{uuid}, /vendeur/produits/{id}, /vendeur/retours/{uuid}, /vendeur/reversements, /administration/retours/{uuid}, /administration/remboursements, /administration/reversements, /administration/livraisons/{uuid}. Un préfixe inconnu mène au centre de notifications. */
+            /** @description Route logique de la ressource, à associer à une page par chaque portail : un chemin (jamais une URL, ni un hôte, ni une requête), ou vide si la notification ne mène nulle part. Liste fermée (apps/notifications/liens.py) : /commandes, /commandes/{uuid}, /livraisons/{uuid}, /retours/{uuid}, /paiements/{uuid}, /fidelite/mon-compte, /support/tickets/{uuid}, /vendeur/commandes/{uuid}, /vendeur/produits/{id}, /vendeur/retours/{uuid}, /vendeur/reversements, /moderation/retours/{uuid}, /administration/retours/{uuid}, /administration/remboursements, /administration/reversements, /administration/livraisons/{uuid}. Un préfixe inconnu mène au centre de notifications. */
             readonly lien_redirection: string;
             /** @description Données contextuelles additionnelles (IDs techniques, totaux, etc.) */
             readonly metadata: unknown;
@@ -4627,6 +4676,21 @@ export interface components {
              */
             previous?: string | null;
             results: components["schemas"]["RemboursementAdmin"][];
+        };
+        PaginatedRetourHistoriqueList: {
+            /** @example 123 */
+            count: number;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=4
+             */
+            next?: string | null;
+            /**
+             * Format: uri
+             * @example http://api.example.org/accounts/?page=2
+             */
+            previous?: string | null;
+            results: components["schemas"]["RetourHistorique"][];
         };
         PaginatedReversementAdminList: {
             /** @example 123 */
@@ -5248,7 +5312,7 @@ export interface components {
             est_actif?: boolean;
         };
         PatchedTraiterDemandeRetourRequest: {
-            action?: components["schemas"]["ActionEnum"];
+            action?: components["schemas"]["ActionRetourEnum"];
             /** @default  */
             reponse: string;
             /** @default true */
@@ -5602,6 +5666,21 @@ export interface components {
             ajustements_en_attente: number;
             delai_retractation_jours: number;
         };
+        /**
+         * @description Parties et modération : l'origine de l'étape (`source`) et son motif,
+         *     jamais le compte qui l'a faite.
+         */
+        RetourHistorique: {
+            /** Format: uuid */
+            readonly id: string;
+            readonly ancien_statut: components["schemas"]["StatutRetourEnum"];
+            readonly nouveau_statut: components["schemas"]["StatutRetourEnum"];
+            readonly action: string;
+            readonly source: components["schemas"]["SourceHistoriqueRetourEnum"];
+            readonly commentaire: string;
+            /** Format: date-time */
+            readonly created_at: string;
+        };
         RetourItem: {
             /** Format: uuid */
             readonly id: string;
@@ -5848,6 +5927,15 @@ export interface components {
          * @enum {string}
          */
         SourceEnum: "client" | "vendeur" | "admin" | "paiement" | "livraison" | "systeme";
+        /**
+         * @description * `client` - Client
+         *     * `vendeur` - Vendeur
+         *     * `moderation` - Modération
+         *     * `administration` - Administration
+         *     * `systeme` - Système
+         * @enum {string}
+         */
+        SourceHistoriqueRetourEnum: "client" | "vendeur" | "moderation" | "administration" | "systeme";
         SousCategorie: {
             readonly id: number;
             nom: string;
@@ -5973,9 +6061,13 @@ export interface components {
          *     * `rembourse` - Remboursé
          *     * `cloture` - Clôturé
          *     * `annule` - Annulée par le client
+         *     * `refuse_vendeur` - Refusée par le vendeur (contestable)
+         *     * `en_moderation` - En examen par la modération
+         *     * `refuse_moderation` - Refusée par la modération (contestable)
+         *     * `en_arbitrage` - En arbitrage par l'administration
          * @enum {string}
          */
-        StatutRetourEnum: "demande" | "approuve" | "rejete" | "en_transit" | "receptionne" | "rembourse" | "cloture" | "annule";
+        StatutRetourEnum: "demande" | "approuve" | "rejete" | "en_transit" | "receptionne" | "rembourse" | "cloture" | "annule" | "refuse_vendeur" | "en_moderation" | "refuse_moderation" | "en_arbitrage";
         /**
          * @description * `en_attente_livraison` - En attente de livraison
          *     * `en_retractation` - Délai de rétractation en cours
@@ -13617,6 +13709,57 @@ export interface operations {
             };
         };
     };
+    retours_historique_list: {
+        parameters: {
+            query?: {
+                /** @description Un numéro de page de l'ensemble des résultats. */
+                page?: number;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaginatedRetourHistoriqueList"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Ressource introuvable ou non visible pour ce compte. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
     retours_photos_create: {
         parameters: {
             query?: never;
@@ -13793,6 +13936,56 @@ export interface operations {
             };
             /** @description Ressource introuvable ou non visible pour ce compte. */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Limite de débit atteinte : réessayer après le délai indiqué par l'en-tête Retry-After. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+        };
+    };
+    retours_moderation_liste_list: {
+        parameters: {
+            query?: {
+                /** @description Un numéro de page de l'ensemble des résultats. */
+                page?: number;
+                statut?: "annule" | "approuve" | "cloture" | "demande" | "en_arbitrage" | "en_moderation" | "en_transit" | "receptionne" | "refuse_moderation" | "refuse_vendeur" | "rejete" | "rembourse";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaginatedDemandeRetourList"];
+                };
+            };
+            /** @description Authentification absente, jeton invalide ou expiré. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Erreur"];
+                };
+            };
+            /** @description Action non autorisée pour ce compte. */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

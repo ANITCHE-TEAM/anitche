@@ -40,8 +40,8 @@ Client ──paie en ligne (Wave, Orange Money, MTN MoMo, Moov Money, carte)─�
 | `valider_paiement` (webhook, réconciliation) | Commandes du paiement (`select_for_update(of=("self",))`, `order_by("pk")`) → Paiement → Livraison (création) → Reversement (création) → Remboursement |
 | `annuler_commande` (client, administration, expiration, boutique indisponible, `abandonner_livraison`) | Livraison → Commande (`UPDATE` conditionnel) → Livraison relue si la première lecture n'a rien trouvé → Stocks (triés par `variante_id`) → Paiement (`traiter_paiements_apres_annulation` → `_passer_statut`) → Reversement |
 | `marquer_echoue`, `annuler_paiement_client` | Paiement seul |
-| Retours (`retours.services`) | DemandeRetour (ou Commande à la création) → Stocks (triés par `variante_id`) → Remboursement, Reversement ; jamais le Paiement |
-| Livraison (transitions, contestation) | Livraison → Commande (`UPDATE`) ; jamais le Paiement |
+| Retours (`retours.services`) | DemandeRetour (ou Commande à la création) → Stocks (triés par `variante_id`) → Paiement (`creer_remboursement`, plafond) → Remboursement, Reversement |
+| Livraison (transitions, contestation) | Livraison → Commande (`UPDATE`) ; contestation fondée : ContestationLivraison → Paiement (`creer_remboursement`, plafond) → Reversement |
 | Reversements (`paiements.reversements`) | Reversement, AjustementVendeur ; jamais Commande ni Paiement |
 
 La Livraison est prise avant la Commande par `annuler_commande`, et créée après elle par `valider_paiement`. Il n'y a pas de cycle : `valider_paiement` ne la crée que pour une commande « créée », qui n'a pas encore de fiche à verrouiller. Seule exception, voulue : si `annuler_commande` n'a trouvé aucune fiche, il la relit **après** l'`UPDATE` de la commande, car une validation concurrente a pu la créer pendant que cet `UPDATE` attendait son verrou. Détail : [`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md) § 12.
@@ -80,7 +80,7 @@ Réponse d'un paiement (client) : `id`, `reference`, `client`, `client_email`, `
 | Méthode | Chemin | Rôle |
 |---|---|---|
 | GET | `admin/remboursements/` | `?statut=a_traiter` pour la file de travail |
-| POST | `admin/remboursements/<uuid>/traiter/` | `decision` = `effectue` (`reference_externe` obligatoire) ou `refuse` (`commentaire` obligatoire). **409** si déjà traité. Le client est notifié |
+| POST | `admin/remboursements/<uuid>/traiter/` | `decision` = `effectue` (`reference_externe` obligatoire) ou `refuse` (`commentaire` obligatoire). **400** : `refuse` pour un remboursement de retour. **409** si déjà traité. Le client est notifié |
 | GET | `admin/reversements/` | `?statut=disponible` pour les versements à faire |
 | POST | `admin/reversements/<uuid>/verser/` | Versement **manuel** : l'admin a envoyé l'argent, il saisit `reference_externe`. **409** si pas disponible |
 | POST | `admin/reversements/<uuid>/transferer/` | Versement par l'**API de transfert** du fournisseur ; `operateur` facultatif (déduit du numéro : 07 Orange, 05 MTN, 01 Moov ; Wave à préciser). **409** si refus **certain** (rien n'a été créé chez le fournisseur : le reversement reste `disponible`). **200 avec `statut = "en_cours"`** si l'issue est incertaine (délai dépassé, 5xx, réponse illisible) ou pas encore confirmée : **ne pas relancer**, le reversement est réconcilié (§ 8) ; une relance répond 409. `date_debut_transfert` (lecture seule) dit depuis quand il est en cours |
@@ -134,9 +134,12 @@ Un **`Remboursement`** par commande à rembourser : `reference` (`RMB-…`), `pa
 | `commande_annulee` | Commande annulée alors que son paiement est encaissé (client, administration, ou paiement arrivé après l'expiration) | `montant_total` de la commande |
 | `paiement_en_double` | Un paiement réussit pour une commande déjà payée par un autre (paiement abandonné puis succès tardif) | `montant_total` de la commande |
 | `retour` | Retour marqué remboursé (module retours) | `montant_remboursement` du retour |
-| `livraison_non_recue` | Contestation « colis non reçu » jugée fondée par l'administration ([`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md)) ; le reversement est annulé | `montant_total` de la commande |
+| `livraison_non_recue` | Contestation « colis non reçu » jugée fondée par l'administration ([`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md)) ; le reversement est annulé | `montant_total` de la commande, ramené au reste dû |
 
 - Unicité : une seule fois par (paiement, commande) hors retours, une seule fois par retour. Une annulation signalée deux fois ne crée rien de plus.
+- **Montant** : un nombre entier et positif de FCFA (contrainte `remboursement_montant_entier_positif`, contrôle dans `creer_remboursement`).
+- **Plafond à l'encaissé** : la somme des remboursements non refusés d'un paiement pour une commande ne dépasse jamais son `montant_total` (articles et livraison). Le contrôle se fait sous le verrou du Paiement : deux remboursements simultanés de la même commande voient l'un après l'autre la somme déjà accordée. Au-delà : un retour est **refusé** (400 côté retours, alerte) ; une annulation ou une livraison non reçue est **ramenée au reste dû**, et rien n'est créé, avec une alerte « Remboursement non créé », quand il ne reste rien. Le client d'une contestation fondée en est informé.
+- **Remboursement de retour** : il ne se refuse pas (400) ; la décision est prise dans le circuit du retour et la part du vendeur est déjà reprise ([`MODULE_RETOURS.md`](./MODULE_RETOURS.md) § 7). Un échec technique se règle par une nouvelle tentative ou un remboursement manuel marqué `effectue` avec la référence et un commentaire.
 - **Traitement au lancement : manuel.** L'administration est alertée (journal `securite` + notification), rembourse depuis le **tableau de bord du fournisseur**, puis saisit la référence (`admin/remboursements/<id>/traiter/`). Le client voit l'état dans `remboursements` de son paiement et reçoit une notification.
 - **Plus tard** : `FournisseurPaiement.rembourser()` existe dans l'interface ; l'adaptateur GeniusPay n'implémente pas le remboursement : il répond « non supporté ».
 - **Retour remboursé et vendeur** : la commission des articles retournés est **rendue au vendeur**, le **frais fixe reste acquis à ANITCHE** : sa part baisse de (prix − commission) des articles retournés (§ 7).
@@ -391,6 +394,9 @@ En production réelle, GeniusPay n'accepte ni clé ni environnement de sandbox. 
 |---|---|---|
 | Même commande payée seule puis via son groupe | Refus si une commande est couverte par un paiement actif | `test_commande_payee_seule_puis_via_son_groupe_refusee` |
 | Double encaissement sans remboursement | `Remboursement` `paiement_en_double` | `test_second_paiement_d_une_commande_deja_payee_rembourse` |
+| Commande remboursée plus qu'elle n'a coûté (retour puis livraison non reçue, en séquence ou en simultané) | Plafond à l'encaissé sous verrou du Paiement | `retours.test_circuit` : `RemboursementRetourTests.test_plafond_a_l_encaisse`, `PlafondConcurrenceTests` |
+| Remboursement de retour refusé alors que la part du vendeur est reprise | Refus interdit pour le motif `retour` (400) | `RetourPendantLeVersementTests.test_remboursement_de_retour_ne_se_refuse_pas` |
+| Montant de remboursement nul, négatif ou non entier | Contrôle de service et contrainte en base | `retours.test_circuit.RemboursementRetourTests` |
 | Initiations simultanées | Commandes verrouillées à l'initiation | `test_initiations_concurrentes_un_seul_paiement` (Postgres, concurrence) |
 | Webhook d'un autre fournisseur accepté | Paiement cherché avec son `fournisseur` | `test_notification_d_un_autre_fournisseur_refusee` |
 | Devise non contrôlée | Montant **et** devise recontrôlés | `test_devise_ou_montant_differents_refuses` |
@@ -437,6 +443,7 @@ En production réelle, GeniusPay n'accepte ni clé ni environnement de sandbox. 
 - **paiements 0009** (octobre 2026) : `Paiement.date_derniere_reconciliation`, nullable, vide pour l'existant. Ajout de colonne sans valeur par défaut ni réécriture de table. Retour arrière : la colonne est supprimée (on perd seulement l'ordre de rotation de la réconciliation).
 - **paiements 0010** : `Reversement.date_debut_transfert`, `date_derniere_reconciliation`, `date_derniere_alerte`, nullables. Données : les reversements déjà `en_cours` reçoivent `date_debut_transfert` = `date_mise_a_jour` (la réconciliation les prend donc tout de suite, l'alerte de blocage aussi s'ils sont anciens) ; les autres restent vides. Retour arrière : colonnes supprimées.
 - **notifications 0004** : texte d'aide de `lien_redirection` (route `/administration/reversements`), sans SQL.
+- **paiements 0011** : contrainte `remboursement_montant_entier_positif` ; la migration s'arrête en listant les références fautives si un remboursement existant la viole. Retour arrière : contrainte supprimée.
 
 Base de dev (28/09/2026, migrée, ramenée à 0006, puis migrée de nouveau) : 1 barème de plateforme 12 % + 200 FCFA clôturé, 1 barème 14 % en vigueur, aucun barème de boutique ; les 28 articles déjà vendus gardent 12 % + 200 FCFA (40 680 FCFA de commission, 10 200 de frais fixes), les 18 reversements sont inchangés.
 
@@ -464,7 +471,6 @@ Postman : `postman_paiements.json` (hors dépôt, reconstruite) — mise en plac
 - **Remboursement et transfert automatiques** : manuels au lancement ; API de remboursement et de transfert à brancher quand le fournisseur les propose. L'adaptateur de transfert devra : envoyer `reversement.reference` comme référence marchande (clé d'idempotence), lever `TransfertRefuse` pour les seuls refus certains, ne renvoyer `ECHEC` que pour un statut final explicite (pour un payout, `cancelled` et `expired` restent en attente tant que le support ne les a pas confirmés finaux), et implémenter `verifier_transfert` par cette référence (§ 8, « Réconciliation des reversements »).
 - **Notification traitée de façon synchrone** : passer en tâche Celery si le temps de réponse de la vérification le justifie (mesure en sandbox).
 - **Réconciliation, à confirmer en sandbox GeniusPay** : la politique de rejeu des notifications (hypothèse non vérifiée), le délai après lequel une transaction non payée passe `expired`, la limite de débit de `GET /payments/{référence}`. Selon ces mesures, ajuster `PAIEMENT_RECONCILIATION_*` (§ 8).
-- **Module retours** (vu a minima) : un vendeur peut encore marquer un retour « remboursé » (seul l'argent reste entre les mains de l'administration, via `Remboursement`) ; le délai de rétractation de 7 jours n'y est pas appliqué ; à traiter avec ce module.
 - **Opérateur Wave** non déductible du numéro pour un transfert : à préciser par l'admin (`operateur: "wave"`).
 
 ## 16. Justification des choix

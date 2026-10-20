@@ -1,5 +1,35 @@
 from django.contrib import admin
-from .models import DemandeRetour, RetourItem, PhotoRetour
+from .models import DemandeRetour, RetourHistorique, RetourItem, PhotoRetour
+
+
+class LectureSeuleMixin:
+    """Historique : écrit par apps.retours.services seulement, jamais modifié
+    ni supprimé depuis l'admin."""
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+class RetourHistoriqueInline(LectureSeuleMixin, admin.TabularInline):
+    model = RetourHistorique
+    extra = 0
+    fields = ("created_at", "ancien_statut", "nouveau_statut", "action", "source", "auteur", "commentaire")
+    readonly_fields = fields
+
+
+@admin.register(RetourHistorique)
+class RetourHistoriqueAdmin(LectureSeuleMixin, admin.ModelAdmin):
+    list_display = ("demande_retour", "ancien_statut", "nouveau_statut", "action", "source", "auteur", "created_at")
+    list_filter = ("nouveau_statut", "action", "source")
+    search_fields = ("demande_retour__numero_retour",)
+    readonly_fields = ("id", "demande_retour", "ancien_statut", "nouveau_statut", "action", "source", "auteur",
+                       "commentaire", "created_at")
 
 
 class RetourItemInline(admin.TabularInline):
@@ -38,8 +68,9 @@ class DemandeRetourAdmin(admin.ModelAdmin):
     readonly_fields = (
         "id", "numero_retour", "date_creation", "date_traitement", "date_cloture", "date_mise_a_jour",
         "statut", "montant_remboursement", "frais_livraison_rembourses",
+        "date_limite_vendeur", "date_limite_contestation", "date_moderation", "date_arbitrage", "date_relance",
     )
-    inlines = [RetourItemInline, PhotoRetourInline]
+    inlines = [RetourItemInline, PhotoRetourInline, RetourHistoriqueInline]
     ordering = ("-date_creation",)
 
     # Une demande porte le montant remboursé et justifie le remboursement

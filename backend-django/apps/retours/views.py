@@ -2,27 +2,30 @@ import logging
 import uuid
 
 from django.db import transaction
+from django.db.models import Case, Value, When
 from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
 from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.core.exceptions import ErreurMetier
-from drf_spectacular.utils import extend_schema, extend_schema_view
+from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 
 from config.schema import FICHIER_IMAGE, erreurs
 from apps.vendeurs.permissions import ROLES_ADMINISTRATION
 
 from . import services
-from .models import DemandeRetour, PhotoRetour
+from .models import DemandeRetour, PhotoRetour, RetourHistorique
 from .serializers import (
     CreerDemandeRetourSerializer,
     DemandeRetourSerializer,
     PhotoRetourSerializer,
+    RetourHistoriqueAdministrationSerializer,
+    RetourHistoriqueSerializer,
     TraiterDemandeRetourSerializer,
 )
 
@@ -115,12 +118,71 @@ class EspaceVendeurRetoursListView(generics.ListAPIView):
         return qs.filter(boutique__proprietaire=self.request.user)
 
 
+class EstModerationOuAdministration(BasePermission):
+    def has_permission(self, request, view):
+        return getattr(request.user, "role", None) in services.ROLES_MODERATION
+
+
+@extend_schema(
+    summary="File des retours en recours (modération et administration)",
+    description=(
+        "Demandes passées par la modération (escalade ou contestation), toutes boutiques : en_moderation "
+        "puis en_arbitrage d'abord, les plus anciennes en tête. Filtre `statut`. Sans e-mail du client pour "
+        "un modérateur. Autres rôles : 403."
+    ),
+    parameters=[OpenApiParameter("statut", enum=[valeur for valeur, _ in DemandeRetour.Statut.choices])],
+)
+class ModerationRetoursListView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated, EstModerationOuAdministration]
+    serializer_class = DemandeRetourSerializer
+
+    def get_queryset(self):
+        qs = services.demandes_visibles(self.request.user).filter(date_moderation__isnull=False)
+        statut = self.request.query_params.get("statut")
+        if statut:
+            if statut not in DemandeRetour.Statut.values:
+                raise ValidationError({"statut": "Statut inconnu."})
+            qs = qs.filter(statut=statut)
+        priorite = Case(
+            When(statut=DemandeRetour.Statut.EN_MODERATION, then=Value(0)),
+            When(statut=DemandeRetour.Statut.EN_ARBITRAGE, then=Value(1)),
+            default=Value(2),
+        )
+        return qs.order_by(priorite, "date_moderation", "pk")
+
+
+@extend_schema(
+    summary="Historique d'une demande de retour",
+    description=(
+        "Étapes de la demande, de la plus ancienne à la plus récente : statuts, action, origine (`source`) et "
+        "motif. Le compte auteur (`auteur`) n'est renvoyé qu'à l'administration. 404 pour un tiers."
+    ),
+    responses={200: RetourHistoriqueSerializer(many=True)},
+)
+class HistoriqueRetourView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def get_serializer_class(self):
+        if getattr(self.request.user, "role", None) in ROLES_ADMINISTRATION:
+            return RetourHistoriqueAdministrationSerializer
+        return RetourHistoriqueSerializer
+
+    def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):  # génération du schéma OpenAPI
+            return RetourHistorique.objects.none()
+        demande = get_object_or_404(services.demandes_visibles(self.request.user), pk=self.kwargs["pk"])
+        return RetourHistorique.objects.filter(demande_retour=demande)
+
+
 @extend_schema(
     summary="Faire avancer une demande de retour",
     description=(
-        "Boutique (vendeur propriétaire ou administration) : approuver, rejeter (motif `reponse` obligatoire), "
-        "en_transit, receptionner, rembourser, cloturer. Client : en_transit, annuler. "
-        "Action non permise à ce compte : 403 ; transition invalide : 400."
+        "Vendeur : approuver ou rejeter (motif `reponse` obligatoire) une demande avant son échéance "
+        "(`date_limite_vendeur`), rejeter sa propre approbation. Client : contester un refus avant "
+        "`date_limite_contestation` (motif de 10 caractères au moins), en_transit, annuler avant l'expédition. "
+        "Modérateur (dossier en_moderation) et administration (dossier en_arbitrage) : approuver ou rejeter, "
+        "motif obligatoire. Vendeur et administration : en_transit, receptionner, rembourser, cloturer. "
+        "Action qui ne revient pas à ce compte : 403 ; transition invalide ou délai écoulé : 400."
     ),
     request=TraiterDemandeRetourSerializer,
     responses={200: DemandeRetourSerializer, **erreurs(403, 404)},
@@ -128,9 +190,9 @@ class EspaceVendeurRetoursListView(generics.ListAPIView):
 class TraiterDemandeRetourView(APIView):
     """Actions sur une demande (table des transitions : apps.retours.services).
 
-    Boutique (vendeur propriétaire ou administration) : approuver, rejeter
-    (motif obligatoire), en_transit, receptionner, rembourser, cloturer.
-    Client de la demande : en_transit (« j'ai expédié le colis »), annuler.
+    Le vendeur décide, le client peut contester devant la modération puis
+    devant l'administration ; vendeur et administration font avancer le
+    colis et le remboursement.
     """
 
     permission_classes = [IsAuthenticated]

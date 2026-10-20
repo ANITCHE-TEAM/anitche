@@ -330,6 +330,7 @@ SPECTACULAR_SETTINGS = {
     # plusieurs modèles (sans eux : StatusC4bEnum, Statut8cbEnum...).
     'ENUM_NAME_OVERRIDES': {
         'StatutCommandeEnum': 'apps.commandes.models.Commande.Status',
+        'SourceEnum': 'apps.commandes.models.CommandeHistorique.Source',
         'StatutLivraisonEnum': 'apps.livraison.models.Livraison.Status',
         'StatutContestationEnum': 'apps.livraison.models.ContestationLivraison.Statut',
         'StatutPaiementEnum': 'apps.paiements.models.Paiement.Statut',
@@ -339,6 +340,8 @@ SPECTACULAR_SETTINGS = {
         'CanalReversementEnum': 'apps.paiements.models.Reversement.Canal',
         'StatutRetourEnum': 'apps.retours.models.DemandeRetour.Statut',
         'MotifRetourEnum': 'apps.retours.models.DemandeRetour.Motif',
+        'ActionRetourEnum': 'apps.retours.services.ACTIONS_UTILISATEUR',
+        'SourceHistoriqueRetourEnum': 'apps.retours.models.RetourHistorique.Source',
         'StatutGainFideliteEnum': 'apps.fidelite.models.GainFidelite.Statut',
         'StatutTicketEnum': 'apps.support.models.SupportTicket.Status',
         'CanalNotificationEnum': 'apps.notifications.models.Notification.Canal',
@@ -421,6 +424,12 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'apps.fidelite.tasks.crediter_points_echus',
         'schedule': crontab(minute=15),
     },
+    # Retours : escalade à la modération sans réponse du vendeur, refus non
+    # contestés rendus définitifs, rappels et alertes de délai.
+    'retours-appliquer-echeances': {
+        'task': 'apps.retours.tasks.appliquer_echeances_retours',
+        'schedule': crontab(minute='2-59/15'),
+    },
     'utilisateurs-purger-tokens-expires': {
         'task': 'apps.utilisateurs.tasks.purger_tokens_expires',
         'schedule': crontab(hour=3, minute=15),
@@ -499,6 +508,11 @@ REVERSEMENT_DELAI_RETRACTATION_JOURS = config('REVERSEMENT_DELAI_RETRACTATION_JO
 # Retours : une demande est possible jusqu'à N jours après la livraison
 # (apps.retours). Même valeur que le délai de rétractation par défaut.
 RETOUR_DELAI_JOURS = config('RETOUR_DELAI_JOURS', default=7, cast=int)
+# Circuit de décision des retours (heures calendaires) : réponse du vendeur
+# à partir de la demande (sinon escalade à la modération), puis contestation
+# d'un refus par le client (sinon le refus devient définitif).
+RETOUR_DELAI_REPONSE_VENDEUR_HEURES = config('RETOUR_DELAI_REPONSE_VENDEUR_HEURES', default=48, cast=int)
+RETOUR_DELAI_CONTESTATION_HEURES = config('RETOUR_DELAI_CONTESTATION_HEURES', default=72, cast=int)
 # Avis (apps.avis) : un client note un produit livré jusqu'à N jours après la
 # livraison, puis peut modifier son avis pendant N jours après sa publication.
 AVIS_DELAI_JOURS = config('AVIS_DELAI_JOURS', default=60, cast=int)
