@@ -23,7 +23,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
-from django.db.models import F, Q
+from django.db.models import F, Q, Sum
 from django.utils import timezone
 
 from apps.commandes.models import Commande, GroupeCommande
@@ -542,7 +542,15 @@ def creer_remboursement(paiement, commande, motif, montant=None, retour=None):
 
     Montant en FCFA entiers, sinon PaiementRefuse. Un montant nul : refusé
     pour un retour ; ailleurs (annulation, doublon), rien n'est à rendre et
-    rien n'est créé : (None, False)."""
+    rien n'est créé : (None, False).
+
+    Plafond : les remboursements non refusés d'un paiement pour une commande
+    ne dépassent jamais ce que la commande a coûté (articles et livraison).
+    Un retour qui le dépasserait est refusé (PaiementRefuse) ; une annulation
+    ou une livraison non reçue est ramenée au reste dû, et rien n'est créé,
+    avec une alerte, quand il ne reste rien. Le paiement est verrouillé : deux
+    remboursements simultanés de la même commande voient l'un après l'autre
+    la somme déjà accordée."""
     montant = Decimal(commande.montant_total if montant is None else montant)
     if montant != montant.to_integral_value():
         raise PaiementRefuse(f"Montant de remboursement invalide ({montant}) : un nombre entier de FCFA est attendu.")
@@ -552,19 +560,51 @@ def creer_remboursement(paiement, commande, motif, montant=None, retour=None):
         logger_securite.warning("Remboursement de la commande %s ignoré : montant nul.", commande.numero_commande)
         return None, False
     with transaction.atomic():
+        Paiement.objects.select_for_update().filter(pk=paiement.pk).first()
         if retour is not None:
-            remboursement, cree = Remboursement.objects.get_or_create(
-                retour=retour,
-                defaults={"paiement": paiement, "commande": commande, "motif": motif, "montant": montant},
-            )
+            existant = Remboursement.objects.filter(retour=retour).first()
         else:
-            remboursement, cree = Remboursement.objects.get_or_create(
-                paiement=paiement, commande=commande, retour=None,
-                defaults={"motif": motif, "montant": montant},
-            )
-    if cree:
-        alerter_administration(remboursement)
-    return remboursement, cree
+            existant = Remboursement.objects.filter(paiement=paiement, commande=commande, retour=None).first()
+        if existant is not None:
+            return existant, False
+        deja = Remboursement.objects.filter(paiement=paiement, commande=commande).exclude(
+            statut=Remboursement.Statut.REFUSE,
+        ).aggregate(total=Sum("montant"))["total"] or 0
+        reste = commande.montant_total - deja
+        if montant > reste:
+            if retour is not None:
+                raise PaiementRefuse(
+                    f"Remboursement refusé : {int(montant)} FCFA demandés, il reste {int(max(reste, 0))} FCFA "
+                    f"remboursables sur la commande {commande.numero_commande}."
+                )
+            if reste <= 0:
+                alerte = (f"Remboursement de la commande {commande.numero_commande} ({motif}) non créé : "
+                          f"{int(deja)} FCFA déjà remboursés sur {int(commande.montant_total)} encaissés.")
+                logger_securite.error("ALERTE ADMINISTRATION — %s", alerte)
+                _alerter_plafond(commande, alerte)
+                return None, False
+            logger_securite.warning("Remboursement de la commande %s ramené de %s à %s FCFA (plafond).",
+                                    commande.numero_commande, montant, reste)
+            montant = reste
+        remboursement = Remboursement.objects.create(
+            paiement=paiement, commande=commande, motif=motif, montant=montant, retour=retour,
+        )
+    alerter_administration(remboursement)
+    return remboursement, True
+
+
+def _alerter_plafond(commande, message):
+    from apps.notifications import liens
+    from apps.notifications.models import Notification
+    from apps.notifications.services import ServiceNotification
+
+    ServiceNotification.notifier_administration(
+        titre="Remboursement non créé",
+        message=message,
+        type_notification=Notification.TypeNotification.PAIEMENT,
+        lien_redirection=liens.lien_remboursements_administration(),
+        metadata={"commande": str(commande.pk)},
+    )
 
 
 def alerter_administration(remboursement):

@@ -733,6 +733,49 @@ class RemboursementRetourTests(CommandePayee, CircuitBase):
                 Remboursement.objects.create(paiement=paiement, commande=commande, motif="retour",
                                              montant=montant, retour=demande)
 
+    def test_plafond_a_l_encaisse(self):
+        from apps.livraison.models import ContestationLivraison
+        from apps.livraison.services import resoudre_contestation
+        from apps.paiements.services import creer_remboursement
+
+        NON_RECUE = Remboursement.Motif.LIVRAISON_NON_RECUE
+        # Retour partiel remboursé : la livraison non reçue est ramenée au reste.
+        commande, article = self.commande_payee()
+        demande = self.retour_sur(commande, article, Statut.RECEPTIONNE)
+        DemandeRetour.objects.filter(pk=demande.pk).update(montant_remboursement=Decimal("5000"))
+        self.assertEqual(self.rembourser(demande).status_code, 200)
+        paiement = Paiement.objects.get(commandes=commande)
+        remboursement, cree = creer_remboursement(paiement, commande, NON_RECUE)
+        self.assertEqual((cree, remboursement.montant), (True, Decimal("15000")))
+
+        # Retour total remboursé : la contestation fondée ne crée rien, alerte.
+        commande, article = self.commande_payee()
+        demande = self.retour_sur(commande, article, Statut.RECEPTIONNE)
+        self.assertEqual(self.rembourser(demande).status_code, 200)
+        livraison = Livraison.objects.get(commande=commande)
+        ContestationLivraison.objects.create(livraison=livraison, motif="Colis jamais reçu")
+        with self.assertLogs("securite", "ERROR"):
+            resoudre_contestation(livraison, self.admin, ContestationLivraison.Statut.FONDEE)
+        self.assertEqual(list(Remboursement.objects.filter(commande=commande).values_list("motif", flat=True)),
+                         ["retour"])
+        self.assertTrue(Notification.objects.filter(destinataire=self.admin, titre="Remboursement non créé",
+                                                    metadata__commande=str(commande.pk)).exists())
+        self.assertTrue(Notification.objects.filter(destinataire=self.client1,
+                                                    message__contains="déjà été remboursé").exists())
+
+        # Commande déjà remboursée en totalité : le retour est refusé.
+        commande, article = self.commande_payee()
+        paiement = Paiement.objects.get(commandes=commande)
+        perte, _ = creer_remboursement(paiement, commande, NON_RECUE)
+        demande = self.retour_sur(commande, article, Statut.RECEPTIONNE)
+        with self.assertLogs("securite", "ERROR"):
+            r = self.rembourser(demande)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("il reste 0 FCFA", str(r.data))
+        # Un remboursement refusé ne compte plus dans le plafond.
+        Remboursement.objects.filter(pk=perte.pk).update(statut=Remboursement.Statut.REFUSE)
+        self.assertEqual(self.rembourser(demande).status_code, 200)
+
     def test_decision_de_la_moderation_rembourse_le_montant_demande(self):
         commande, article = self.commande_payee()
         demande = self.retour_sur(commande, article, Statut.EN_MODERATION)
@@ -741,6 +784,69 @@ class RemboursementRetourTests(CommandePayee, CircuitBase):
                                     (self.vendeur1, "rembourser")):
             self.assertEqual(self.agir(demande.id, utilisateur, action).status_code, 200, action)
         self.assertEqual(Remboursement.objects.get(retour=demande).montant, Decimal("20000"))
+
+
+class PlafondConcurrenceTests(TransactionTestCase):
+    """Retour remboursé et livraison non reçue reconnue au même moment : la
+    somme des remboursements ne dépasse pas l'encaissé."""
+
+    @skipUnless(connection.vendor == "postgresql", "select_for_update exige PostgreSQL.")
+    def test_retour_et_livraison_non_recue_simultanes(self):
+        from apps.paiements.services import creer_remboursement
+
+        client1 = Utilisateur.objects.create_user(email="c.pc@anitche.ci", password="TestPassword123!",
+                                                  nom="C", prenom="C", role=Role.CLIENT)
+        vendeur = Utilisateur.objects.create_user(email="v.pc@anitche.ci", password="TestPassword123!", nom="V",
+                                                  prenom="V", role=Role.VENDEUR, statut_kyc=StatutKYC.VALIDE)
+        boutique = Boutique.objects.create(proprietaire=vendeur, nom="Boutique PC", est_active=True)
+        produit = Produit.objects.create(boutique=boutique, nom="P", prix_base=Decimal("20000"))
+        variante = VarianteProduit.objects.create(produit=produit, nom="M", prix=Decimal("20000"))
+        commande = Commande.objects.create(boutique=boutique, client=client1, montant_total=Decimal("20000"),
+                                           status=Commande.Status.LIVREE)
+        article = CommandeItem.objects.create(commande=commande, variante=variante, nom_produit="P",
+                                              prix_unitaire=Decimal("20000"), quantite=1)
+        paiement = Paiement.objects.create(client=client1, fournisseur="simule", montant=Decimal("20000"),
+                                           statut=Paiement.Statut.VALIDE, date_validation=timezone.now())
+        paiement.commandes.add(commande)
+        demande = DemandeRetour.objects.create(commande=commande, client=client1, boutique=boutique,
+                                               description="Défaut constaté", montant_remboursement=Decimal("20000"))
+        RetourItem.objects.create(demande_retour=demande, commande_item=article, quantite=1)
+        DemandeRetour.objects.filter(pk=demande.pk).update(statut=Statut.RECEPTIONNE)
+
+        creer = Remboursement.objects.create
+
+        def creer_lentement(*args, **kwargs):
+            time.sleep(0.3)  # élargit la fenêtre entre le calcul du reste et l'écriture
+            return creer(*args, **kwargs)
+
+        barriere = threading.Barrier(2)
+
+        def retour():
+            try:
+                barriere.wait()
+                services.traiter(demande.pk, vendeur, "rembourser")
+            except services.RetourRefuse:
+                pass
+            finally:
+                connection.close()
+
+        def non_recue():
+            try:
+                barriere.wait()
+                creer_remboursement(paiement, commande, Remboursement.Motif.LIVRAISON_NON_RECUE)
+            finally:
+                connection.close()
+
+        with patch.object(Remboursement.objects, "create", side_effect=creer_lentement):
+            fils = [threading.Thread(target=retour), threading.Thread(target=non_recue)]
+            for fil in fils:
+                fil.start()
+            for fil in fils:
+                fil.join()
+
+        montants = list(Remboursement.objects.filter(commande=commande).values_list("montant", flat=True))
+        self.assertEqual(len(montants), 1)
+        self.assertEqual(sum(montants), Decimal("20000"))
 
 
 # =====================================================================
