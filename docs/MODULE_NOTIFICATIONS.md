@@ -38,9 +38,10 @@ admin.py      consultation seule
 | Code de livraison | client (email dédié, toujours) | `livraison.tasks` |
 | **Commande annulée** (nouveau) | client toujours (motif, remboursement si payée) ; vendeur si la commande était payée | `commandes.services.annuler_commande` |
 | **Stock bas / rupture** (nouveau) | vendeur, au franchissement de `seuil_alerte` puis à 0 | `commandes.views.ValiderPanierView` |
-| Remboursement à traiter, contestation, **retour rejeté** | administration (in-app) | `paiements`, `livraison`, `retours` |
-| **Nouvelle demande de retour**, actions du client sur un retour (nouveau) | vendeur | `retours` |
-| Décisions sur un retour | client | `retours` |
+| Remboursement à traiter ou non créé (plafond), contestation ; retour en arbitrage, sans décision depuis 48 h, non remboursable | administration (in-app) | `paiements`, `livraison`, `retours` |
+| Retour en modération (escalade ou contestation) | modérateurs actifs (in-app, `ServiceNotification.notifier_moderation`) | `retours` |
+| **Nouvelle demande de retour** (avec l'échéance), rappel 24 h avant l'échéance, actions du client et décisions de recours | vendeur | `retours` |
+| Accusé de réception, décisions sur un retour, délai de contestation | client | `retours` |
 | Points de fidélité crédités (nouveau) | client | `fidelite` |
 | **Réponse ou nouveau ticket support** (nouveau) | client / équipe support | `support` |
 | Reversement versé | vendeur | `paiements` |
@@ -74,7 +75,8 @@ admin.py      consultation seule
 | `/vendeur/produits/{id}` | vendeur | stock bas, rupture |
 | `/vendeur/retours/{uuid}` | vendeur | nouvelle demande de retour, actions du client |
 | `/vendeur/reversements` | vendeur | reversement effectué |
-| `/administration/retours/{uuid}` | administration | retour rejeté par un vendeur |
+| `/moderation/retours/{uuid}` | modérateurs | retour en modération |
+| `/administration/retours/{uuid}` | administration | retour en arbitrage, sans décision depuis 48 h, non remboursable |
 | `/administration/remboursements` | administration | remboursement à traiter |
 | `/administration/reversements` | administration | reversement à vérifier (transfert bloqué, succès non conforme ou tardif) |
 | `/administration/livraisons/{uuid}` | administration | livraison contestée |
@@ -118,6 +120,7 @@ Chaque risque a son test permanent dans `apps/notifications/tests.py`.
 
 - **notifications 0002** : suppression de `in_app_actif` et `sms_actif` ; index `notif_destinataire_date`.
 - **notifications 0003** (données) : `AlterField` du texte d'aide de `lien_redirection` (aucun SQL), puis un seul `UPDATE` : les liens commençant par `/admin/` passent à `/administration/` (le reste du chemin est conservé, valeur bornée à 255 caractères). Rejouable sans effet. Retour arrière : le préfixe `/administration/` redevient `/admin/` (y compris pour les liens créés après la migration, qui n'avaient pas d'équivalent).
+- **notifications 0005** : texte d'aide de `lien_redirection` (route `/moderation/retours/{uuid}`), sans SQL.
 
 En dev : `docker exec anitche-backend python manage.py migrate`, puis **redémarrer le worker Celery** (nouvelle tâche `envoyer_email_notification`).
 
