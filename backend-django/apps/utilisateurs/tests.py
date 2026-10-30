@@ -167,6 +167,20 @@ class InscriptionTests(TestCase):
 
         self.assertEqual(CodeOTP.objects.count(), 0)
 
+    @patch('apps.utilisateurs.views.envoyer_code_otp_email.delay', side_effect=RuntimeError("broker indisponible"))
+    def test_echec_mise_en_file_annule_inscription_et_otp(self, mock_envoi):
+        response = self.client.post(self.url, {
+            'email': 'indisponible@anitche.ci',
+            'password': 'MotDePasseSolide123!',
+            'nom': 'Kouassi',
+            'prenom': 'Awa',
+        })
+
+        self.assertEqual(response.status_code, 500)
+        mock_envoi.assert_called_once()
+        self.assertFalse(Utilisateur.objects.filter(email='indisponible@anitche.ci').exists())
+        self.assertEqual(CodeOTP.objects.count(), 0)
+
 
 class VerificationOTPInscriptionTests(TestCase):
     """

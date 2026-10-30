@@ -8,7 +8,7 @@ from apps.utilisateurs.models import Utilisateur, Role, StatutKYC
 from apps.vendeurs.models import Boutique
 from apps.catalogue.models import Produit, VarianteProduit
 from apps.panier.models import Panier, PanierItem
-from apps.fidelite.models import CouponReduction
+from apps.fidelite.models import CouponReduction, UtilisationCoupon
 from .models import Commande, GroupeCommande, CommandeItem
 
 
@@ -924,17 +924,20 @@ class ConcurrenceCommandesTests(DonneesCycleDeVie, TransactionTestCase):
         self.creer_donnees()
 
     def en_parallele(self, action, fois=2):
-        barriere = threading.Barrier(fois)
+        return self.actions_en_parallele([action] * fois)
+
+    def actions_en_parallele(self, actions):
+        barriere = threading.Barrier(len(actions))
         resultats = []
 
-        def executer():
+        def executer(action):
             try:
                 barriere.wait()
                 resultats.append(action())
             finally:
                 connection.close()
 
-        threads = [threading.Thread(target=executer) for _ in range(fois)]
+        threads = [threading.Thread(target=executer, args=(action,)) for action in actions]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -962,6 +965,37 @@ class ConcurrenceCommandesTests(DonneesCycleDeVie, TransactionTestCase):
         codes = self.en_parallele(self.appel(f"/api/commandes/{commande.pk}/annuler/"))
         self.assertEqual(codes, [200, 409])
         self.assertEqual(self.stock(self.variante1), 10)
+
+    def test_annulations_concurrentes_finalisent_paiement_et_coupon_du_groupe(self):
+        CouponReduction.objects.create(
+            code="CONCURRENT", type_reduction="pourcentage", valeur=Decimal("10"),
+            utilisations_max=1,
+        )
+        self.assertEqual(
+            self.commander((self.variante1, 1), (self.variante2, 1), coupon_code="CONCURRENT").status_code,
+            201,
+        )
+        commandes = list(Commande.objects.order_by("pk"))
+        paiement = Paiement.objects.create(
+            client=self.client_user,
+            groupe_commande=commandes[0].groupe,
+            montant=sum((commande.montant_total for commande in commandes), Decimal("0")),
+            statut=Paiement.Statut.EN_ATTENTE,
+            fournisseur="simule",
+        )
+        paiement.commandes.add(*commandes)
+
+        codes = self.actions_en_parallele([
+            self.appel(f"/api/commandes/{commande.pk}/annuler/") for commande in commandes
+        ])
+
+        self.assertEqual(codes, [200, 200])
+        paiement.refresh_from_db()
+        self.assertEqual(paiement.statut, Paiement.Statut.ANNULE)
+        coupon = CouponReduction.objects.get(code="CONCURRENT")
+        self.assertEqual(coupon.nombre_utilisations, 0)
+        self.assertFalse(coupon.est_utilise)
+        self.assertFalse(UtilisationCoupon.objects.filter(coupon=coupon).exists())
 
     def test_stocks_verrouilles_dans_l_ordre_des_cles_quel_que_soit_le_plan(self):
         """Sans ORDER BY, les stocks seraient verrouillés dans l'ordre que
