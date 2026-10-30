@@ -13,6 +13,7 @@ from google.auth.transport import requests as google_requests
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 from django.conf import settings
+from django.db import transaction
 import logging
 
 from apps.core.exceptions import ErreurMetier
@@ -110,10 +111,11 @@ class InscriptionView(generics.CreateAPIView):
     throttle_scope = 'inscription'
 
     def perform_create(self, serializer):
-        utilisateur = serializer.save()
+        with transaction.atomic():
+            utilisateur = serializer.save()
 
-        _, code = CodeOTP.generer(utilisateur, TypeUsageOTP.INSCRIPTION)
-        envoyer_code_otp_email.delay(utilisateur.email, code, TypeUsageOTP.INSCRIPTION)
+            _, code = CodeOTP.generer(utilisateur, TypeUsageOTP.INSCRIPTION)
+            envoyer_code_otp_email.delay(utilisateur.email, code, TypeUsageOTP.INSCRIPTION)
 
 
 @extend_schema(

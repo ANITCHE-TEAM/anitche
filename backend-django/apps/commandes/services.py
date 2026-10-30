@@ -34,7 +34,7 @@ from django.utils import timezone
 
 from apps.catalogue.models import Stock
 
-from .models import Commande, CommandeHistorique
+from .models import Commande, CommandeHistorique, GroupeCommande
 
 logger = logging.getLogger(__name__)
 
@@ -362,6 +362,11 @@ def annuler_commande(commande, motif, acteur=None, commentaire="Commande annulé
             # l'administration dans la même milliseconde pourrait la
             # verrouiller (interblocage théorique : un 500, un nouvel essai).
             annuler_livraison_de(commande, acteur=acteur, commentaire=commentaire)
+
+        if commande.groupe_id is not None:
+            # Les annulations des commandes sœurs se sérialisent avant de
+            # décider si le paiement et le coupon partagés peuvent être finalisés.
+            GroupeCommande.objects.select_for_update().get(pk=commande.groupe_id)
 
         # Seule la requête qui a effectivement annulé arrive ici : le stock
         # n'est restitué qu'une fois, sous le même verrou que le checkout, et
