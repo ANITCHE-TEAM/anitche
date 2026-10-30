@@ -1,14 +1,22 @@
 """Interface commune des fournisseurs de paiement.
 
 Le reste du module ne parle qu'à cette interface : changer de fournisseur
-(CinetPay aujourd'hui, PayDunya en réserve) revient à écrire un nouvel
-adaptateur, sans toucher aux commandes, aux remboursements ni aux
-reversements. Procédure : docs/MODULE_PAIEMENTS.md, « Ajouter un fournisseur ».
+revient à écrire un nouvel adaptateur, sans toucher aux commandes, aux
+remboursements ni aux reversements. Procédure : docs/MODULE_PAIEMENTS.md, « Ajouter un fournisseur ».
 
 Règle de sécurité commune à tous les adaptateurs : une notification n'est
 qu'un signal. Elle doit être authentifiée (lire_notification puis
 authentifier_notification), puis l'état réel de la transaction est
 redemandé au fournisseur (verifier_transaction) avant toute validation.
+
+Contrat d'un succès, commun à tous les adaptateurs : un EtatTransaction de
+statut SUCCES porte le montant encaissé (int, dans l'unité de la devise) et
+la devise (code ISO, « XOF »), tous deux lus dans la réponse du fournisseur
+et jamais recopiés du paiement. services._controler_etat les compare au
+montant dû et à la devise du paiement ; montant absent, non entier ou
+différent, devise absente ou différente : le succès est refusé
+(IncoherenceTransaction), quel que soit le fournisseur. Même contrat pour
+un ResultatTransfert de statut SUCCES (reversements.appliquer_etat_transfert).
 """
 
 import hashlib
@@ -29,6 +37,17 @@ class MontantHorsLimites(ErreurFournisseur):
     """Le montant sort des limites acceptées par le fournisseur."""
 
 
+class TransfertRefuse(ErreurFournisseur):
+    """Refus certain d'un transfert : le fournisseur garantit qu'aucun
+    transfert n'a été créé (solde insuffisant, numéro refusé...).
+
+    Seuls ce refus, MontantHorsLimites et OperationNonSupportee rendent un
+    reversement disponible après l'appel à transferer. Toute autre
+    ErreurFournisseur (délai dépassé, 5xx, réponse illisible) laisse l'issue
+    incertaine : l'argent a pu partir, le reversement reste « en cours »
+    jusqu'à la réconciliation."""
+
+
 class TransactionIntrouvable(Exception):
     """Le fournisseur répond, mais refuse de renvoyer l'état de CETTE
     transaction : inconnue (404) ou référence refusée (400).
@@ -39,6 +58,12 @@ class TransactionIntrouvable(Exception):
 
 class NotificationInvalide(Exception):
     """Notification non authentique, incomplète ou incohérente."""
+
+
+class NotificationIgnoree(Exception):
+    """Notification authentique mais sans effet ici (essai du fournisseur,
+    événement d'un autre périmètre) : acquittée (200), rien n'est lu ni
+    modifié en base. Le message, journalisé, ne contient aucun secret."""
 
 
 class OperationNonSupportee(Exception):
@@ -75,8 +100,9 @@ class EtatTransaction:
 
     statut: str  # SUCCES, ECHEC ou EN_ATTENTE
     identifiant_externe: str = ""
-    # None : le fournisseur ne renvoie pas l'information à la vérification
-    # (le montant a alors été fixé côté serveur à l'initiation).
+    # Obligatoires pour un SUCCES (contrat en tête de module). None :
+    # information absente ou illisible dans la réponse du fournisseur — un
+    # succès est alors refusé ; un échec ou une attente n'en ont pas besoin.
     montant: int | None = None
     devise: str | None = None
 
@@ -88,6 +114,12 @@ class ResultatTransfert:
     statut: str  # SUCCES, ECHEC ou EN_ATTENTE (état final par notification)
     identifiant_externe: str = ""
     jeton_notification: str = ""
+    # Obligatoires pour qu'un SUCCES immédiat soit appliqué, comme pour un
+    # EtatTransaction : lus dans la réponse du fournisseur, jamais recopiés
+    # du reversement. None : absents ou illisibles — le reversement reste
+    # alors « en cours », son état final vient de la notification.
+    montant: int | None = None
+    devise: str | None = None
 
 
 def hacher_jeton(jeton):
@@ -109,6 +141,13 @@ class FournisseurPaiement:
     chez lui."""
 
     code = ""
+    #: False : la notification porte la référence ANITCHE du paiement
+    #: (Notification.reference), qui sert à le retrouver. True : elle ne
+    #: porte que la référence du fournisseur (Notification.identifiant_externe),
+    #: comparée à Paiement.transaction_id_externe stockée à l'initiation ;
+    #: Notification.reference, si elle est renseignée, sert de recoupement
+    #: (services._paiement_notifie).
+    notification_par_identifiant_externe = False
 
     # --- Encaissement -----------------------------------------------------
 
@@ -117,7 +156,8 @@ class FournisseurPaiement:
         raise NotImplementedError
 
     def lire_notification(self, request):
-        """Lit la notification reçue → Notification (sans la faire confiance)."""
+        """Lit la notification reçue → Notification (sans la faire confiance).
+        Lève NotificationIgnoree pour un événement authentique sans effet."""
         raise NotImplementedError
 
     def authentifier_notification(self, notification, objet):
@@ -127,7 +167,8 @@ class FournisseurPaiement:
             raise NotificationInvalide("Jeton de notification invalide.")
 
     def verifier_transaction(self, paiement, notification=None):
-        """Redemande au fournisseur l'état réel de la transaction → EtatTransaction.
+        """Redemande au fournisseur l'état réel de la transaction → EtatTransaction,
+        avec le montant (int) et la devise confirmés pour un SUCCES.
         Lève TransactionIntrouvable si le fournisseur ne connaît pas (ou
         refuse) cette transaction précise."""
         raise NotImplementedError
@@ -140,12 +181,30 @@ class FournisseurPaiement:
 
     def transferer(self, reversement, telephone, operateur):
         """Envoie reversement.montant_a_verser sur le mobile money du vendeur
-        → ResultatTransfert (l'état final peut arriver par notification)."""
+        → ResultatTransfert (l'état final peut arriver par notification).
+
+        reversement.reference est envoyée comme référence marchand (clé
+        d'idempotence quand le fournisseur en accepte une). Lève
+        TransfertRefuse ou MontantHorsLimites seulement si le fournisseur
+        garantit qu'aucun transfert n'a été créé ; tout autre échec est une
+        ErreurFournisseur, traitée comme une issue incertaine. Un
+        ResultatTransfert ECHEC ne traduit qu'un statut final explicite du
+        fournisseur : un statut inconnu ou non final vaut EN_ATTENTE."""
         raise OperationNonSupportee(f"Transfert par API non disponible chez {self.code}.")
 
     def lire_notification_transfert(self, request):
         return self.lire_notification(request)
 
     def verifier_transfert(self, reversement, notification=None):
-        """État réel du transfert → EtatTransaction."""
+        """État réel du transfert → EtatTransaction, avec le montant (int) et
+        la devise confirmés pour un SUCCES.
+
+        Sans notification (réconciliation), interroge le fournisseur sur CE
+        reversement par sa référence ANITCHE (reversement.reference), ou par
+        reversement.reference_externe si elle est connue. ECHEC seulement
+        pour un statut final explicite. Lève OperationNonSupportee (pas de
+        transferts par API chez ce fournisseur, aucun appel réseau),
+        ErreurFournisseur (panne, délai dépassé), TransactionIntrouvable
+        (transfert inconnu du fournisseur) ou NotificationInvalide (réponse
+        qui ne désigne pas ce reversement)."""
         raise OperationNonSupportee(f"Transfert par API non disponible chez {self.code}.")

@@ -425,10 +425,10 @@ def test_wedding_advice_on_demo_catalogue(client, catalogue):
 
 def test_product_has_search_fields_plus_justification(client, catalogue):
     product = post(client, CONSEIL, conseil("mariage")).json()["produits_suggeres"][0]
-    expected = search.product_result(CATALOGUE[0], "http://localhost:8000/media/")
+    expected = search.product_result(CATALOGUE[0])
     assert product == {**expected, "justification": product["justification"]}
     assert isinstance(product["boutique"], int) and product["slug"] == "robe-en-bazin-brode-1a2b3c"
-    assert product["image_principale"].startswith("http://localhost:8000/media/")
+    assert product["image_principale"].startswith("/media/")
 
 
 def test_budget_too_low_gives_empty_list_and_clear_message(client, db):

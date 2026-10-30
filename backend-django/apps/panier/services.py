@@ -10,6 +10,23 @@ from rest_framework.exceptions import ValidationError
 
 from .models import Panier, PanierItem
 
+#: Code machine renvoyé dans `errors.code[0]` quand un vendeur vise un article
+#: de sa propre boutique : le frontend s'y fie, pas au texte du message.
+CODE_AUTO_ACHAT_INTERDIT = 'auto_achat_interdit'
+MESSAGE_AUTO_ACHAT = "Vous ne pouvez pas acheter un article de votre propre boutique."
+
+
+def est_article_de_sa_boutique(variante, utilisateur_id):
+    """Vrai si la variante est vendue par la boutique de ce compte.
+
+    Compare le propriétaire de la boutique, pas le rôle : un compte sans
+    boutique (client, livreur, administrateur) n'est jamais concerné, et un
+    ancien vendeur dont la boutique existe encore l'est toujours. Un panier
+    anonyme (`utilisateur_id` None) n'a pas de propriétaire à comparer ; il
+    ne peut de toute façon pas être validé (le checkout exige un compte).
+    """
+    return utilisateur_id is not None and variante.produit.boutique.proprietaire_id == utilisateur_id
+
 
 def get_panier_existant(request, queryset=None):
     """Cherche un panier existant SANS jamais en créer un nouveau.
@@ -73,6 +90,15 @@ def _verifier_disponibilite(ligne):
         )
 
 
+def _verifier_pas_auto_achat(variante, utilisateur_id):
+    if est_article_de_sa_boutique(variante, utilisateur_id):
+        raise ValidationError({
+            "detail": MESSAGE_AUTO_ACHAT,
+            "code": CODE_AUTO_ACHAT_INTERDIT,
+            "variante": [MESSAGE_AUTO_ACHAT],
+        })
+
+
 def ajouter_article(panier, variante, quantite):
     """Ajoute `quantite` unités de `variante`, ou incrémente la ligne existante.
 
@@ -80,10 +106,12 @@ def ajouter_article(panier, variante, quantite):
     ligne Panier sérialise les ajouts d'un même panier — deux ajouts
     simultanés de la même variante ne créent jamais deux lignes, et la
     quantité cumulée est vérifiée contre le stock sur une valeur à jour.
+    La règle de l'auto-achat est vérifiée sous ce même verrou, avant le stock.
     """
     with transaction.atomic():
         Panier.objects.select_for_update().filter(pk=panier.pk).exists()
 
+        _verifier_pas_auto_achat(variante, panier.utilisateur_id)
         _verifier_disponibilite(PanierItem(panier=panier, variante=variante))
 
         ligne = (
@@ -106,13 +134,18 @@ def modifier_quantite(ligne, nouvelle_quantite):
 
     Une baisse est toujours permise, sans contrôle : elle rapproche le panier
     d'un état valide (le checkout revérifie le stock sous verrou). Une hausse
-    exige que l'article soit encore disponible à la vente, puis que le stock
-    couvre la nouvelle quantité.
+    exige que l'article ne soit pas de la boutique du propriétaire du panier,
+    qu'il soit encore disponible à la vente, puis que le stock couvre la
+    nouvelle quantité.
     """
     with transaction.atomic():
-        ligne = PanierItem.objects.avec_details().select_for_update(of=('self',)).get(pk=ligne.pk)
+        ligne = (
+            PanierItem.objects.avec_details().select_related('panier')
+            .select_for_update(of=('self',)).get(pk=ligne.pk)
+        )
 
         if nouvelle_quantite > ligne.quantite:
+            _verifier_pas_auto_achat(ligne.variante, ligne.panier.utilisateur_id)
             _verifier_disponibilite(ligne)
             _verifier_stock(ligne.variante, nouvelle_quantite)
 

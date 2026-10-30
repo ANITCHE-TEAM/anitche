@@ -13,6 +13,908 @@ info:
 
     Guide complet : docs/GUIDE_FRONTEND.md.
 paths:
+  /api/avis/:
+    post:
+      operationId: avis_create
+      description: 'Réservé à l''acheteur d''un article livré (email vérifié), dans
+        les 60 jours suivant la livraison. Un seul avis par produit. Commande non
+        livrée ou délai écoulé : 400 ; produit de ma propre boutique : 403 ; article
+        d''un autre client : 404 ; produit déjà noté : 409.'
+      summary: Publier un avis
+      tags:
+      - Avis
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreerAvisRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/CreerAvisRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/CreerAvisRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Avis'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Conflit : l''état actuel de la ressource ne permet pas cette
+            action.'
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/avis/{id}/:
+    get:
+      operationId: avis_retrieve
+      description: |-
+        Détail, modification et suppression de son propre avis. L'avis d'un
+        autre client est introuvable (404), jamais interdit.
+      summary: Détail de mon avis
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Avis
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Avis'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+    patch:
+      operationId: avis_partial_update
+      description: 'Note et/ou commentaire, pendant 14 jours après la publication.
+        L''avis est alors marqué `est_modifie`. Avis masqué par la modération : 403
+        ; délai écoulé : 400.'
+      summary: Modifier mon avis
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Avis
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedModifierAvisRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedModifierAvisRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedModifierAvisRequest'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Avis'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+    delete:
+      operationId: avis_destroy
+      description: 'Suppression douce : l''avis sort de la note du produit, et le
+        produit ne peut plus être noté.'
+      summary: Supprimer mon avis
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Avis
+      security:
+      - jwtAuth: []
+      responses:
+        '204':
+          description: No response body
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/avis/{id}/reponse/:
+    post:
+      operationId: avis_reponse_create
+      description: 'Réservé au propriétaire de la boutique de l''avis. Une seule réponse
+        par avis (409 ensuite : la modifier). Avis d''une autre boutique ou boutique
+        suspendue : 403 ; avis introuvable, masqué ou supprimé : 404.'
+      summary: Répondre à un avis
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Avis
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContenuReponseRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ContenuReponseRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ContenuReponseRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReponseVendeur'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Conflit : l''état actuel de la ressource ne permet pas cette
+            action.'
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+    patch:
+      operationId: avis_reponse_partial_update
+      description: Sans limite de durée ; `date_modification` est mise à jour.
+      summary: Modifier ma réponse à un avis
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Avis
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedContenuReponseRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedContenuReponseRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedContenuReponseRequest'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReponseVendeur'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/avis/{id}/signaler/:
+    post:
+      operationId: avis_signaler_create
+      description: 'Tout compte connecté. `motif` parmi une liste fermée, `commentaire`
+        facultatif (500 caractères). Un signalement par utilisateur et par avis (409
+        ensuite). Son propre avis : 403 ; avis introuvable, masqué ou supprimé : 404.
+        Le signalement ne masque rien : la modération décide.'
+      summary: Signaler un avis
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Avis
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignalerAvisRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/SignalerAvisRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/SignalerAvisRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Signalement'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Conflit : l''état actuel de la ressource ne permet pas cette
+            action.'
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/avis/a-noter/:
+    get:
+      operationId: avis_a_noter_list
+      description: Lignes de mes commandes livrées, dans le délai pour noter, dont
+        le produit n'a pas encore reçu mon avis. Les produits de ma propre boutique
+        n'y figurent pas.
+      summary: Articles que je peux noter
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - Avis
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedArticleANoterList'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/avis/mes-avis/:
+    get:
+      operationId: avis_mes_avis_list
+      summary: Mes avis
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - Avis
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedAvisList'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/avis/moderation/avis/{id}/masquer/:
+    post:
+      operationId: avis_moderation_avis_masquer_create
+      description: 'Modérateur, admin, super_admin. `motif` obligatoire. L''avis sort
+        du public et des moyennes (recalculées) ; son auteur le voit `masque`. Ses
+        signalements ouverts sont acceptés. Avis non publié : 409.'
+      summary: Masquer un avis (modération)
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Avis
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MotifModerationRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/MotifModerationRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/MotifModerationRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionModeration'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Conflit : l''état actuel de la ressource ne permet pas cette
+            action.'
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/avis/moderation/avis/{id}/retablir/:
+    post:
+      operationId: avis_moderation_avis_retablir_create
+      description: 'Modérateur, admin, super_admin. `motif` obligatoire. L''avis revient
+        dans le public et les moyennes. Avis non masqué : 409.'
+      summary: Rétablir un avis masqué (modération)
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Avis
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MotifModerationRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/MotifModerationRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/MotifModerationRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionModeration'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Conflit : l''état actuel de la ressource ne permet pas cette
+            action.'
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/avis/moderation/signalements/:
+    get:
+      operationId: avis_moderation_signalements_list
+      description: 'Modérateur, admin, super_admin. File des signalements `ouvert`
+        (défaut) dont l''avis est encore publié, les plus anciens d''abord ; `statut=accepte`
+        ou `rejete` consulte les signalements traités. Valeur invalide : 400.'
+      summary: Signalements d'avis (modération)
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      - in: query
+        name: statut
+        schema:
+          enum:
+          - ouvert
+          - accepte
+          - rejete
+          type: string
+          default: ouvert
+          minLength: 1
+        description: |-
+          Défaut `ouvert`. `accepte` retrouve les avis masqués à la suite d'un signalement.
+
+          * `ouvert` - Ouvert
+          * `accepte` - Accepté (avis masqué)
+          * `rejete` - Rejeté
+      tags:
+      - Avis
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedSignalementModerationList'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/avis/moderation/signalements/{id}/rejeter/:
+    post:
+      operationId: avis_moderation_signalements_rejeter_create
+      description: 'Modérateur, admin, super_admin. `motif` obligatoire. L''avis reste
+        publié. Signalement déjà traité : 409.'
+      summary: Rejeter un signalement (modération)
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        required: true
+      tags:
+      - Avis
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MotifModerationRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/MotifModerationRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/MotifModerationRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionModeration'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Conflit : l''état actuel de la ressource ne permet pas cette
+            action.'
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/avis/produit/{produit_id}/:
+    get:
+      operationId: avis_produit_list
+      description: 'Public. Seuls les avis publiés figurent ici, les plus récents
+        d''abord, avec la réponse de la boutique. Un avis masqué par la modération
+        ou supprimé par son auteur n''y est plus. Produit inconnu ou non visible au
+        public : 404.'
+      summary: Avis publiés d'un produit
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      - in: path
+        name: produit_id
+        schema:
+          type: integer
+        required: true
+      tags:
+      - Avis
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedAvisPublicList'
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/avis/recus/:
+    get:
+      operationId: avis_recus_list
+      description: Avis publiés sur les produits de ma boutique, les plus récents
+        d'abord, avec ma réponse. `sans_reponse=true` ne garde que ceux auxquels je
+        n'ai pas encore répondu.
+      summary: Avis reçus par ma boutique
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      - in: query
+        name: sans_reponse
+        schema:
+          type: boolean
+        description: '`true` : avis sans réponse de la boutique.'
+      tags:
+      - Avis
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedAvisRecuList'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
   /api/catalogue/administration/produits/:
     get:
       operationId: catalogue_administration_produits_list
@@ -1516,6 +2418,55 @@ paths:
                 $ref: '#/components/schemas/Erreur'
           description: 'Limite de débit atteinte : réessayer après le délai indiqué
             par l''en-tête Retry-After.'
+  /api/commandes/{id}/historique/:
+    get:
+      operationId: commandes_historique_list
+      description: 'Origine du changement (`source`) seulement : jamais le compte
+        qui l''a fait. 404 pour la commande d''un autre client.'
+      summary: Historique des statuts d'une commande (client)
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - Commandes
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedCommandeHistoriqueList'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
   /api/commandes/administration/:
     get:
       operationId: commandes_administration_list
@@ -1705,6 +2656,61 @@ paths:
                 $ref: '#/components/schemas/Erreur'
           description: 'Limite de débit atteinte : réessayer après le délai indiqué
             par l''en-tête Retry-After.'
+  /api/commandes/administration/{id}/historique/:
+    get:
+      operationId: commandes_administration_historique_list
+      description: 'Comme pour le client, plus `auteur` : identifiant du compte à
+        l''origine du changement (vide pour le système).'
+      summary: Historique des statuts d'une commande (administration)
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - Commandes
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedCommandeHistoriqueAdministrationList'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
   /api/commandes/groupes/:
     get:
       operationId: commandes_groupes_list
@@ -1744,7 +2750,8 @@ paths:
     post:
       operationId: commandes_simuler_frais_create
       description: 'Aucune écriture : montants par commande (une par boutique) et
-        totaux, recalculés à l''identique à la validation.'
+        totaux, recalculés à l''identique à la validation. Mêmes refus que la validation,
+        dont `errors.code = ["auto_achat_interdit"]` (article de la boutique du client).'
       summary: Simuler les montants du checkout
       tags:
       - Commandes
@@ -1759,7 +2766,6 @@ paths:
           multipart/form-data:
             schema:
               $ref: '#/components/schemas/SimulerFraisRequest'
-        required: true
       security:
       - jwtAuth: []
       responses:
@@ -1800,7 +2806,12 @@ paths:
       operationId: commandes_valider_panier_create
       description: 'Crée une commande par boutique (statut `creee`, à payer sous 30
         minutes), décrémente le stock et vide le panier. Mêmes montants que `simuler-frais/`.
-        Stock insuffisant ou panier vide : 400 (`errors.non_field_errors`).'
+        L''adresse est une adresse du carnet du client (`adresse_id`, 404 si elle
+        n''est pas la sienne) OU une adresse saisie (`adresse_livraison`) : l''une
+        des deux. Dans les deux cas la commande en garde une copie, que le carnet
+        ne modifie plus ensuite. Stock insuffisant ou panier vide : 400 (`errors.non_field_errors`).
+        Panier contenant un article de la boutique du client : 400, `errors.code =
+        ["auto_achat_interdit"]`, aucune commande créée.'
       summary: Valider le panier (checkout)
       tags:
       - Commandes
@@ -1815,7 +2826,6 @@ paths:
           multipart/form-data:
             schema:
               $ref: '#/components/schemas/SimulerFraisRequest'
-        required: true
       security:
       - jwtAuth: []
       responses:
@@ -1922,6 +2932,61 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CommandeVendeur'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/commandes/vendeur/{id}/historique/:
+    get:
+      operationId: commandes_vendeur_historique_list
+      description: Origine du changement (`source`) seulement. 404 pour la commande
+        d'une autre boutique.
+      summary: Historique des statuts d'une commande (vendeur)
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - Commandes
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedCommandeHistoriqueList'
           description: ''
         '401':
           content:
@@ -4127,6 +5192,8 @@ paths:
   /api/paiements/admin/remboursements/{id}/traiter/:
     post:
       operationId: paiements_admin_remboursements_traiter_create
+      description: 'effectue (référence obligatoire) ou refuse. Un remboursement de
+        retour ne se refuse pas : 400. Remboursement déjà traité : 409.'
       summary: Traiter un remboursement (administration)
       parameters:
       - in: path
@@ -4597,6 +5664,10 @@ paths:
             par l''en-tête Retry-After.'
     post:
       operationId: panier_panier_items_create
+      description: 'Ajoute l''article, ou incrémente sa ligne. Article de la boutique
+        du propriétaire du compte : 400, errors.code = ["auto_achat_interdit"] (un
+        vendeur n''achète pas dans sa propre boutique ; les articles des autres boutiques
+        restent achetables).'
       tags:
       - Panier
       requestBody:
@@ -4672,6 +5743,10 @@ paths:
             par l''en-tête Retry-After.'
     put:
       operationId: panier_panier_items_update
+      description: 'Seule la quantité change. Une hausse est contrôlée (stock, disponibilité).
+        Article de la boutique du propriétaire du compte : 400, errors.code = ["auto_achat_interdit"]
+        (un vendeur n''achète pas dans sa propre boutique ; les articles des autres
+        boutiques restent achetables).'
       parameters:
       - in: path
         name: id
@@ -4725,6 +5800,10 @@ paths:
             par l''en-tête Retry-After.'
     patch:
       operationId: panier_panier_items_partial_update
+      description: 'Seule la quantité change. Une hausse est contrôlée (stock, disponibilité).
+        Article de la boutique du propriétaire du compte : 400, errors.code = ["auto_achat_interdit"]
+        (un vendeur n''achète pas dans sa propre boutique ; les articles des autres
+        boutiques restent achetables).'
       parameters:
       - in: path
         name: id
@@ -5303,6 +6382,56 @@ paths:
                 $ref: '#/components/schemas/Erreur'
           description: 'Limite de débit atteinte : réessayer après le délai indiqué
             par l''en-tête Retry-After.'
+  /api/retours/{id}/historique/:
+    get:
+      operationId: retours_historique_list
+      description: 'Étapes de la demande, de la plus ancienne à la plus récente :
+        statuts, action, origine (`source`) et motif. Le compte auteur (`auteur`)
+        n''est renvoyé qu''à l''administration. 404 pour un tiers.'
+      summary: Historique d'une demande de retour
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - Retours
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedRetourHistoriqueList'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
   /api/retours/{id}/photos/:
     post:
       operationId: retours_photos_create
@@ -5429,10 +6558,14 @@ paths:
   /api/retours/{id}/traiter/:
     patch:
       operationId: retours_traiter_partial_update
-      description: 'Boutique (vendeur propriétaire ou administration) : approuver,
-        rejeter (motif `reponse` obligatoire), en_transit, receptionner, rembourser,
-        cloturer. Client : en_transit, annuler. Action non permise à ce compte : 403
-        ; transition invalide : 400.'
+      description: 'Vendeur : approuver ou rejeter (motif `reponse` obligatoire) une
+        demande avant son échéance (`date_limite_vendeur`), rejeter sa propre approbation.
+        Client : contester un refus avant `date_limite_contestation` (motif de 10
+        caractères au moins), en_transit, annuler avant l''expédition. Modérateur
+        (dossier en_moderation) et administration (dossier en_arbitrage) : approuver
+        ou rejeter, motif obligatoire. Vendeur et administration : en_transit, receptionner,
+        rembourser, cloturer. Action qui ne revient pas à ce compte : 403 ; transition
+        invalide ou délai écoulé : 400.'
       summary: Faire avancer une demande de retour
       parameters:
       - in: path
@@ -5495,6 +6628,68 @@ paths:
                 $ref: '#/components/schemas/Erreur'
           description: 'Limite de débit atteinte : réessayer après le délai indiqué
             par l''en-tête Retry-After.'
+  /api/retours/moderation/liste/:
+    get:
+      operationId: retours_moderation_liste_list
+      description: 'Demandes passées par la modération (escalade ou contestation),
+        toutes boutiques : en_moderation puis en_arbitrage d''abord, les plus anciennes
+        en tête. Filtre `statut`. Sans e-mail du client pour un modérateur. Autres
+        rôles : 403.'
+      summary: File des retours en recours (modération et administration)
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      - in: query
+        name: statut
+        schema:
+          type: string
+          enum:
+          - annule
+          - approuve
+          - cloture
+          - demande
+          - en_arbitrage
+          - en_moderation
+          - en_transit
+          - receptionne
+          - refuse_moderation
+          - refuse_vendeur
+          - rejete
+          - rembourse
+      tags:
+      - Retours
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedDemandeRetourList'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
   /api/retours/vendeur/liste/:
     get:
       operationId: retours_vendeur_liste_list
@@ -5525,6 +6720,136 @@ paths:
               schema:
                 $ref: '#/components/schemas/Erreur'
           description: Authentification absente, jeton invalide ou expiré.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/statistiques/administration/:
+    get:
+      operationId: statistiques_administration_retrieve
+      description: 'Volume des ventes, commissions ANITCHE, commandes par statut,
+        nouveaux clients, vendeurs actifs, reversements en cours et versés, avis signalés
+        en attente (état actuel, sans filtre de période). `date_debut` et `date_fin`
+        (AAAA-MM-JJ) sont inclusives, en jours entiers Africa/Abidjan ; sans elles,
+        les 30 derniers jours. Valeur invalide, `date_fin` avant `date_debut` ou période
+        de plus de 366 jours : 400. Une commande compte si elle est payée et non annulée
+        ; elle se rattache à la période par sa date de création. Montants en entiers
+        XOF, calculés depuis les montants figés dans les commandes.'
+      summary: Statistiques de la plateforme (administration)
+      parameters:
+      - in: query
+        name: date_debut
+        schema:
+          type: string
+          format: date
+        description: 'Premier jour inclus. Défaut : 29 jours avant `date_fin`.'
+      - in: query
+        name: date_fin
+        schema:
+          type: string
+          format: date
+        description: 'Dernier jour inclus. Défaut : aujourd''hui (Abidjan).'
+      tags:
+      - Statistiques
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatistiquesAdministration'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/statistiques/vendeur/:
+    get:
+      operationId: statistiques_vendeur_retrieve
+      description: 'Chiffre d''affaires, commandes par statut, panier moyen, top 5
+        des produits, note et nombre d''avis, taux de retour, montants reversés et
+        à venir. Toujours la boutique du compte connecté. `date_debut` et `date_fin`
+        (AAAA-MM-JJ) sont inclusives, en jours entiers Africa/Abidjan ; sans elles,
+        les 30 derniers jours. Valeur invalide, `date_fin` avant `date_debut` ou période
+        de plus de 366 jours : 400. Une commande compte si elle est payée et non annulée
+        ; elle se rattache à la période par sa date de création. Montants en entiers
+        XOF, calculés depuis les montants figés dans les commandes.'
+      summary: Statistiques de ma boutique
+      parameters:
+      - in: query
+        name: date_debut
+        schema:
+          type: string
+          format: date
+        description: 'Premier jour inclus. Défaut : 29 jours avant `date_fin`.'
+      - in: query
+        name: date_fin
+        schema:
+          type: string
+          format: date
+        description: 'Dernier jour inclus. Défaut : aujourd''hui (Abidjan).'
+      tags:
+      - Statistiques
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatistiquesVendeur'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
         '429':
           content:
             application/json:
@@ -6376,6 +7701,375 @@ paths:
                 $ref: '#/components/schemas/Erreur'
           description: 'Limite de débit atteinte : réessayer après le délai indiqué
             par l''en-tête Retry-After.'
+  /api/utilisateurs/administration/connexions/:
+    get:
+      operationId: utilisateurs_administration_connexions_list
+      description: 'Toutes les tentatives de connexion, les plus récentes d''abord.
+        Filtres combinables ; une valeur invalide est refusée (400). `email` : égalité
+        exacte, casse ignorée, y compris pour un email sans compte. `date_debut` et
+        `date_fin` sont inclusives (jour entier).'
+      summary: Journal des connexions (administration)
+      parameters:
+      - in: query
+        name: date_debut
+        schema:
+          type: string
+          format: date
+        description: AAAA-MM-JJ, inclus.
+      - in: query
+        name: date_fin
+        schema:
+          type: string
+          format: date
+        description: AAAA-MM-JJ, inclus.
+      - in: query
+        name: email
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 254
+        description: Email tenté, égalité exacte.
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      - in: query
+        name: reussie
+        schema:
+          type: boolean
+        description: '`true` : réussies ; `false` : refusées.'
+      - in: query
+        name: utilisateur
+        schema:
+          type: integer
+          minimum: 1
+        description: Identifiant du compte.
+      tags:
+      - Utilisateurs
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedJournalConnexionAdministrationList'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Action non autorisée pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/utilisateurs/adresses/:
+    get:
+      operationId: utilisateurs_adresses_list
+      description: Les adresses de livraison enregistrées par le client connecté,
+        la plus récente d'abord (celle par défaut en tête).
+      summary: Mon carnet d'adresses
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - Utilisateurs
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedAdresseClientList'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+    post:
+      operationId: utilisateurs_adresses_create
+      description: '10 adresses au plus par client : au-delà, 400 avec `errors.code
+        = ["carnet_plein"]`. `par_defaut: true` retire le statut par défaut à l''adresse
+        qui l''avait.'
+      summary: Ajouter une adresse au carnet
+      tags:
+      - Utilisateurs
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdresseClientRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/AdresseClientRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/AdresseClientRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdresseClient'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/utilisateurs/adresses/{id}/:
+    get:
+      operationId: utilisateurs_adresses_retrieve
+      description: 404 si l'adresse n'existe pas ou n'est pas la mienne.
+      summary: Une adresse de mon carnet
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Utilisateurs
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdresseClient'
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+    put:
+      operationId: utilisateurs_adresses_update
+      description: Les commandes déjà passées gardent l'adresse qu'elles avaient.
+        404 si l'adresse n'est pas la mienne.
+      summary: Remplacer une adresse de mon carnet
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Utilisateurs
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdresseClientRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/AdresseClientRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/AdresseClientRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdresseClient'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+    patch:
+      operationId: utilisateurs_adresses_partial_update
+      description: Les commandes déjà passées gardent l'adresse qu'elles avaient.
+        404 si l'adresse n'est pas la mienne.
+      summary: Modifier une adresse de mon carnet
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Utilisateurs
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedAdresseClientRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedAdresseClientRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedAdresseClientRequest'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdresseClient'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Requête invalide (erreurs par champ dans `errors`) ou refus
+            métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+    delete:
+      operationId: utilisateurs_adresses_destroy
+      description: Les commandes déjà passées gardent l'adresse qu'elles avaient.
+        404 si l'adresse n'est pas la mienne.
+      summary: Supprimer une adresse de mon carnet
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - Utilisateurs
+      security:
+      - jwtAuth: []
+      responses:
+        '204':
+          description: No response body
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Ressource introuvable ou non visible pour ce compte.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
   /api/utilisateurs/changement-contact/:
     post:
       operationId: utilisateurs_changement_contact_create
@@ -6437,7 +8131,8 @@ paths:
         Notifie le titulaire du compte à chaque connexion réussie,
         uniquement en cas de succès (jamais sur un
         échec, pour ne pas alerter à tort sur une simple faute de frappe
-        de mot de passe ni révéler qu'un email existe).
+        de mot de passe ni révéler qu'un email existe). Chaque tentative,
+        réussie ou refusée, est inscrite au journal des connexions.
       summary: Connexion (email + mot de passe)
       tags:
       - Utilisateurs
@@ -6577,6 +8272,45 @@ paths:
                 $ref: '#/components/schemas/Erreur'
           description: Requête invalide (erreurs par champ dans `errors`) ou refus
             métier (message dans `detail`).
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: Authentification absente, jeton invalide ou expiré.
+        '429':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erreur'
+          description: 'Limite de débit atteinte : réessayer après le délai indiqué
+            par l''en-tête Retry-After.'
+  /api/utilisateurs/connexions/:
+    get:
+      operationId: utilisateurs_connexions_list
+      description: 'Tentatives de connexion à mon compte (réussies et refusées), les
+        plus récentes d''abord : date, méthode, adresse IP et appareil. Permet de
+        repérer une connexion que je n''ai pas faite. Les lignes sont conservées `JOURNAL_CONNEXIONS_RETENTION_JOURS`
+        jours (180 par défaut).'
+      summary: Mes connexions
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - Utilisateurs
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedJournalConnexionList'
+          description: ''
         '401':
           content:
             application/json:
@@ -7820,10 +9554,11 @@ components:
           maxLength: 255
       required:
       - commentaire
-    ActionEnum:
+    ActionRetourEnum:
       enum:
       - approuver
       - rejeter
+      - contester
       - en_transit
       - receptionner
       - rembourser
@@ -7833,16 +9568,154 @@ components:
       description: |-
         * `approuver` - approuver
         * `rejeter` - rejeter
+        * `contester` - contester
         * `en_transit` - en_transit
         * `receptionner` - receptionner
         * `rembourser` - rembourser
         * `cloturer` - cloturer
         * `annuler` - annuler
+    AdresseClient:
+      type: object
+      description: |-
+        Adresse du carnet, vue et écrite par son propriétaire.
+
+        Les mêmes règles que l'adresse saisie au checkout : téléphone de 8 à 15
+        chiffres, point GPS facultatif mais complet, dans la Côte d'Ivoire. Le
+        propriétaire vient de la session, jamais du corps de la requête.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        libelle:
+          type: string
+          maxLength: 50
+        destinataire:
+          type: string
+          maxLength: 150
+        telephone:
+          type: string
+          maxLength: 20
+        commune:
+          type: string
+          maxLength: 100
+        quartier:
+          type: string
+          maxLength: 150
+        point_de_repere:
+          type: string
+          maxLength: 500
+        indications:
+          type: string
+          maxLength: 500
+        latitude:
+          type:
+          - number
+          - 'null'
+          format: double
+          maximum: 11.0
+          minimum: 4.0
+          description: Facultatif, avec `longitude`. Degrés décimaux, arrondis à 6
+            décimales.
+        longitude:
+          type:
+          - number
+          - 'null'
+          format: double
+          maximum: -2.0
+          minimum: -9.0
+          description: Facultatif, avec `latitude`. Degrés décimaux, arrondis à 6
+            décimales.
+        par_defaut:
+          type: boolean
+        date_creation:
+          type: string
+          format: date-time
+          readOnly: true
+        date_modification:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - commune
+      - date_creation
+      - date_modification
+      - destinataire
+      - id
+      - libelle
+      - point_de_repere
+      - quartier
+      - telephone
+    AdresseClientRequest:
+      type: object
+      description: |-
+        Adresse du carnet, vue et écrite par son propriétaire.
+
+        Les mêmes règles que l'adresse saisie au checkout : téléphone de 8 à 15
+        chiffres, point GPS facultatif mais complet, dans la Côte d'Ivoire. Le
+        propriétaire vient de la session, jamais du corps de la requête.
+      properties:
+        libelle:
+          type: string
+          minLength: 1
+          maxLength: 50
+        destinataire:
+          type: string
+          minLength: 1
+          maxLength: 150
+        telephone:
+          type: string
+          minLength: 1
+          maxLength: 20
+        commune:
+          type: string
+          minLength: 1
+          maxLength: 100
+        quartier:
+          type: string
+          minLength: 1
+          maxLength: 150
+        point_de_repere:
+          type: string
+          minLength: 1
+          maxLength: 500
+        indications:
+          type: string
+          maxLength: 500
+        latitude:
+          type:
+          - number
+          - 'null'
+          format: double
+          maximum: 11.0
+          minimum: 4.0
+          description: Facultatif, avec `longitude`. Degrés décimaux, arrondis à 6
+            décimales.
+        longitude:
+          type:
+          - number
+          - 'null'
+          format: double
+          maximum: -2.0
+          minimum: -9.0
+          description: Facultatif, avec `latitude`. Degrés décimaux, arrondis à 6
+            décimales.
+        par_defaut:
+          type: boolean
+      required:
+      - commune
+      - destinataire
+      - libelle
+      - point_de_repere
+      - quartier
+      - telephone
     AdresseLivraisonAvecPositionLecture:
       type: object
       description: |-
         Adresse renvoyée au client, au livreur assigné et à l'administration :
-        avec le point GPS, `null` quand le client ne l'a pas donné.
+        avec le point GPS (`null` quand le client ne l'a pas donné), le
+        destinataire et les indications d'accès (vides quand le client n'en a
+        pas donné).
       properties:
         zone:
           type: string
@@ -7853,6 +9726,10 @@ components:
         point_de_repere:
           type: string
         telephone:
+          type: string
+        destinataire:
+          type: string
+        indications:
           type: string
         latitude:
           type:
@@ -7866,6 +9743,8 @@ components:
           format: double
       required:
       - commune
+      - destinataire
+      - indications
       - latitude
       - longitude
       - point_de_repere
@@ -7910,6 +9789,9 @@ components:
 
         `latitude` et `longitude` : point GPS facultatif (bouton « ma position »),
         les deux ou aucune. Il ne change pas le tarif, qui dépend de la commune.
+
+        `destinataire` et `indications` : facultatifs, pour le livreur (personne
+        qui reçoit le colis, consignes d'accès).
       properties:
         commune:
           type: string
@@ -7927,6 +9809,12 @@ components:
           type: string
           minLength: 1
           maxLength: 20
+        destinataire:
+          type: string
+          maxLength: 150
+        indications:
+          type: string
+          maxLength: 500
         latitude:
           type:
           - number
@@ -7950,6 +9838,38 @@ components:
       - point_de_repere
       - quartier
       - telephone
+    ArticleANoter:
+      type: object
+      description: Une ligne de commande livrée que le client peut encore noter.
+      properties:
+        commande_item_id:
+          type: string
+          format: uuid
+        numero_commande:
+          type: string
+        produit_id:
+          type: integer
+        produit_nom:
+          type: string
+        produit_slug:
+          type: string
+        boutique_nom:
+          type: string
+        date_livraison:
+          type: string
+          format: date-time
+        avis_possible_jusqu_au:
+          type: string
+          readOnly: true
+      required:
+      - avis_possible_jusqu_au
+      - boutique_nom
+      - commande_item_id
+      - date_livraison
+      - numero_commande
+      - produit_id
+      - produit_nom
+      - produit_slug
     ArticleRetourInputRequest:
       type: object
       properties:
@@ -8016,6 +9936,222 @@ components:
         * `client` - Client
         * `vendor` - Vendeur
         * `support` - Support ANITCHE
+    Avis:
+      type: object
+      description: Un avis tel que son auteur le voit.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        produit_id:
+          type: integer
+          readOnly: true
+        produit_nom:
+          type: string
+          readOnly: true
+        produit_slug:
+          type: string
+          readOnly: true
+        boutique_nom:
+          type: string
+          readOnly: true
+        commande_item_id:
+          type: string
+          format: uuid
+          readOnly: true
+        note:
+          type: integer
+          readOnly: true
+        commentaire:
+          type: string
+          readOnly: true
+        statut:
+          allOf:
+          - $ref: '#/components/schemas/AvisStatutEnum'
+          readOnly: true
+        est_modifie:
+          type: boolean
+          readOnly: true
+        date_creation:
+          type: string
+          format: date-time
+          readOnly: true
+        date_modification:
+          type: string
+          format: date-time
+          readOnly: true
+        modifiable_jusqu_au:
+          type: string
+          readOnly: true
+          description: Fin du délai de modification par l'auteur (ISO 8601).
+        reponse_vendeur:
+          oneOf:
+          - $ref: '#/components/schemas/ReponseVendeur'
+          - type: 'null'
+          readOnly: true
+      required:
+      - boutique_nom
+      - commande_item_id
+      - commentaire
+      - date_creation
+      - date_modification
+      - est_modifie
+      - id
+      - modifiable_jusqu_au
+      - note
+      - produit_id
+      - produit_nom
+      - produit_slug
+      - reponse_vendeur
+      - statut
+    AvisBoutique:
+      type: object
+      properties:
+        note_moyenne:
+          type:
+          - number
+          - 'null'
+          format: double
+          description: '`null` sans avis publié dans la période.'
+        nombre:
+          type: integer
+      required:
+      - nombre
+      - note_moyenne
+    AvisModeration:
+      type: object
+      description: Avis signalé, tel que la modération le lit.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        produit_id:
+          type: integer
+          readOnly: true
+        produit_nom:
+          type: string
+          readOnly: true
+        boutique_nom:
+          type: string
+          readOnly: true
+        client_id:
+          type: integer
+          readOnly: true
+        note:
+          type: integer
+          readOnly: true
+        commentaire:
+          type: string
+          readOnly: true
+        statut:
+          allOf:
+          - $ref: '#/components/schemas/AvisStatutEnum'
+          readOnly: true
+      required:
+      - boutique_nom
+      - client_id
+      - commentaire
+      - id
+      - note
+      - produit_id
+      - produit_nom
+      - statut
+    AvisPublic:
+      type: object
+      description: |-
+        Un avis publié tel que le public le voit : prénom et initiale du nom
+        seulement, jamais l'email ni l'identifiant du client.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        auteur:
+          type: string
+          readOnly: true
+        note:
+          type: integer
+          readOnly: true
+        commentaire:
+          type: string
+          readOnly: true
+        est_modifie:
+          type: boolean
+          readOnly: true
+        date_creation:
+          type: string
+          format: date-time
+          readOnly: true
+        reponse_vendeur:
+          oneOf:
+          - $ref: '#/components/schemas/ReponseVendeur'
+          - type: 'null'
+          readOnly: true
+      required:
+      - auteur
+      - commentaire
+      - date_creation
+      - est_modifie
+      - id
+      - note
+      - reponse_vendeur
+    AvisRecu:
+      type: object
+      description: Un avis reçu par la boutique, vu par son propriétaire.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        produit_id:
+          type: integer
+          readOnly: true
+        produit_nom:
+          type: string
+          readOnly: true
+        auteur:
+          type: string
+          readOnly: true
+        note:
+          type: integer
+          readOnly: true
+        commentaire:
+          type: string
+          readOnly: true
+        est_modifie:
+          type: boolean
+          readOnly: true
+        date_creation:
+          type: string
+          format: date-time
+          readOnly: true
+        reponse_vendeur:
+          oneOf:
+          - $ref: '#/components/schemas/ReponseVendeur'
+          - type: 'null'
+          readOnly: true
+      required:
+      - auteur
+      - commentaire
+      - date_creation
+      - est_modifie
+      - id
+      - note
+      - produit_id
+      - produit_nom
+      - reponse_vendeur
+    AvisStatutEnum:
+      enum:
+      - publie
+      - masque
+      - supprime
+      type: string
+      description: |-
+        * `publie` - Publié
+        * `masque` - Masqué par la modération
+        * `supprime` - Supprimé par son auteur
     BaremeFrais:
       type: object
       description: |-
@@ -8819,6 +10955,84 @@ components:
       - numero_commande
       - status
       - update_at
+    CommandeHistorique:
+      type: object
+      description: |-
+        Client et vendeur : l'origine du changement (`source`), jamais le compte
+        qui l'a fait.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        ancien_statut:
+          allOf:
+          - $ref: '#/components/schemas/StatutCommandeEnum'
+          readOnly: true
+        nouveau_statut:
+          allOf:
+          - $ref: '#/components/schemas/StatutCommandeEnum'
+          readOnly: true
+        source:
+          allOf:
+          - $ref: '#/components/schemas/SourceEnum'
+          readOnly: true
+        motif:
+          type: string
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - ancien_statut
+      - created_at
+      - id
+      - motif
+      - nouveau_statut
+      - source
+    CommandeHistoriqueAdministration:
+      type: object
+      description: |-
+        Client et vendeur : l'origine du changement (`source`), jamais le compte
+        qui l'a fait.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        ancien_statut:
+          allOf:
+          - $ref: '#/components/schemas/StatutCommandeEnum'
+          readOnly: true
+        nouveau_statut:
+          allOf:
+          - $ref: '#/components/schemas/StatutCommandeEnum'
+          readOnly: true
+        source:
+          allOf:
+          - $ref: '#/components/schemas/SourceEnum'
+          readOnly: true
+        motif:
+          type: string
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        auteur:
+          type:
+          - integer
+          - 'null'
+          readOnly: true
+      required:
+      - ancien_statut
+      - auteur
+      - created_at
+      - id
+      - motif
+      - nouveau_statut
+      - source
     CommandeItem:
       type: object
       properties:
@@ -8934,6 +11148,28 @@ components:
       - motif_annulation
       - numero_commande
       - status
+    CommandesParStatut:
+      type: object
+      properties:
+        creee:
+          type: integer
+        confirmee:
+          type: integer
+        preparation:
+          type: integer
+        expediee:
+          type: integer
+        livree:
+          type: integer
+        annulee:
+          type: integer
+      required:
+      - annulee
+      - confirmee
+      - creee
+      - expediee
+      - livree
+      - preparation
     CompteDecision:
       type: object
       properties:
@@ -9037,6 +11273,16 @@ components:
           minLength: 1
       required:
       - id_token
+    ContenuReponseRequest:
+      type: object
+      description: Corps de la réponse du vendeur (création et modification).
+      properties:
+        contenu:
+          type: string
+          minLength: 1
+          maxLength: 2000
+      required:
+      - contenu
     Contestation:
       type: object
       properties:
@@ -9202,6 +11448,26 @@ components:
       - type_reduction
       - type_reduction_display
       - valeur
+    CreerAvisRequest:
+      type: object
+      description: Corps de la publication d'un avis.
+      properties:
+        commande_item_id:
+          type: string
+          format: uuid
+          description: Ligne de la commande livrée (article acheté) à noter.
+        note:
+          type: integer
+          maximum: 5
+          minimum: 1
+        commentaire:
+          type: string
+          default: ''
+          description: 'Facultatif : la note seule suffit.'
+          maxLength: 2000
+      required:
+      - commande_item_id
+      - note
     CreerDemandeRetourRequest:
       type: object
       properties:
@@ -9268,6 +11534,38 @@ components:
           default: standard
       required:
       - produit_id
+    DecisionModeration:
+      type: object
+      description: 'Décision de modération : qui, quand, quoi, pourquoi.'
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        avis_id:
+          type: string
+          format: uuid
+          readOnly: true
+        moderateur_id:
+          type: integer
+          readOnly: true
+        type_decision:
+          allOf:
+          - $ref: '#/components/schemas/TypeDecisionEnum'
+          readOnly: true
+        motif:
+          type: string
+          readOnly: true
+        date_creation:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - avis_id
+      - date_creation
+      - id
+      - moderateur_id
+      - motif
+      - type_decision
     DecisionVendeurReponse:
       type: object
       description: Réponse des décisions sur une demande vendeur (documentation OpenAPI).
@@ -9338,7 +11636,9 @@ components:
           type: integer
           readOnly: true
         client_email:
-          type: string
+          type:
+          - string
+          - 'null'
           format: email
           readOnly: true
         boutique:
@@ -9419,7 +11719,25 @@ components:
           - 'null'
           format: date-time
           readOnly: true
+        date_limite_vendeur:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          readOnly: true
+        date_limite_contestation:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          readOnly: true
+        actions_possibles:
+          type: array
+          items:
+            $ref: '#/components/schemas/ActionRetourEnum'
+          readOnly: true
       required:
+      - actions_possibles
       - articles
       - boutique
       - boutique_nom
@@ -9428,6 +11746,8 @@ components:
       - commande
       - date_cloture
       - date_creation
+      - date_limite_contestation
+      - date_limite_vendeur
       - date_traitement
       - description
       - frais_livraison_rembourses
@@ -9928,6 +12248,96 @@ components:
       required:
       - access
       - refresh
+    JournalConnexion:
+      type: object
+      description: |-
+        Connexion vue par son titulaire : date, résultat, méthode, IP et
+        appareil. Aucun secret n'est enregistré dans le journal.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        date_creation:
+          type: string
+          format: date-time
+          readOnly: true
+        reussie:
+          type: boolean
+          readOnly: true
+        motif_echec:
+          allOf:
+          - $ref: '#/components/schemas/MotifEchecEnum'
+          readOnly: true
+        methode:
+          allOf:
+          - $ref: '#/components/schemas/MethodeConnexionEnum'
+          readOnly: true
+        adresse_ip:
+          type:
+          - string
+          - 'null'
+          readOnly: true
+        user_agent:
+          type: string
+          readOnly: true
+      required:
+      - adresse_ip
+      - date_creation
+      - id
+      - methode
+      - motif_echec
+      - reussie
+      - user_agent
+    JournalConnexionAdministration:
+      type: object
+      description: |-
+        Connexion vue par l'administration : ajoute le compte visé (vide si
+        l'email tenté est inconnu) et l'email tenté.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        utilisateur:
+          type:
+          - integer
+          - 'null'
+          readOnly: true
+        email_tente:
+          type: string
+          readOnly: true
+        date_creation:
+          type: string
+          format: date-time
+          readOnly: true
+        reussie:
+          type: boolean
+          readOnly: true
+        motif_echec:
+          allOf:
+          - $ref: '#/components/schemas/MotifEchecEnum'
+          readOnly: true
+        methode:
+          allOf:
+          - $ref: '#/components/schemas/MethodeConnexionEnum'
+          readOnly: true
+        adresse_ip:
+          type:
+          - string
+          - 'null'
+          readOnly: true
+        user_agent:
+          type: string
+          readOnly: true
+      required:
+      - adresse_ip
+      - date_creation
+      - email_tente
+      - id
+      - methode
+      - motif_echec
+      - reussie
+      - user_agent
+      - utilisateur
     LigneReversement:
       type: object
       description: Article vendu et frais figés au moment de l'achat.
@@ -10456,6 +12866,14 @@ components:
           type: string
       required:
       - message
+    MethodeConnexionEnum:
+      enum:
+      - mot_de_passe
+      - google
+      type: string
+      description: |-
+        * `mot_de_passe` - Email et mot de passe
+        * `google` - Google
     MethodeEnum:
       enum:
       - wave
@@ -10484,6 +12902,32 @@ components:
         * `administration` - Annulée par l'administration
         * `boutique_indisponible` - Boutique indisponible
         * `livraison_echouee` - Livraison échouée
+    MotifEchecEnum:
+      enum:
+      - email_inconnu
+      - mot_de_passe_incorrect
+      - compte_desactive
+      - google_jeton_invalide
+      - google_infos_incompletes
+      - google_liaison_refusee
+      type: string
+      description: |-
+        * `email_inconnu` - Email inconnu
+        * `mot_de_passe_incorrect` - Mot de passe incorrect
+        * `compte_desactive` - Compte désactivé
+        * `google_jeton_invalide` - Jeton Google invalide
+        * `google_infos_incompletes` - Informations Google incomplètes
+        * `google_liaison_refusee` - Liaison Google refusée
+    MotifModerationRequest:
+      type: object
+      description: 'Corps d''une décision de modération : le motif est obligatoire.'
+      properties:
+        motif:
+          type: string
+          minLength: 1
+          maxLength: 1000
+      required:
+      - motif
     MotifRemboursementEnum:
       enum:
       - commande_annulee
@@ -10512,6 +12956,22 @@ components:
         * `article_manquant` - Article manquant dans le colis
         * `changement_avis` - Changement d'avis (droit de rétractation)
         * `autre` - Autre motif
+    MotifSignalementAvisEnum:
+      enum:
+      - spam
+      - injurieux
+      - hors_sujet
+      - faux_avis
+      - donnees_personnelles
+      - autre
+      type: string
+      description: |-
+        * `spam` - Publicité ou spam
+        * `injurieux` - Propos injurieux ou haineux
+        * `hors_sujet` - Hors sujet
+        * `faux_avis` - Avis non authentique
+        * `donnees_personnelles` - Données personnelles
+        * `autre` - Autre
     NommerLivreurRequest:
       type: object
       properties:
@@ -10564,8 +13024,9 @@ components:
             : /commandes, /commandes/{uuid}, /livraisons/{uuid}, /retours/{uuid},
             /paiements/{uuid}, /fidelite/mon-compte, /support/tickets/{uuid}, /vendeur/commandes/{uuid},
             /vendeur/produits/{id}, /vendeur/retours/{uuid}, /vendeur/reversements,
-            /administration/retours/{uuid}, /administration/remboursements, /administration/livraisons/{uuid}.
-            Un préfixe inconnu mène au centre de notifications.'
+            /moderation/retours/{uuid}, /administration/retours/{uuid}, /administration/remboursements,
+            /administration/reversements, /administration/livraisons/{uuid}. Un préfixe
+            inconnu mène au centre de notifications.'
         metadata:
           readOnly: true
           description: Données contextuelles additionnelles (IDs techniques, totaux,
@@ -10621,6 +13082,121 @@ components:
         * `100_PTS_10PCT` - 100_PTS_10PCT
         * `250_PTS_2500FCFA` - 250_PTS_2500FCFA
         * `500_PTS_6000FCFA` - 500_PTS_6000FCFA
+    PaginatedAdresseClientList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdresseClient'
+    PaginatedArticleANoterList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/ArticleANoter'
+    PaginatedAvisList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/Avis'
+    PaginatedAvisPublicList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/AvisPublic'
+    PaginatedAvisRecuList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/AvisRecu'
     PaginatedBaremeFraisList:
       type: object
       required:
@@ -10713,6 +13289,52 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/CommandeAdministration'
+    PaginatedCommandeHistoriqueAdministrationList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/CommandeHistoriqueAdministration'
+    PaginatedCommandeHistoriqueList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/CommandeHistorique'
     PaginatedCommandeItemList:
       type: object
       required:
@@ -10920,6 +13542,52 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ImageProduit'
+    PaginatedJournalConnexionAdministrationList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/JournalConnexionAdministration'
+    PaginatedJournalConnexionList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/JournalConnexion'
     PaginatedLivraisonHistoriqueList:
       type: object
       required:
@@ -11196,6 +13864,29 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/RemboursementAdmin'
+    PaginatedRetourHistoriqueList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/RetourHistorique'
     PaginatedReversementAdminList:
       type: object
       required:
@@ -11242,6 +13933,29 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ReversementVendeur'
+    PaginatedSignalementModerationList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/SignalementModeration'
     PaginatedSupportTicketList:
       type: object
       required:
@@ -11922,6 +14636,7 @@ components:
           title: Boutique créatrice
         numero_lot:
           type: string
+          default: ''
           description: Numéro de série ou identifiant de lot de production
           maxLength: 60
         origine_geographique:
@@ -11982,7 +14697,6 @@ components:
       - desactive_par
       - id
       - nb_scans
-      - numero_lot
       - produit
       - produit_nom
       - statut_certification_display
@@ -12000,6 +14714,7 @@ components:
           title: Variante spécifique (optionnel)
         numero_lot:
           type: string
+          default: ''
           description: Numéro de série ou identifiant de lot de production
           maxLength: 60
         origine_geographique:
@@ -12025,12 +14740,67 @@ components:
         est_actif:
           type: boolean
       required:
-      - numero_lot
       - produit
     PasseportVerifie:
       oneOf:
       - $ref: '#/components/schemas/PasseportPublic'
       - $ref: '#/components/schemas/PasseportRevoque'
+    PatchedAdresseClientRequest:
+      type: object
+      description: |-
+        Adresse du carnet, vue et écrite par son propriétaire.
+
+        Les mêmes règles que l'adresse saisie au checkout : téléphone de 8 à 15
+        chiffres, point GPS facultatif mais complet, dans la Côte d'Ivoire. Le
+        propriétaire vient de la session, jamais du corps de la requête.
+      properties:
+        libelle:
+          type: string
+          minLength: 1
+          maxLength: 50
+        destinataire:
+          type: string
+          minLength: 1
+          maxLength: 150
+        telephone:
+          type: string
+          minLength: 1
+          maxLength: 20
+        commune:
+          type: string
+          minLength: 1
+          maxLength: 100
+        quartier:
+          type: string
+          minLength: 1
+          maxLength: 150
+        point_de_repere:
+          type: string
+          minLength: 1
+          maxLength: 500
+        indications:
+          type: string
+          maxLength: 500
+        latitude:
+          type:
+          - number
+          - 'null'
+          format: double
+          maximum: 11.0
+          minimum: 4.0
+          description: Facultatif, avec `longitude`. Degrés décimaux, arrondis à 6
+            décimales.
+        longitude:
+          type:
+          - number
+          - 'null'
+          format: double
+          maximum: -2.0
+          minimum: -9.0
+          description: Facultatif, avec `latitude`. Degrés décimaux, arrondis à 6
+            décimales.
+        par_defaut:
+          type: boolean
     PatchedBaremeFraisRequest:
       type: object
       description: |-
@@ -12149,6 +14919,14 @@ components:
       properties:
         status:
           $ref: '#/components/schemas/StatutTicketEnum'
+    PatchedContenuReponseRequest:
+      type: object
+      description: Corps de la réponse du vendeur (création et modification).
+      properties:
+        contenu:
+          type: string
+          minLength: 1
+          maxLength: 2000
     PatchedLivraisonChangerStatusRequest:
       type: object
       properties:
@@ -12162,6 +14940,17 @@ components:
           type: string
           default: ''
           maxLength: 10
+    PatchedModifierAvisRequest:
+      type: object
+      description: 'Corps de la modification : au moins un des deux champs.'
+      properties:
+        note:
+          type: integer
+          maximum: 5
+          minimum: 1
+        commentaire:
+          type: string
+          maxLength: 2000
     PatchedNoteTicketRequestRequest:
       type: object
       properties:
@@ -12191,6 +14980,7 @@ components:
           title: Variante spécifique (optionnel)
         numero_lot:
           type: string
+          default: ''
           description: Numéro de série ou identifiant de lot de production
           maxLength: 60
         origine_geographique:
@@ -12354,7 +15144,7 @@ components:
       type: object
       properties:
         action:
-          $ref: '#/components/schemas/ActionEnum'
+          $ref: '#/components/schemas/ActionRetourEnum'
         reponse:
           type: string
           default: ''
@@ -12396,6 +15186,18 @@ components:
         est_active:
           type: boolean
           description: Désactiver cette déclinaison sans toucher aux autres
+    Periode:
+      type: object
+      properties:
+        date_debut:
+          type: string
+          format: date
+        date_fin:
+          type: string
+          format: date
+      required:
+      - date_debut
+      - date_fin
     PhotoRetour:
       type: object
       description: |-
@@ -13013,6 +15815,25 @@ components:
       - reference
       - statut
       - statut_display
+    ReponseVendeur:
+      type: object
+      description: Réponse de la boutique à un avis.
+      properties:
+        contenu:
+          type: string
+          readOnly: true
+        date_creation:
+          type: string
+          format: date-time
+          readOnly: true
+        date_modification:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - contenu
+      - date_creation
+      - date_modification
     ResoudreContestationDecisionEnum:
       enum:
       - rejetee
@@ -13071,6 +15892,46 @@ components:
       - nombre_en_retractation
       - nombre_verse
       - verse
+    RetourHistorique:
+      type: object
+      description: |-
+        Parties et modération : l'origine de l'étape (`source`) et son motif,
+        jamais le compte qui l'a faite.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        ancien_statut:
+          allOf:
+          - $ref: '#/components/schemas/StatutRetourEnum'
+          readOnly: true
+        nouveau_statut:
+          allOf:
+          - $ref: '#/components/schemas/StatutRetourEnum'
+          readOnly: true
+        action:
+          type: string
+          readOnly: true
+        source:
+          allOf:
+          - $ref: '#/components/schemas/SourceHistoriqueRetourEnum'
+          readOnly: true
+        commentaire:
+          type: string
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - action
+      - ancien_statut
+      - commentaire
+      - created_at
+      - id
+      - nouveau_statut
+      - source
     RetourItem:
       type: object
       properties:
@@ -13231,11 +16092,18 @@ components:
           - integer
           - 'null'
           readOnly: true
+        date_debut_transfert:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          readOnly: true
       required:
       - boutique
       - boutique_nom
       - canal
       - commande
+      - date_debut_transfert
       - date_disponibilite
       - date_livraison
       - date_versement
@@ -13380,6 +16248,30 @@ components:
       - reference_externe
       - statut
       - statut_display
+    ReversementsAdministration:
+      type: object
+      properties:
+        en_cours:
+          type: integer
+          description: Montants nets pas encore versés (XOF).
+        verses:
+          type: integer
+          description: Montants versés aux vendeurs (XOF).
+      required:
+      - en_cours
+      - verses
+    ReversementsVendeur:
+      type: object
+      properties:
+        verses:
+          type: integer
+          description: Montants versés au vendeur (XOF).
+        a_venir:
+          type: integer
+          description: Montants nets pas encore versés (XOF).
+      required:
+      - a_venir
+      - verses
     RoleEnum:
       enum:
       - client
@@ -13398,6 +16290,96 @@ components:
         * `support` - Service Client
         * `admin` - Administrateur
         * `super_admin` - Super Administrateur
+    Signalement:
+      type: object
+      description: Signalement tel que son auteur le reçoit.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        avis_id:
+          type: string
+          format: uuid
+          readOnly: true
+        motif:
+          allOf:
+          - $ref: '#/components/schemas/MotifSignalementAvisEnum'
+          readOnly: true
+        commentaire:
+          type: string
+          readOnly: true
+        statut:
+          allOf:
+          - $ref: '#/components/schemas/StatutSignalementAvisEnum'
+          readOnly: true
+        date_creation:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - avis_id
+      - commentaire
+      - date_creation
+      - id
+      - motif
+      - statut
+    SignalementModeration:
+      type: object
+      description: Signalement dans la file de modération.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        avis:
+          allOf:
+          - $ref: '#/components/schemas/AvisModeration'
+          readOnly: true
+        signalant_id:
+          type: integer
+          readOnly: true
+        motif:
+          allOf:
+          - $ref: '#/components/schemas/MotifSignalementAvisEnum'
+          readOnly: true
+        commentaire:
+          type: string
+          readOnly: true
+        statut:
+          allOf:
+          - $ref: '#/components/schemas/StatutSignalementAvisEnum'
+          readOnly: true
+        date_creation:
+          type: string
+          format: date-time
+          readOnly: true
+        date_traitement:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          readOnly: true
+      required:
+      - avis
+      - commentaire
+      - date_creation
+      - date_traitement
+      - id
+      - motif
+      - signalant_id
+      - statut
+    SignalerAvisRequest:
+      type: object
+      description: 'Corps du signalement : motif parmi une liste fermée.'
+      properties:
+        motif:
+          $ref: '#/components/schemas/MotifSignalementAvisEnum'
+        commentaire:
+          type: string
+          default: ''
+          description: 'Facultatif : précision pour la modération.'
+          maxLength: 500
+      required:
+      - motif
     SimulationCheckout:
       type: object
       properties:
@@ -13451,15 +16433,53 @@ components:
       - remise
     SimulerFraisRequest:
       type: object
-      description: Entrée de la simulation du checkout (mêmes champs que la validation).
+      description: |-
+        Entrée de la simulation du checkout (mêmes champs que la validation).
+
+        L'adresse est choisie dans le carnet du client (`adresse_id`) OU saisie
+        (`adresse_livraison`) : l'une des deux, pas les deux.
       properties:
+        adresse_id:
+          type: string
+          format: uuid
+          description: Adresse du carnet du client. Exclusif avec `adresse_livraison`.
         adresse_livraison:
-          $ref: '#/components/schemas/AdresseLivraisonRequest'
+          allOf:
+          - $ref: '#/components/schemas/AdresseLivraisonRequest'
+          description: Adresse saisie. Exclusif avec `adresse_id`.
         coupon_code:
           type: string
           maxLength: 30
-      required:
-      - adresse_livraison
+    SourceEnum:
+      enum:
+      - client
+      - vendeur
+      - admin
+      - paiement
+      - livraison
+      - systeme
+      type: string
+      description: |-
+        * `client` - Client
+        * `vendeur` - Vendeur
+        * `admin` - Administration
+        * `paiement` - Paiement
+        * `livraison` - Livraison
+        * `systeme` - Système
+    SourceHistoriqueRetourEnum:
+      enum:
+      - client
+      - vendeur
+      - moderation
+      - administration
+      - systeme
+      type: string
+      description: |-
+        * `client` - Client
+        * `vendeur` - Vendeur
+        * `moderation` - Modération
+        * `administration` - Administration
+        * `systeme` - Système
     SousCategorie:
       type: object
       properties:
@@ -13495,6 +16515,93 @@ components:
       required:
       - id
       - nom
+    StatistiquesAdministration:
+      type: object
+      properties:
+        periode:
+          $ref: '#/components/schemas/Periode'
+        volume_ventes:
+          type: integer
+          description: Ventes brutes moins les retours remboursés (XOF).
+        montant_retours:
+          type: integer
+          description: Valeur des articles retournés et remboursés, déduite (XOF).
+        commissions:
+          type: integer
+          description: Commissions et frais fixes des articles vendus, moins la commission
+            rendue sur les retours (XOF).
+        nombre_commandes:
+          type: integer
+          description: 'Commandes comptées : payées, non annulées.'
+        commandes_par_statut:
+          allOf:
+          - $ref: '#/components/schemas/CommandesParStatut'
+          description: Toutes les commandes créées dans la période.
+        nouveaux_clients:
+          type: integer
+        vendeurs_actifs:
+          type: integer
+          description: Boutiques avec au moins une commande comptée.
+        reversements:
+          $ref: '#/components/schemas/ReversementsAdministration'
+        avis_signales_en_attente:
+          type: integer
+          description: Signalements ouverts, sans filtre de période.
+      required:
+      - avis_signales_en_attente
+      - commandes_par_statut
+      - commissions
+      - montant_retours
+      - nombre_commandes
+      - nouveaux_clients
+      - periode
+      - reversements
+      - vendeurs_actifs
+      - volume_ventes
+    StatistiquesVendeur:
+      type: object
+      properties:
+        periode:
+          $ref: '#/components/schemas/Periode'
+        chiffre_affaires:
+          type: integer
+          description: Ventes brutes moins les retours remboursés (XOF).
+        montant_retours:
+          type: integer
+          description: Valeur des articles retournés et remboursés, déduite (XOF).
+        nombre_commandes:
+          type: integer
+          description: 'Commandes comptées : payées, non annulées.'
+        commandes_par_statut:
+          allOf:
+          - $ref: '#/components/schemas/CommandesParStatut'
+          description: Toutes les commandes créées dans la période.
+        panier_moyen:
+          type: integer
+          description: Ventes brutes ÷ commandes comptées (XOF).
+        top_produits:
+          type: array
+          items:
+            $ref: '#/components/schemas/TopProduit'
+        avis:
+          $ref: '#/components/schemas/AvisBoutique'
+        taux_retour:
+          type: number
+          format: double
+          description: Pourcentage de commandes livrées avec un retour accepté.
+        reversements:
+          $ref: '#/components/schemas/ReversementsVendeur'
+      required:
+      - avis
+      - chiffre_affaires
+      - commandes_par_statut
+      - montant_retours
+      - nombre_commandes
+      - panier_moyen
+      - periode
+      - reversements
+      - taux_retour
+      - top_produits
     StatutCertificationEnum:
       enum:
       - certifie_authentique
@@ -13601,6 +16708,10 @@ components:
       - rembourse
       - cloture
       - annule
+      - refuse_vendeur
+      - en_moderation
+      - refuse_moderation
+      - en_arbitrage
       type: string
       description: |-
         * `demande` - Demande soumise
@@ -13611,6 +16722,10 @@ components:
         * `rembourse` - Remboursé
         * `cloture` - Clôturé
         * `annule` - Annulée par le client
+        * `refuse_vendeur` - Refusée par le vendeur (contestable)
+        * `en_moderation` - En examen par la modération
+        * `refuse_moderation` - Refusée par la modération (contestable)
+        * `en_arbitrage` - En arbitrage par l'administration
     StatutReversementEnum:
       enum:
       - en_attente_livraison
@@ -13629,6 +16744,16 @@ components:
         * `en_cours` - Versement en cours
         * `verse` - Versé
         * `annule` - Annulé
+    StatutSignalementAvisEnum:
+      enum:
+      - ouvert
+      - accepte
+      - rejete
+      type: string
+      description: |-
+        * `ouvert` - Ouvert
+        * `accepte` - Accepté (avis masqué)
+        * `rejete` - Rejeté
     StatutTicketEnum:
       enum:
       - open
@@ -14121,6 +17246,23 @@ components:
           minLength: 1
       required:
       - refresh
+    TopProduit:
+      type: object
+      properties:
+        produit:
+          type: integer
+        nom:
+          type: string
+        quantite:
+          type: integer
+        ventes:
+          type: integer
+          description: Ventes brutes (XOF) des commandes comptées.
+      required:
+      - nom
+      - produit
+      - quantite
+      - ventes
     TraiterRemboursementDecisionEnum:
       enum:
       - effectue
@@ -14189,6 +17331,16 @@ components:
       properties:
         operateur:
           $ref: '#/components/schemas/OperateurEnum'
+    TypeDecisionEnum:
+      enum:
+      - masquer
+      - retablir
+      - rejeter_signalement
+      type: string
+      description: |-
+        * `masquer` - Avis masqué
+        * `retablir` - Avis rétabli
+        * `rejeter_signalement` - Signalement rejeté
     TypeNotificationEnum:
       enum:
       - commande
@@ -14799,6 +17951,10 @@ tags:
 - name: Retours
   description: Demandes de retour (commande livrée, 7 jours), photos justificatives,
     traitement par la boutique ou l'administration.
+- name: Avis
+  description: 'Avis d''un client sur un produit reçu (note de 1 à 5, 60 jours après
+    la livraison, un avis par produit) : articles à noter, mes avis, modification
+    et suppression par l''auteur.'
 - name: Fidélité
   description: Compte de points, gains en attente, transactions, conversion de points
     en coupon, vérification d'un code promo.
@@ -14811,3 +17967,6 @@ tags:
 - name: Passeports QR
   description: 'Passeports d''authenticité : vérification publique d''un QR, gestion
     par le vendeur.'
+- name: Statistiques
+  description: 'Statistiques en lecture seule : ventes de la boutique du vendeur,
+    activité de la plateforme pour l''administration, sur une période en Africa/Abidjan.'

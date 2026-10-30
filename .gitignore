@@ -43,3 +43,6 @@ staticfiles/
 # Journal et fichiers locaux des sauvegardes (infra/scripts/backup.sh) :
 # jamais une sauvegarde dans le dépôt
 infra/backups/
+
+# Configuration locale de Claude Code : jamais dans le dépôt
+.claude/

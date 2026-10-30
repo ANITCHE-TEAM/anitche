@@ -6,8 +6,9 @@
 #   0 3 * * * /srv/anitche/infra/scripts/backup.sh > /dev/null 2>&1
 #
 # Étapes :
-#   1. charge infra/.env et vérifie les variables de la sauvegarde (noms
-#      seulement, jamais les valeurs) ;
+#   1. charge le fichier d'environnement (ENV_FILE, infra/.env par défaut)
+#      et vérifie les variables de la sauvegarde (noms seulement, jamais
+#      les valeurs) ;
 #   2. construit l'image « backup » (cache de Docker : quelques secondes
 #      quand infra/backup/ n'a pas changé) ;
 #   3. lance le conteneur à usage unique « backup » (infra/backup/entrypoint.sh) :
@@ -19,7 +20,11 @@
 #      service de surveillance alerte quand l'appel d'une nuit manque
 #      (échec, cron arrêté, serveur éteint).
 # Sort avec le code du conteneur (3 : fichier média illisible, compté comme
-# un échec).
+# un échec). Aussi lancé par infra/scripts/migrer.sh avant toute migration.
+#
+# Variables : ENV_FILE (fichier d'environnement, infra/.env par défaut),
+# COMPOSE_FILE (compose de production par défaut ; la CI y ajoute sa
+# surcharge, dépôt restic local).
 #
 # Usage : infra/scripts/backup.sh [--controle-approfondi]
 
@@ -28,14 +33,15 @@ umask 077
 
 cd "$(dirname "$0")/../.."   # racine du dépôt
 
-COMPOSE_PROD=infra/docker-compose.prod.yml
+ENV_FILE="${ENV_FILE:-infra/.env}"
+export COMPOSE_FILE="${COMPOSE_FILE:-infra/docker-compose.prod.yml}"
 JOURNAL=infra/backups/backup.log
 REQUISES=(
-    DB_NAME DB_USER DB_PASSWORD
+    DB_NAME DB_SUPERUSER_PASSWORD
     BACKUP_REPOSITORY BACKUP_PASSWORD BACKUP_S3_ACCESS_KEY_ID BACKUP_S3_SECRET_ACCESS_KEY
 )
 
-compose() { docker compose -f "$COMPOSE_PROD" --env-file infra/.env --profile backup "$@"; }
+compose() { docker compose --env-file "$ENV_FILE" --profile backup "$@"; }
 journal() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$JOURNAL"; }
 # Commande dont la sortie va aussi au journal ; rend son propre code.
 executer() {
@@ -58,19 +64,20 @@ chmod 700 infra/backups
 debut=$(date -u +%s)
 journal "sauvegarde : début${option:+ ($option)}"
 
-if [ ! -f infra/.env ]; then
-    journal "sauvegarde : ÉCHEC (infra/.env introuvable)"
+if [ ! -f "$ENV_FILE" ]; then
+    journal "sauvegarde : ÉCHEC ($ENV_FILE introuvable)"
     exit 1
 fi
 set -a
-. infra/.env
+# shellcheck source=/dev/null
+. "$ENV_FILE"
 set +a
 manquantes=()
 for var in "${REQUISES[@]}"; do
     [ -n "${!var:-}" ] || manquantes+=("$var")
 done
 if [ "${#manquantes[@]}" -gt 0 ]; then
-    journal "sauvegarde : ÉCHEC (absentes ou vides dans infra/.env : ${manquantes[*]})"
+    journal "sauvegarde : ÉCHEC (absentes ou vides dans $ENV_FILE : ${manquantes[*]})"
     exit 1
 fi
 

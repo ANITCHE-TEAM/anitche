@@ -206,7 +206,8 @@ class RetoursAPITestCase(BaseRetourTestCase):
 
         response = self.client.patch(url, data, format="json")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["statut"], "rejete")
+        # Refus contestable par le client, pas encore définitif.
+        self.assertEqual(response.data["statut"], "refuse_vendeur")
 
     def test_reception_colis_retour_reapprovisionne_stock(self):
         demande = DemandeRetour.objects.create(
@@ -386,6 +387,21 @@ class RetoursAdminTestCase(APITestCase):
         admin_instance = RetourItemAdmin(RetourItem, AdminSite())
         self.assertIn("quantite", admin_instance.readonly_fields)
 
+    def test_demande_et_articles_jamais_supprimes_dans_admin(self):
+        """Une demande porte le montant remboursé : ni elle ni ses articles
+        ne se suppriment dans l'admin, même pour un superutilisateur."""
+        from apps.retours.admin import DemandeRetourAdmin, RetourItemAdmin, RetourItemInline
+        from django.contrib.admin.sites import AdminSite
+        from django.test import RequestFactory
+
+        requete = RequestFactory().get("/")
+        requete.user = Utilisateur.objects.create_superuser(
+            email="su-retours@test.com", password="testpass123", nom="S", prenom="U",
+        )
+        self.assertFalse(DemandeRetourAdmin(DemandeRetour, AdminSite()).has_delete_permission(requete))
+        self.assertFalse(RetourItemAdmin(RetourItem, AdminSite()).has_delete_permission(requete))
+        self.assertFalse(RetourItemInline.can_delete)
+
     def test_image_photo_retour_readonly_dans_admin(self):
         from apps.retours.admin import PhotoRetourAdmin
         from apps.retours.models import PhotoRetour
@@ -541,20 +557,19 @@ class TransitionsTests(RetoursCycleBase):
         demande = self.demande_au_statut(DemandeRetour.Statut.DEMANDE)
         self.assertEqual(self.agir(demande.id, self.vendeur1, "rejeter").status_code, 400)
 
-    def test_rejet_alerte_l_administration_et_le_client(self):
+    def test_refus_du_vendeur_previent_le_client_de_son_delai_de_contestation(self):
+        from .signals import date_lisible
+
         demande = self.demande_au_statut(DemandeRetour.Statut.DEMANDE)
         self.assertEqual(self.agir(demande.id, self.vendeur1, "rejeter", reponse="Hors délai.").status_code, 200)
-        self.assertTrue(Notification.objects.filter(destinataire=self.admin, titre__icontains="rejeté").exists())
-        self.assertTrue(Notification.objects.filter(destinataire=self.client1, metadata__retour_id=str(demande.id)).exists())
-        # Lien du portail d'administration, jamais /admin/ (admin Django).
-        self.assertEqual(
-            Notification.objects.get(destinataire=self.admin, titre__icontains="rejeté").lien_redirection,
-            f"/administration/retours/{demande.id}",
-        )
-        self.assertEqual(
-            Notification.objects.get(destinataire=self.client1, metadata__retour_id=str(demande.id)).lien_redirection,
-            f"/retours/{demande.id}",
-        )
+        demande.refresh_from_db()
+        notification = Notification.objects.get(destinataire=self.client1, metadata__retour_id=str(demande.id))
+        self.assertIn(date_lisible(demande.date_limite_contestation), notification.message)
+        self.assertIn("Hors délai.", notification.message)
+        self.assertEqual(notification.lien_redirection, f"/retours/{demande.id}")
+        # La modération est le premier recours : l'administration n'est pas
+        # alertée de chaque refus.
+        self.assertFalse(Notification.objects.filter(destinataire=self.admin).exists())
 
     def test_client_marque_expedie_et_le_vendeur_est_prevenu(self):
         demande = self.demande_au_statut(DemandeRetour.Statut.APPROUVE)
@@ -586,9 +601,12 @@ class TransitionsTests(RetoursCycleBase):
             with self.subTest(tiers=tiers.email):
                 self.assertEqual(self.agir(demande.id, tiers, "approuver").status_code, 404)
 
-    def test_administration_peut_agir(self):
-        demande = self.demande_au_statut(DemandeRetour.Statut.DEMANDE)
-        self.assertEqual(self.agir(demande.id, self.admin, "approuver").status_code, 200)
+    def test_administration_debloque_un_vendeur_defaillant(self):
+        demande = self.demande_au_statut(DemandeRetour.Statut.APPROUVE)
+        for action, statut in (("en_transit", "en_transit"), ("receptionner", "receptionne")):
+            with self.subTest(action=action):
+                r = self.agir(demande.id, self.admin, action)
+                self.assertEqual((r.status_code, r.data["statut"]), (200, statut))
 
     def test_reception_sans_passage_en_transit(self):
         demande = self.demande_au_statut(DemandeRetour.Statut.APPROUVE)
@@ -599,10 +617,16 @@ class TransitionsTests(RetoursCycleBase):
     def test_statuts_definitifs(self):
         for statut in (DemandeRetour.Statut.REJETE, DemandeRetour.Statut.ANNULE, DemandeRetour.Statut.CLOTURE):
             demande = self.demande_au_statut(statut)
-            for action in ("approuver", "cloturer", "annuler", "rembourser"):
+            # Échéance de contestation encore à venir : seule la table des
+            # transitions ferme la contestation.
+            DemandeRetour.objects.filter(pk=demande.pk).update(
+                date_limite_contestation=timezone.now() + timedelta(days=1),
+            )
+            for action in ("approuver", "cloturer", "annuler", "rembourser", "contester"):
                 with self.subTest(statut=statut, action=action):
-                    utilisateur = self.client1 if action == "annuler" else self.vendeur1
-                    self.assertEqual(self.agir(demande.id, utilisateur, action).status_code, 400)
+                    utilisateur = self.client1 if action in ("annuler", "contester") else self.vendeur1
+                    r = self.agir(demande.id, utilisateur, action, reponse="Je conteste cette décision définitive.")
+                    self.assertEqual(r.status_code, 400)
 
 
 class NotificationEtVisibiliteTests(RetoursCycleBase):

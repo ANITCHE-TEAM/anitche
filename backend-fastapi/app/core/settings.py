@@ -33,6 +33,9 @@ DEFAULT_RATE_LIMITS = {
 }
 
 DEV_DATABASE_PASSWORD = "fastapi_ro_dev"
+# Même règle que config/settings/prod.py côté Django : le mot de passe est
+# inséré tel quel dans l'URL, un « / », « @ » ou « : » la couperait ailleurs.
+REDIS_PASSWORD_MIN_LENGTH = 32
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
 
@@ -72,9 +75,6 @@ class Settings(BaseSettings):
     # next/previous. Jamais déduite de l'en-tête Host (forgeable, et uvicorn
     # tourne avec --no-proxy-headers : le schéma lu serait http).
     public_base_url: str = "http://localhost:8001"
-    # Adresse publique des fichiers média de Django (MEDIA_URL servi) : la
-    # vue du catalogue ne donne que le chemin relatif des images.
-    media_base_url: str = "http://localhost:8000/media/"
     # Durée du cache Redis des totaux, facettes et suggestions (secondes).
     # 0 : pas de cache. Jamais de cache sur la page de résultats.
     search_cache_ttl: int = Field(default=60, ge=0, le=300)
@@ -162,18 +162,12 @@ class Settings(BaseSettings):
             raise ValueError("ROOT_PATH doit commencer par « / » et ne pas finir par « / » (ex. /fast)")
         return value
 
-    # Formes uniques, pour construire les liens par simple concaténation :
-    # PUBLIC_BASE_URL sans « / » final (suivi du chemin de la route),
-    # MEDIA_BASE_URL avec (suivi du chemin relatif de l'image).
+    # Forme unique, pour construire les liens par simple concaténation :
+    # PUBLIC_BASE_URL sans « / » final (suivi du chemin de la route).
     @field_validator("public_base_url")
     @classmethod
     def _strip_public_base_url(cls, value: str) -> str:
         return value.rstrip("/")
-
-    @field_validator("media_base_url")
-    @classmethod
-    def _slash_media_base_url(cls, value: str) -> str:
-        return value.rstrip("/") + "/"
 
     @model_validator(mode="after")
     def _check_urls(self):
@@ -183,7 +177,6 @@ class Settings(BaseSettings):
             "REDIS_URL": (self.redis_url, {"redis", "rediss"}),
             "FRONTEND_BASE_URL": (self.frontend_base_url, {"http", "https"}),
             "PUBLIC_BASE_URL": (self.public_base_url, {"http", "https"}),
-            "MEDIA_BASE_URL": (self.media_base_url, {"http", "https"}),
         }
         for name, (url, allowed) in schemes.items():
             parts = urlsplit(url)
@@ -194,7 +187,6 @@ class Settings(BaseSettings):
         public_urls = (
             ("FRONTEND_BASE_URL", self.frontend_base_url),
             ("PUBLIC_BASE_URL", self.public_base_url),
-            ("MEDIA_BASE_URL", self.media_base_url),
         )
         for name, url in public_urls:
             parts = urlsplit(url)
@@ -230,9 +222,6 @@ class Settings(BaseSettings):
         if not self.public_base_url.startswith("https://") or _host(self.public_base_url) in LOCAL_HOSTS:
             problems.append("PUBLIC_BASE_URL doit être l'adresse https:// publique de FastAPI (ex. https://anitche.com/fast)")
 
-        if not self.media_base_url.startswith("https://") or _host(self.media_base_url) in LOCAL_HOSTS:
-            problems.append("MEDIA_BASE_URL doit être l'adresse https:// publique des fichiers média de Django")
-
         if _host(self.django_api_base_url) in LOCAL_HOSTS:
             problems.append("DJANGO_API_BASE_URL doit pointer vers le service Django (pas localhost)")
 
@@ -244,6 +233,12 @@ class Settings(BaseSettings):
 
         if _host(self.redis_url) in LOCAL_HOSTS:
             problems.append("REDIS_URL ne doit pas pointer vers localhost")
+        redis_password = urlsplit(self.redis_url).password or ""
+        if len(redis_password) < REDIS_PASSWORD_MIN_LENGTH or not redis_password.isascii() or not redis_password.isalnum():
+            problems.append(
+                "REDIS_URL doit contenir le mot de passe de Redis (redis://:<REDIS_PASSWORD>@redis:6379/2) : "
+                f"{REDIS_PASSWORD_MIN_LENGTH} caractères au moins, lettres et chiffres uniquement"
+            )
 
         if self.trusted_proxy_count != 1:
             problems.append("TRUSTED_PROXY_COUNT doit valoir 1 (nginx)")

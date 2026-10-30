@@ -158,12 +158,11 @@ async def rechercher_produits(
         raise CodedHTTPException(404, PAGE_NOT_FOUND_MESSAGE, PAGE_NOT_FOUND_CODE)
 
     rows = await search.fetch_page(state.db, filters, sort, page)
-    media_base_url = state.settings.media_base_url
     return {
         "count": count,
         "next": _page_link(request, filters, tri, page + 1) if page < last_page else None,
         "previous": _page_link(request, filters, tri, page - 1) if page > 1 else None,
-        "results": [search.product_result(row, media_base_url) for row in rows],
+        "results": [search.product_result(row) for row in rows],
         "facettes": facettes,
     }
 

@@ -3,7 +3,10 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import path, include
 
+from apps.core.sante import sante
+
 urlpatterns = [
+    path('health/', sante, name='sante'),
     path('admin/', admin.site.urls),
     path('api/utilisateurs/', include('apps.utilisateurs.urls')),
     path('api/vendeurs/', include('apps.vendeurs.urls')),
@@ -15,8 +18,10 @@ urlpatterns = [
     path("api/paiements/", include("apps.paiements.urls")),
     path("api/notifications/", include("apps.notifications.urls")),
     path("api/retours/", include("apps.retours.urls")),
+    path("api/avis/", include("apps.avis.urls")),
     path("api/fidelite/", include("apps.fidelite.urls")),
     path("api/passeports/", include("apps.passeport_qr.urls")),
+    path("api/statistiques/", include("apps.statistiques.urls")),
 ]
 
 # Documentation d'API interactive (drf-spectacular) : jamais en production

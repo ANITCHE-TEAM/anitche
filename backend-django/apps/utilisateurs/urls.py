@@ -16,6 +16,10 @@ from .views import (
     ConnexionGoogleView,
     LogoutView,
     UtilisateurAdministrationListView,
+    MesConnexionsListView,
+    JournalConnexionAdministrationListView,
+    AdresseClientListCreateView,
+    AdresseClientDetailView,
 )
 
 # =====================================================
@@ -122,4 +126,16 @@ urlpatterns = [
 
     # Administration : recherche de comptes (rôle admin ou super_admin).
     path('administration/', UtilisateurAdministrationListView.as_view(), name='administration-utilisateurs'),
+
+    # Journal des connexions : les miennes, et toutes (administration).
+    path('connexions/', MesConnexionsListView.as_view(), name='mes-connexions'),
+    path(
+        'administration/connexions/',
+        JournalConnexionAdministrationListView.as_view(),
+        name='administration-connexions',
+    ),
+
+    # Carnet d'adresses de livraison du client connecté.
+    path('adresses/', AdresseClientListCreateView.as_view(), name='adresses'),
+    path('adresses/<uuid:pk>/', AdresseClientDetailView.as_view(), name='adresse-detail'),
 ]

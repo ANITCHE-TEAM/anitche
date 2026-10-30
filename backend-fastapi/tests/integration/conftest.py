@@ -137,9 +137,10 @@ class Seed:
             INSERT INTO vendeurs_boutique
                 (nom, slug, description, telephone_contact, email_contact, adresse,
                  ville, est_active, date_creation, date_mise_a_jour, proprietaire_id,
-                 est_suspendue, nom_normalise, livraison_offerte)
+                 est_suspendue, nom_normalise, livraison_offerte,
+                 nombre_avis, nombre_avis_positifs)
             VALUES ($1, $1, '', '', '', '', 'Abidjan', true, now(), now(), $2,
-                    false, $1, false)
+                    false, $1, false, 0, 0)
             RETURNING id
             """,
             f"it-{suffix}", self.users[owner],
@@ -164,9 +165,10 @@ class Seed:
                     INSERT INTO commandes_groupecommande
                         (id, created_at, client_id, livraison_commune, livraison_point_de_repere,
                          livraison_quartier, livraison_telephone, livraison_zone,
-                         livraison_latitude, livraison_longitude)
+                         livraison_latitude, livraison_longitude,
+                         livraison_destinataire, livraison_indications)
                     VALUES ($1, now(), $2, 'Cocody', 'Test', 'Angré', '+2250700000000', 'abidjan',
-                            $3, $4)
+                            $3, $4, '', '')
                     """,
                     group_id, self.users[client], latitude, longitude,
                 )
@@ -324,8 +326,9 @@ class CatalogueSeed:
             INSERT INTO vendeurs_boutique
                 (nom, slug, description, telephone_contact, email_contact, adresse, ville,
                  est_active, date_creation, date_mise_a_jour, proprietaire_id,
-                 est_suspendue, nom_normalise, livraison_offerte)
-            VALUES ($1, $2, '', '', '', '', 'Abidjan', $3, now(), now(), $4, $5, $2, false)
+                 est_suspendue, nom_normalise, livraison_offerte,
+                 nombre_avis, nombre_avis_positifs)
+            VALUES ($1, $2, '', '', '', '', 'Abidjan', $3, now(), now(), $4, $5, $2, false, 0, 0)
             RETURNING id
             """,
             name, slug, active, owner, suspended,
@@ -377,8 +380,8 @@ class CatalogueSeed:
                     """
                     INSERT INTO catalogue_produit
                         (nom, slug, description, prix_base, est_actif, date_creation, date_mise_a_jour,
-                         boutique_id, categorie_id, desactive_par)
-                    VALUES ($1, $2, $3, $4, $5, coalesce($6, now()), now(), $7, $8, $9)
+                         boutique_id, categorie_id, desactive_par, nombre_avis)
+                    VALUES ($1, $2, $3, $4, $5, coalesce($6, now()), now(), $7, $8, $9, 0)
                     RETURNING id
                     """,
                     name, f"it-{uuid.uuid4().hex}", description, Decimal(base_price), active, created,

@@ -146,7 +146,7 @@ B. Scanner intégré ou saisie manuelle (application)
 | `FRONTEND_BASE_URL` | `http://localhost:5173` | `${FRONTEND_BASE_URL:-https://anitche.com}`, **même valeur que Django** ; `https://` obligatoire et pas localhost (le service refuse de démarrer sinon) |
 | `RATE_LIMITS` (`qr_scan`) | 600/hour | 600/hour |
 
-`FRONTEND_BASE_URL` : ni paramètres, ni fragment, ni identifiants, port numérique (refus au démarrage), comme `PUBLIC_BASE_URL` et `MEDIA_BASE_URL`.
+`FRONTEND_BASE_URL` : ni paramètres, ni fragment, ni identifiants, port numérique (refus au démarrage), comme `PUBLIC_BASE_URL`.
 
 ## 9. Points du contrat à connaître côté frontend
 

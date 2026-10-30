@@ -31,6 +31,11 @@ class CompteFideliteAdmin(admin.ModelAdmin):
     def has_add_permission(self, request):
         return False
 
+    # Supprimer le compte effacerait le solde et, en cascade, le journal des
+    # transactions et les gains : une correction passe par une transaction.
+    def has_delete_permission(self, request, obj=None):
+        return False
+
 
 @admin.register(TransactionFidelite)
 class TransactionFideliteAdmin(LectureSeuleAdmin):

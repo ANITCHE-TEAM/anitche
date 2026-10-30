@@ -3,7 +3,11 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 
+from apps.core.adresses import champ_latitude, champ_longitude, valider_position_complete, valider_telephone
+
 from .models import (
+    AdresseClient,
+    JournalConnexion,
     Utilisateur,
     TypeUsageOTP,
     DocumentKYC,
@@ -62,9 +66,11 @@ class InscriptionSerializer(serializers.ModelSerializer):
     def validate_email(self, value):
         """
         Empêche la création de plusieurs comptes
-        avec la même adresse email.
+        avec la même adresse email, quelle que soit la casse saisie.
+        L'email est enregistré en minuscules.
         """
-        if Utilisateur.objects.filter(email__iexact=value).exists():
+        value = Utilisateur.objects.normalize_email(value)
+        if Utilisateur.objects.avec_email(value).exists():
             raise serializers.ValidationError(
                 "Un compte existe déjà avec cet email."
             )
@@ -94,6 +100,83 @@ class UtilisateurAdministrationSerializer(serializers.ModelSerializer):
             'email_verifie', 'statut_kyc', 'date_creation',
         ]
         read_only_fields = fields
+
+
+# =====================================================
+# JOURNAL DES CONNEXIONS
+# =====================================================
+
+class AdresseClientSerializer(serializers.ModelSerializer):
+    """Adresse du carnet, vue et écrite par son propriétaire.
+
+    Les mêmes règles que l'adresse saisie au checkout : téléphone de 8 à 15
+    chiffres, point GPS facultatif mais complet, dans la Côte d'Ivoire. Le
+    propriétaire vient de la session, jamais du corps de la requête.
+    """
+
+    telephone = serializers.CharField(max_length=20)
+    latitude = champ_latitude()
+    longitude = champ_longitude()
+
+    class Meta:
+        model = AdresseClient
+        fields = [
+            'id', 'libelle', 'destinataire', 'telephone', 'commune', 'quartier',
+            'point_de_repere', 'indications', 'latitude', 'longitude', 'par_defaut',
+            'date_creation', 'date_modification',
+        ]
+        read_only_fields = ['id', 'date_creation', 'date_modification']
+
+    def validate_telephone(self, telephone):
+        return valider_telephone(telephone)
+
+    def validate(self, attrs):
+        # Modification partielle : le point se juge avec ce qui est déjà enregistré.
+        valider_position_complete({
+            champ: attrs[champ] if champ in attrs else getattr(self.instance, champ, None)
+            for champ in ('latitude', 'longitude')
+        })
+        return attrs
+
+
+class JournalConnexionSerializer(serializers.ModelSerializer):
+    """Connexion vue par son titulaire : date, résultat, méthode, IP et
+    appareil. Aucun secret n'est enregistré dans le journal."""
+
+    class Meta:
+        model = JournalConnexion
+        fields = [
+            'id', 'date_creation', 'reussie', 'motif_echec', 'methode',
+            'adresse_ip', 'user_agent',
+        ]
+        read_only_fields = fields
+
+
+class JournalConnexionAdministrationSerializer(JournalConnexionSerializer):
+    """Connexion vue par l'administration : ajoute le compte visé (vide si
+    l'email tenté est inconnu) et l'email tenté."""
+
+    class Meta(JournalConnexionSerializer.Meta):
+        fields = ['id', 'utilisateur', 'email_tente', *JournalConnexionSerializer.Meta.fields[1:]]
+        read_only_fields = fields
+
+
+class FiltreJournalConnexionSerializer(serializers.Serializer):
+    """Paramètres de requête du journal vu par l'administration."""
+
+    utilisateur = serializers.IntegerField(required=False, min_value=1, help_text="Identifiant du compte.")
+    email = serializers.CharField(required=False, max_length=254, help_text="Email tenté, égalité exacte.")
+    # default=None : sans lui, un paramètre absent d'une query string est lu
+    # comme False (comportement des champs booléens pour une saisie HTML).
+    reussie = serializers.BooleanField(required=False, default=None, help_text="`true` : réussies ; `false` : refusées.")
+    date_debut = serializers.DateField(required=False, help_text="AAAA-MM-JJ, inclus.")
+    date_fin = serializers.DateField(required=False, help_text="AAAA-MM-JJ, inclus.")
+
+    def validate(self, donnees):
+        debut, fin = donnees.get('date_debut'), donnees.get('date_fin')
+        if debut and fin and debut > fin:
+            raise serializers.ValidationError({'date_fin': ["date_fin précède date_debut."]})
+        return donnees
 
 
 # =====================================================
@@ -184,11 +267,13 @@ class DemandeChangementContactSerializer(serializers.Serializer):
         Sans ce contrôle, la confirmation OTP échoue plus tard avec une
         IntegrityError (contrainte unique en base), ce qui sert
         d'oracle pour deviner les emails déjà inscrits.
+        Le nouvel email est enregistré en minuscules.
         """
+        value = Utilisateur.objects.normalize_email(value)
         utilisateur_courant = self.context['request'].user
 
-        if Utilisateur.objects.exclude(pk=utilisateur_courant.pk).filter(
-            email__iexact=value
+        if Utilisateur.objects.avec_email(value).exclude(
+            pk=utilisateur_courant.pk
         ).exists():
             raise serializers.ValidationError(
                 "Cet email est déjà utilisé par un autre compte."

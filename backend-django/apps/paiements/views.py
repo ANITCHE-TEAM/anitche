@@ -327,8 +327,12 @@ class RemboursementAdminListView(generics.ListAPIView):
 
 @extend_schema(
     summary="Traiter un remboursement (administration)",
+    description=(
+        "effectue (référence obligatoire) ou refuse. Un remboursement de retour ne se refuse pas : 400. "
+        "Remboursement déjà traité : 409."
+    ),
     request=TraiterRemboursementSerializer,
-    responses={200: RemboursementAdminSerializer, **erreurs(409)},
+    responses={200: RemboursementAdminSerializer, **erreurs(400, 409)},
 )
 class TraiterRemboursementView(APIView):
     permission_classes = [IsAuthenticated, EstAdministrateur]
@@ -341,6 +345,8 @@ class TraiterRemboursementView(APIView):
             remboursement = services.traiter_remboursement(remboursement, request.user, **serializer.validated_data)
         except services.TransitionPaiementImpossible as erreur:
             raise ErreurMetier(str(erreur), status.HTTP_409_CONFLICT)
+        except services.PaiementRefuse as refus:
+            raise ErreurMetier(str(refus), status.HTTP_400_BAD_REQUEST)
         remboursement = Remboursement.objects.select_related("commande", "paiement__client", "retour").get(pk=pk)
         return Response(RemboursementAdminSerializer(remboursement).data)
 

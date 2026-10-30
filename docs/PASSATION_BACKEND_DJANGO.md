@@ -15,7 +15,7 @@ Tous les modules métier sont implémentés, refactorisés un par un (compréhen
 | `catalogue` | catégories, produits, variantes, stock, images, modération | [`MODULE_CATALOGUE.md`](./MODULE_CATALOGUE.md) |
 | `panier` | panier connecté ou anonyme | [`MODULE_PANIER.md`](./MODULE_PANIER.md) |
 | `commandes` | checkout (une commande par boutique), machine à états, expiration | [`MODULE_COMMANDES.md`](./MODULE_COMMANDES.md) |
-| `paiements` | fournisseur interchangeable (CinetPay, simulé), webhooks signés, remboursements, reversements | [`MODULE_PAIEMENTS.md`](./MODULE_PAIEMENTS.md) |
+| `paiements` | fournisseur interchangeable (GeniusPay, simulé), webhooks signés, remboursements, reversements | [`MODULE_PAIEMENTS.md`](./MODULE_PAIEMENTS.md) |
 | `livraison` | tarifs par commune, livreurs, code de livraison, contestation | [`MODULE_LIVRAISON.md`](./MODULE_LIVRAISON.md) |
 | `retours` | retours sous 7 jours après livraison, remboursement | [`MODULE_RETOURS.md`](./MODULE_RETOURS.md) |
 | `fidelite` | points après le délai de rétractation, coupons | [`MODULE_FIDELITE.md`](./MODULE_FIDELITE.md) |

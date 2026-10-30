@@ -551,3 +551,18 @@ class AdminFideliteTests(BaseFideliteTestCase):
         self.assertFalse(journal.has_add_permission(requete))
         self.assertFalse(journal.has_change_permission(requete))
         self.assertFalse(journal.has_delete_permission(requete))
+
+    def test_compte_jamais_supprime_dans_l_admin(self):
+        """Ni directement, ni en cascade avec le compte utilisateur : le
+        solde et son journal disparaîtraient sans transaction."""
+        compte, _ = CompteFidelite.objects.get_or_create(utilisateur=self.client2)
+        self.client.force_login(Utilisateur.objects.create_superuser(
+            email="su@anitche.ci", password="TestPassword123!", nom="S", prenom="U",
+        ))
+        for url in (
+            f"/admin/fidelite/comptefidelite/{compte.pk}/delete/",
+            f"/admin/utilisateurs/utilisateur/{self.client2.pk}/delete/",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(self.client.post(url, {"post": "yes"}).status_code, 403)
+        self.assertTrue(CompteFidelite.objects.filter(pk=compte.pk).exists())

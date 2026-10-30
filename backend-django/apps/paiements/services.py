@@ -19,10 +19,11 @@ la réconciliation (reconcilier_paiement) quand le webhook n'arrive pas.
 
 import logging
 from datetime import timedelta
+from decimal import Decimal
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
-from django.db.models import F, Q
+from django.db.models import F, Q, Sum
 from django.utils import timezone
 
 from apps.commandes.models import Commande, GroupeCommande
@@ -34,6 +35,7 @@ from .fournisseurs.base import (
     EN_ATTENTE,
     SUCCES,
     ErreurFournisseur,
+    NotificationIgnoree,
     NotificationInvalide,
     TransactionIntrouvable,
     hacher_jeton,
@@ -254,12 +256,27 @@ def valider_paiement(paiement, etat=None):
 
 def _controler_etat(paiement, etat):
     """Montant et devise confirmés par le fournisseur = ceux calculés par le serveur."""
-    if etat.montant is not None and etat.montant != int(paiement.montant):
+    controler_montant_et_devise(etat, paiement.montant, paiement.devise)
+
+
+def controler_montant_et_devise(etat, montant_attendu, devise_attendue):
+    """Contrôle d'un succès confirmé par un fournisseur, pour un paiement
+    comme pour un transfert (reversements). Fermé par défaut : un montant
+    absent, illisible ou non entier, ou une devise absente, vaut refus — un
+    succès ne s'applique jamais sur une information que le fournisseur n'a
+    pas confirmée. Lève IncoherenceTransaction."""
+    if type(etat.montant) is not int:
         raise IncoherenceTransaction(
-            f"Montant confirmé ({etat.montant}) différent du montant dû ({int(paiement.montant)})."
+            f"Montant confirmé absent ou invalide (montant attendu : {montant_attendu} {devise_attendue})."
         )
-    if etat.devise is not None and etat.devise != paiement.devise:
-        raise IncoherenceTransaction(f"Devise confirmée ({etat.devise}) différente de {paiement.devise}.")
+    if etat.montant != montant_attendu:
+        raise IncoherenceTransaction(
+            f"Montant confirmé ({etat.montant}) différent du montant attendu ({montant_attendu})."
+        )
+    if not etat.devise:
+        raise IncoherenceTransaction(f"Devise confirmée absente (devise attendue : {devise_attendue}).")
+    if etat.devise != devise_attendue:
+        raise IncoherenceTransaction(f"Devise confirmée ({etat.devise}) différente de {devise_attendue}.")
 
 
 def marquer_echoue(paiement, motif="échec confirmé par le fournisseur"):
@@ -294,6 +311,29 @@ def _ouvrir_journal(code, notification):
     return journal, (not cree and journal.statut_traitement == JournalWebhook.StatutTraitement.TRAITE)
 
 
+def _paiement_notifie(fournisseur, notification):
+    """Paiement visé par la notification, ouvert chez CE fournisseur (None
+    s'il est inconnu).
+
+    Par sa référence ANITCHE, ou, pour un fournisseur qui ne renvoie que la
+    sienne (notification_par_identifiant_externe), par la référence stockée
+    à l'initiation dans transaction_id_externe. Dans ce second cas, la
+    référence ANITCHE éventuellement portée par la notification (metadata)
+    doit désigner le même paiement, et une référence du fournisseur portée
+    par plusieurs paiements n'en désigne aucun : NotificationInvalide."""
+    paiements = Paiement.objects.filter(fournisseur=fournisseur.code)
+    if not fournisseur.notification_par_identifiant_externe:
+        return paiements.filter(reference=notification.reference).first()
+    if not notification.identifiant_externe:
+        return None
+    candidats = list(paiements.filter(transaction_id_externe=notification.identifiant_externe)[:2])
+    if len(candidats) > 1:
+        raise NotificationInvalide("Référence du fournisseur portée par plusieurs paiements.")
+    if candidats and notification.reference and notification.reference != candidats[0].reference:
+        raise NotificationInvalide("La référence du fournisseur et la référence du paiement ne concordent pas.")
+    return candidats[0] if candidats else None
+
+
 def traiter_notification_paiement(code, request):
     """Notification d'un fournisseur → authentification → vérification
     serveur à serveur → application sous verrou. Renvoie ResultatNotification."""
@@ -305,11 +345,21 @@ def traiter_notification_paiement(code, request):
     except NotificationInvalide as erreur:
         logger_securite.warning("Notification %s refusée : %s (ip=%s)", code, erreur, request.META.get("REMOTE_ADDR"))
         return ResultatNotification(401, "Notification non authentique.")
+    except NotificationIgnoree as ignoree:
+        # Authentique mais sans effet (essai, événement d'un autre périmètre) :
+        # acquittée pour que le fournisseur ne la rejoue pas.
+        logger.info("Notification %s ignorée : %s.", code, ignoree)
+        return ResultatNotification(200, "Événement ignoré.")
 
-    # Le paiement doit avoir été ouvert chez CE fournisseur.
-    paiement = Paiement.objects.filter(reference=notification.reference, fournisseur=code).first()
+    try:
+        paiement = _paiement_notifie(fournisseur, notification)
+    except NotificationInvalide as erreur:
+        logger_securite.warning("Notification %s incohérente (%s) : %s", code,
+                                notification.identifiant_externe, erreur)
+        return ResultatNotification(400, "Notification incohérente.")
     if paiement is None:
-        logger_securite.warning("Notification %s pour un paiement inconnu : %s", code, notification.reference)
+        logger_securite.warning("Notification %s pour un paiement inconnu : %s", code,
+                                notification.reference or notification.identifiant_externe)
         return ResultatNotification(404, "Paiement inconnu.")
     try:
         fournisseur.authentifier_notification(notification, paiement)
@@ -488,22 +538,73 @@ def reconcilier_paiements_en_suspens(maintenant=None):
 
 def creer_remboursement(paiement, commande, motif, montant=None, retour=None):
     """Remboursement à traiter (une seule fois par paiement et commande, ou
-    par retour) + alerte de l'administration. Renvoie (remboursement, cree)."""
-    montant = commande.montant_total if montant is None else montant
-    with transaction.atomic():
+    par retour) + alerte de l'administration. Renvoie (remboursement, cree).
+
+    Montant en FCFA entiers, sinon PaiementRefuse. Un montant nul : refusé
+    pour un retour ; ailleurs (annulation, doublon), rien n'est à rendre et
+    rien n'est créé : (None, False).
+
+    Plafond : les remboursements non refusés d'un paiement pour une commande
+    ne dépassent jamais ce que la commande a coûté (articles et livraison).
+    Un retour qui le dépasserait est refusé (PaiementRefuse) ; une annulation
+    ou une livraison non reçue est ramenée au reste dû, et rien n'est créé,
+    avec une alerte, quand il ne reste rien. Le paiement est verrouillé : deux
+    remboursements simultanés de la même commande voient l'un après l'autre
+    la somme déjà accordée."""
+    montant = Decimal(commande.montant_total if montant is None else montant)
+    if montant != montant.to_integral_value():
+        raise PaiementRefuse(f"Montant de remboursement invalide ({montant}) : un nombre entier de FCFA est attendu.")
+    if montant <= 0:
         if retour is not None:
-            remboursement, cree = Remboursement.objects.get_or_create(
-                retour=retour,
-                defaults={"paiement": paiement, "commande": commande, "motif": motif, "montant": montant},
-            )
+            raise PaiementRefuse("Montant de remboursement nul : rien ne peut être remboursé pour ce retour.")
+        logger_securite.warning("Remboursement de la commande %s ignoré : montant nul.", commande.numero_commande)
+        return None, False
+    with transaction.atomic():
+        Paiement.objects.select_for_update().filter(pk=paiement.pk).first()
+        if retour is not None:
+            existant = Remboursement.objects.filter(retour=retour).first()
         else:
-            remboursement, cree = Remboursement.objects.get_or_create(
-                paiement=paiement, commande=commande, retour=None,
-                defaults={"motif": motif, "montant": montant},
-            )
-    if cree:
-        alerter_administration(remboursement)
-    return remboursement, cree
+            existant = Remboursement.objects.filter(paiement=paiement, commande=commande, retour=None).first()
+        if existant is not None:
+            return existant, False
+        deja = Remboursement.objects.filter(paiement=paiement, commande=commande).exclude(
+            statut=Remboursement.Statut.REFUSE,
+        ).aggregate(total=Sum("montant"))["total"] or 0
+        reste = commande.montant_total - deja
+        if montant > reste:
+            if retour is not None:
+                raise PaiementRefuse(
+                    f"Remboursement refusé : {int(montant)} FCFA demandés, il reste {int(max(reste, 0))} FCFA "
+                    f"remboursables sur la commande {commande.numero_commande}."
+                )
+            if reste <= 0:
+                alerte = (f"Remboursement de la commande {commande.numero_commande} ({motif}) non créé : "
+                          f"{int(deja)} FCFA déjà remboursés sur {int(commande.montant_total)} encaissés.")
+                logger_securite.error("ALERTE ADMINISTRATION — %s", alerte)
+                _alerter_plafond(commande, alerte)
+                return None, False
+            logger_securite.warning("Remboursement de la commande %s ramené de %s à %s FCFA (plafond).",
+                                    commande.numero_commande, montant, reste)
+            montant = reste
+        remboursement = Remboursement.objects.create(
+            paiement=paiement, commande=commande, motif=motif, montant=montant, retour=retour,
+        )
+    alerter_administration(remboursement)
+    return remboursement, True
+
+
+def _alerter_plafond(commande, message):
+    from apps.notifications import liens
+    from apps.notifications.models import Notification
+    from apps.notifications.services import ServiceNotification
+
+    ServiceNotification.notifier_administration(
+        titre="Remboursement non créé",
+        message=message,
+        type_notification=Notification.TypeNotification.PAIEMENT,
+        lien_redirection=liens.lien_remboursements_administration(),
+        metadata={"commande": str(commande.pk)},
+    )
 
 
 def alerter_administration(remboursement):
@@ -529,7 +630,12 @@ def alerter_administration(remboursement):
 
 def traiter_remboursement(remboursement, administrateur, decision, reference_externe="", commentaire=""):
     """L'administration a remboursé depuis le tableau de bord du fournisseur
-    (effectue, référence obligatoire) ou refuse le remboursement (refuse)."""
+    (effectue, référence obligatoire) ou refuse le remboursement (refuse).
+
+    Un remboursement de retour ne se refuse pas (PaiementRefuse) : le fond
+    est tranché dans le circuit du retour, et la part du vendeur et les
+    points du client sont déjà repris. Un échec technique se règle par une
+    nouvelle tentative, ou à la main (effectue, référence et commentaire)."""
     from apps.notifications import liens
     from apps.notifications.models import Notification
     from apps.notifications.services import ServiceNotification
@@ -538,6 +644,11 @@ def traiter_remboursement(remboursement, administrateur, decision, reference_ext
         verrouille = Remboursement.objects.select_for_update().select_related("paiement__client").get(pk=remboursement.pk)
         if verrouille.statut != Remboursement.Statut.A_TRAITER:
             raise TransitionPaiementImpossible("Ce remboursement a déjà été traité.")
+        if verrouille.motif == Remboursement.Motif.RETOUR and decision != Remboursement.Statut.EFFECTUE:
+            raise PaiementRefuse(
+                "Un remboursement de retour décidé ne peut pas être refusé : en cas d'échec, recommencez le "
+                "remboursement ou marquez-le effectué avec la référence et un commentaire."
+            )
         verrouille.statut = decision
         verrouille.reference_externe = reference_externe
         verrouille.commentaire = commentaire
@@ -586,12 +697,15 @@ def rembourser_retour(demande_retour):
     """Retour remboursé : remboursement à traiter pour le client (articles,
     et frais de livraison si le motif est imputable au vendeur), part du
     vendeur réduite (avant versement) ou ajustement négatif (après), et
-    frais de livraison remboursés facturés au vendeur (ajustement)."""
+    frais de livraison remboursés facturés au vendeur (ajustement).
+
+    Sans paiement encaissé, ou montant invalide : PaiementRefuse, et la
+    transaction du retour est annulée (aucun retour « remboursé » sans
+    Remboursement)."""
     commande = demande_retour.commande
     paiement = paiement_valide_de(commande)
     if paiement is None:
-        logger_securite.error("Retour %s remboursé sans paiement encaissé.", demande_retour.numero_retour)
-        return None
+        raise PaiementRefuse("Aucun paiement encaissé pour cette commande : le retour ne peut pas être remboursé.")
     remboursement, cree = creer_remboursement(
         paiement, commande, Remboursement.Motif.RETOUR,
         montant=demande_retour.montant_remboursement, retour=demande_retour,

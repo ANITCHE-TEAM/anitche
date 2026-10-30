@@ -1,3 +1,6 @@
+from datetime import datetime, time, timedelta
+
+from django.utils import timezone
 from rest_framework import generics, status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -10,12 +13,19 @@ from google.auth.transport import requests as google_requests
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 from django.conf import settings
+from django.db import transaction
 import logging
 
 from apps.core.exceptions import ErreurMetier
 from apps.core.reseau import adresse_ip_client
 from django.db.models import Q
-from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, inline_serializer
+from drf_spectacular.utils import (
+    OpenApiParameter,
+    OpenApiResponse,
+    extend_schema,
+    extend_schema_view,
+    inline_serializer,
+)
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, TokenRefreshSerializer
 
@@ -29,6 +39,10 @@ logger_securite = logging.getLogger('securite')
 
 from .tasks import envoyer_code_otp_email, envoyer_notification_connexion
 from .services import (
+    creer_adresse,
+    enregistrer_connexion,
+    enregistrer_echec_mot_de_passe,
+    modifier_adresse,
     resoudre_utilisateur_google,
     revoquer_tokens_actifs,
     InfosGoogleIncompletes,
@@ -39,17 +53,22 @@ from .services import (
 
 from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import AuthenticationFailed, PermissionDenied, ValidationError
 
 from .models import (
+    AdresseClient,
     Utilisateur,
     CodeOTP,
     TypeUsageOTP,
     DocumentKYC,
+    JournalConnexion,
+    MethodeConnexion,
+    MotifEchecConnexion,
     Role,
 )
 
 from .serializers import (
+    AdresseClientSerializer,
     InscriptionSerializer,
     ProfilSerializer,
     DemandeChangementContactSerializer,
@@ -58,6 +77,9 @@ from .serializers import (
     DemandeMotDePasseOublieSerializer,
     ConfirmationMotDePasseOublieSerializer,
     ConnexionGoogleSerializer,
+    FiltreJournalConnexionSerializer,
+    JournalConnexionAdministrationSerializer,
+    JournalConnexionSerializer,
     UtilisateurAdministrationSerializer,
 )
 
@@ -89,10 +111,11 @@ class InscriptionView(generics.CreateAPIView):
     throttle_scope = 'inscription'
 
     def perform_create(self, serializer):
-        utilisateur = serializer.save()
+        with transaction.atomic():
+            utilisateur = serializer.save()
 
-        _, code = CodeOTP.generer(utilisateur, TypeUsageOTP.INSCRIPTION)
-        envoyer_code_otp_email.delay(utilisateur.email, code, TypeUsageOTP.INSCRIPTION)
+            _, code = CodeOTP.generer(utilisateur, TypeUsageOTP.INSCRIPTION)
+            envoyer_code_otp_email.delay(utilisateur.email, code, TypeUsageOTP.INSCRIPTION)
 
 
 @extend_schema(
@@ -108,18 +131,28 @@ class LoginThrottleView(TokenObtainPairView):
         """Notifie le titulaire du compte à chaque connexion réussie,
         uniquement en cas de succès (jamais sur un
         échec, pour ne pas alerter à tort sur une simple faute de frappe
-        de mot de passe ni révéler qu'un email existe)."""
-        response = super().post(request, *args, **kwargs)
+        de mot de passe ni révéler qu'un email existe). Chaque tentative,
+        réussie ou refusée, est inscrite au journal des connexions."""
+        email = request.data.get('email')
+        try:
+            response = super().post(request, *args, **kwargs)
+        except AuthenticationFailed:
+            # Le refus est une exception que DRF transforme en 401 après cette
+            # méthode : relayée telle quelle, la réponse ne dépend pas du journal.
+            enregistrer_echec_mot_de_passe(request, email)
+            raise
 
-        if response.status_code == status.HTTP_200_OK:
-            email = request.data.get('email')
-            utilisateur = Utilisateur.objects.filter(email__iexact=email).first()
-            if utilisateur:
-                envoyer_notification_connexion.delay(
-                    utilisateur.email,
-                    adresse_ip_client(request) or 'inconnue',
-                    request.META.get('HTTP_USER_AGENT', 'inconnu'),
-                )
+        utilisateur = Utilisateur.objects.avec_email(email).first()
+        enregistrer_connexion(
+            request, methode=MethodeConnexion.MOT_DE_PASSE, reussie=True,
+            utilisateur=utilisateur, email=email,
+        )
+        if utilisateur:
+            envoyer_notification_connexion.delay(
+                utilisateur.email,
+                adresse_ip_client(request) or 'inconnue',
+                request.META.get('HTTP_USER_AGENT', 'inconnu'),
+            )
 
         return response
 
@@ -184,7 +217,7 @@ class VerificationJetonServiceView(APIView):
 
     Exclue du schéma OpenAPI (route interne). En production, nginx répond
     404 sur ce chemin depuis Internet sans le transmettre à Django
-    (infra/nginx/nginx.conf) ; FastAPI l'appelle directement sur le réseau
+    (infra/nginx/serveur-commun.conf) ; FastAPI l'appelle directement sur le réseau
     Docker, en HTTP (SECURE_REDIRECT_EXEMPT dans prod.py).
     """
 
@@ -511,6 +544,129 @@ class UtilisateurAdministrationListView(generics.ListAPIView):
 
 
 # =====================================================
+# JOURNAL DES CONNEXIONS
+# =====================================================
+
+@extend_schema(
+    summary="Mes connexions",
+    description=(
+        "Tentatives de connexion à mon compte (réussies et refusées), les plus récentes d'abord : "
+        "date, méthode, adresse IP et appareil. Permet de repérer une connexion que je n'ai pas faite. "
+        "Les lignes sont conservées `JOURNAL_CONNEXIONS_RETENTION_JOURS` jours (180 par défaut)."
+    ),
+    responses={200: JournalConnexionSerializer(many=True), **erreurs(401)},
+)
+class MesConnexionsListView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = JournalConnexionSerializer
+
+    def get_queryset(self):
+        return JournalConnexion.objects.filter(utilisateur=self.request.user)
+
+
+@extend_schema(
+    summary="Journal des connexions (administration)",
+    description=(
+        "Toutes les tentatives de connexion, les plus récentes d'abord. Filtres combinables ; "
+        "une valeur invalide est refusée (400). `email` : égalité exacte, casse ignorée, y compris "
+        "pour un email sans compte. `date_debut` et `date_fin` sont inclusives (jour entier)."
+    ),
+    parameters=[FiltreJournalConnexionSerializer],
+    responses={200: JournalConnexionAdministrationSerializer(many=True), **erreurs(400, 401, 403)},
+)
+class JournalConnexionAdministrationListView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated, EstAdministrateur]
+    serializer_class = JournalConnexionAdministrationSerializer
+
+    def get_queryset(self):
+        filtres = FiltreJournalConnexionSerializer(data=self.request.query_params)
+        filtres.is_valid(raise_exception=True)
+        valeurs = filtres.validated_data
+
+        queryset = JournalConnexion.objects.all()
+        if 'utilisateur' in valeurs:
+            queryset = queryset.filter(utilisateur_id=valeurs['utilisateur'])
+        if valeurs.get('email'):
+            queryset = queryset.filter(email_tente=valeurs['email'].strip().lower())
+        if valeurs.get('reussie') is not None:
+            queryset = queryset.filter(reussie=valeurs['reussie'])
+        if 'date_debut' in valeurs:
+            queryset = queryset.filter(date_creation__gte=_debut_du_jour(valeurs['date_debut']))
+        if 'date_fin' in valeurs:
+            queryset = queryset.filter(date_creation__lt=_debut_du_jour(valeurs['date_fin'] + timedelta(days=1)))
+        return queryset
+
+
+def _debut_du_jour(jour):
+    """Minuit (heure du serveur) du jour donné."""
+    return timezone.make_aware(datetime.combine(jour, time.min))
+
+
+# =====================================================
+# CARNET D'ADRESSES
+# =====================================================
+
+@extend_schema_view(
+    get=extend_schema(
+        summary="Mon carnet d'adresses",
+        description="Les adresses de livraison enregistrées par le client connecté, la plus récente d'abord (celle par défaut en tête).",
+        responses={200: AdresseClientSerializer(many=True), **erreurs(401)},
+    ),
+    post=extend_schema(
+        summary="Ajouter une adresse au carnet",
+        description=(
+            "10 adresses au plus par client : au-delà, 400 avec `errors.code = [\"carnet_plein\"]`. "
+            "`par_defaut: true` retire le statut par défaut à l'adresse qui l'avait."
+        ),
+        responses={201: AdresseClientSerializer, **erreurs(400, 401)},
+    ),
+)
+class AdresseClientListCreateView(generics.ListCreateAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = AdresseClientSerializer
+
+    def get_queryset(self):
+        return AdresseClient.objects.filter(client=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.instance = creer_adresse(self.request.user, serializer.validated_data)
+
+
+@extend_schema_view(
+    get=extend_schema(
+        summary="Une adresse de mon carnet",
+        description="404 si l'adresse n'existe pas ou n'est pas la mienne.",
+        responses={200: AdresseClientSerializer, **erreurs(401, 404)},
+    ),
+    put=extend_schema(
+        summary="Remplacer une adresse de mon carnet",
+        description="Les commandes déjà passées gardent l'adresse qu'elles avaient. 404 si l'adresse n'est pas la mienne.",
+        responses={200: AdresseClientSerializer, **erreurs(400, 401, 404)},
+    ),
+    patch=extend_schema(
+        summary="Modifier une adresse de mon carnet",
+        description="Les commandes déjà passées gardent l'adresse qu'elles avaient. 404 si l'adresse n'est pas la mienne.",
+        responses={200: AdresseClientSerializer, **erreurs(400, 401, 404)},
+    ),
+    delete=extend_schema(
+        summary="Supprimer une adresse de mon carnet",
+        description="Les commandes déjà passées gardent l'adresse qu'elles avaient. 404 si l'adresse n'est pas la mienne.",
+        responses={204: None, **erreurs(401, 404)},
+    ),
+)
+class AdresseClientDetailView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = AdresseClientSerializer
+
+    def get_queryset(self):
+        # Filtré sur le client connecté : l'adresse d'un autre n'existe pas (404).
+        return AdresseClient.objects.filter(client=self.request.user)
+
+    def perform_update(self, serializer):
+        serializer.instance = modifier_adresse(serializer.instance, serializer.validated_data)
+
+
+# =====================================================
 # MOT DE PASSE OUBLIÉ
 # =====================================================
 
@@ -540,9 +696,7 @@ class DemandeMotDePasseOublieView(APIView):
 
         email = serializer.validated_data['email']
 
-        utilisateur = Utilisateur.objects.filter(
-            email__iexact=email
-        ).first()
+        utilisateur = Utilisateur.objects.avec_email(email).first()
 
         if utilisateur:
             _, code = CodeOTP.generer(utilisateur, 'mdp_oublie')
@@ -601,9 +755,7 @@ class ConfirmationMotDePasseOublieView(APIView):
         # sans jamais passer par l'étape 1.
         message_generique = "Code invalide ou expiré."
 
-        utilisateur = Utilisateur.objects.filter(
-            email__iexact=data['email']
-        ).first()
+        utilisateur = Utilisateur.objects.avec_email(data['email']).first()
 
         if not utilisateur:
             raise ErreurMetier(message_generique)
@@ -660,6 +812,13 @@ class ConnexionGoogleView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'login'
 
+    @staticmethod
+    def _journaliser_refus(request, motif, *, email='', utilisateur=None):
+        enregistrer_connexion(
+            request, methode=MethodeConnexion.GOOGLE, reussie=False,
+            utilisateur=utilisateur, email=email, motif_echec=motif,
+        )
+
     def post(self, request):
         serializer = ConnexionGoogleSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -671,15 +830,24 @@ class ConnexionGoogleView(APIView):
                 settings.GOOGLE_OAUTH_CLIENT_ID,
             )
         except ValueError:
+            self._journaliser_refus(request, MotifEchecConnexion.GOOGLE_JETON_INVALIDE)
             raise ValidationError({"id_token": ["Token Google invalide."]})
 
+        email = infos.get('email')
         try:
             utilisateur = resoudre_utilisateur_google(infos)
         except InfosGoogleIncompletes as erreur:
+            self._journaliser_refus(request, MotifEchecConnexion.GOOGLE_INFOS_INCOMPLETES, email=email)
             raise ErreurMetier(str(erreur))
-        except CompteDesactive:
+        except CompteDesactive as erreur:
+            self._journaliser_refus(
+                request, MotifEchecConnexion.COMPTE_DESACTIVE, email=email, utilisateur=erreur.utilisateur,
+            )
             raise PermissionDenied("Ce compte a été désactivé.")
-        except LiaisonGoogleRefusee:
+        except LiaisonGoogleRefusee as erreur:
+            self._journaliser_refus(
+                request, MotifEchecConnexion.GOOGLE_LIAISON_REFUSEE, email=email, utilisateur=erreur.utilisateur,
+            )
             raise ErreurMetier(
                 "Un compte existe déjà avec cet email mais n'a "
                 "pas été vérifié. Réinitialisez le mot de passe "
@@ -689,6 +857,11 @@ class ConnexionGoogleView(APIView):
             )
 
         refresh = RefreshToken.for_user(utilisateur)
+
+        enregistrer_connexion(
+            request, methode=MethodeConnexion.GOOGLE, reussie=True,
+            utilisateur=utilisateur, email=utilisateur.email,
+        )
 
         # Même notification de connexion que le
         # flux classique, uniquement en cas de succès.

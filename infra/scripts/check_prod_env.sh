@@ -8,8 +8,11 @@
 #     et adresses publiques ;
 #   - infra/postgres/fastapi_readonly.sql : mot de passe du rôle en lecture
 #     seule de FastAPI ;
+#   - infra/postgres/app_role.sql : mot de passe du rôle applicatif ;
 #   - infra/scripts/backup.sh : dépôt de sauvegarde hors du serveur, mot de
 #     passe du dépôt ;
+#   - le conteneur nginx (infra/nginx/entrypoint.d/) : domaines, adresses
+#     autorisées sur /admin/, intervalle de rechargement ;
 # plus les valeurs de infra/.env.example laissées telles quelles.
 # Affiche toutes les erreurs, puis sort en 1. N'affiche aucune valeur : le
 # nom de la variable et la règle seulement (un secret ne sort jamais).
@@ -21,6 +24,9 @@
 INFRA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 BACKEND_EMAIL_SMTP='django.core.mail.backends.smtp.EmailBackend'
+# Domaine d'envoi des emails : constante DOMAINE_EXPEDITEUR de prod.py,
+# distincte de DOMAIN (un staging sur un autre domaine envoie toujours
+# depuis le domaine dont le DNS porte SPF, DKIM et DMARC).
 DOMAINE_EXPEDITEUR='anitche.com'
 # Clé Fernet publique de config/settings/prod.py (CLE_DE_DEVELOPPEMENT).
 CLE_DE_DEVELOPPEMENT='mKvbTFkFfRPhMpb4ZJdZfHvz1pgUgx15Xhyn1ahJCiw='
@@ -29,6 +35,10 @@ MOT_DE_PASSE_FASTAPI_DEV='fastapi_ro_dev'
 MOTIF_IPV6='^\[([^]]*)](:(.*))?$'
 MOTIF_NOM_AFFICHE='^[^<>]*<([^<>]*)>$'
 MOTIF_CARACTERES_INTERDITS='[[:space:]<>,"]'
+# Mêmes motifs que infra/nginx/entrypoint.d/40-anitche-config.sh.
+MOTIF_HOTE='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
+MOTIF_CIDR_IPV4='^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})(/([0-9]{1,2}))?$'
+MOTIF_CIDR_IPV6='^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*(/([0-9]{1,3}))?$'
 
 ERREURS=()
 erreur() { ERREURS+=("$1"); }
@@ -133,10 +143,10 @@ verifier_url_publique() {
 
 # --- Variables obligatoires -------------------------------------------------
 REQUIS=(
-    SECRET_KEY FIELD_ENCRYPTION_KEYS ALLOWED_HOSTS CORS_ALLOWED_ORIGINS
-    DB_NAME DB_USER DB_PASSWORD FASTAPI_DB_PASSWORD
-    PAIEMENT_FOURNISSEUR CINETPAY_API_KEY CINETPAY_API_PASSWORD BACKEND_BASE_URL
-    PUBLIC_BASE_URL MEDIA_BASE_URL
+    DOMAIN SECRET_KEY FIELD_ENCRYPTION_KEYS ALLOWED_HOSTS CORS_ALLOWED_ORIGINS
+    DB_NAME DB_PASSWORD DB_SUPERUSER_PASSWORD FASTAPI_DB_PASSWORD REDIS_PASSWORD
+    PAIEMENT_FOURNISSEUR BACKEND_BASE_URL
+    PUBLIC_BASE_URL
     EMAIL_BACKEND EMAIL_HOST EMAIL_HOST_USER EMAIL_HOST_PASSWORD DEFAULT_FROM_EMAIL
     BACKUP_REPOSITORY BACKUP_PASSWORD BACKUP_S3_ACCESS_KEY_ID BACKUP_S3_SECRET_ACCESS_KEY
 )
@@ -201,13 +211,115 @@ if [ -n "${BACKEND_BASE_URL:-}" ]; then
     fi
 fi
 
+# --- Domaines et nginx --------------------------------------------------------
+# Recopiés tels quels dans la configuration de nginx : noms d'hôte en
+# minuscules, sans schéma, port ni « / ». Sous-domaines : mêmes valeurs par
+# défaut que docker-compose.prod.yml.
+for var in DOMAIN DOMAIN_VENDEUR DOMAIN_LIVREUR DOMAIN_ADMIN; do
+    valeur="${!var:-}"
+    if [ "$var" != DOMAIN ] && [ -z "$valeur" ] && [ -n "${DOMAIN:-}" ]; then
+        valeur="$(tr '[:upper:]' '[:lower:]' <<<"${var#DOMAIN_}").$DOMAIN"
+    fi
+    [ -n "$valeur" ] || continue
+    [[ "$valeur" =~ $MOTIF_HOTE ]] \
+        || erreur "$var : nom d'hôte en minuscules attendu (ex. anitche.com), sans schéma, port ni « / »."
+done
+# Sans lui, Django répond 400 (DisallowedHost) à toutes les requêtes.
+if [ -n "${DOMAIN:-}" ] && [ "${#HOTES_AUTORISES[@]}" -gt 0 ] && ! hote_autorise "$DOMAIN"; then
+    erreur "DOMAIN : doit figurer dans ALLOWED_HOSTS (sinon Django refuse toutes les requêtes du site)."
+fi
+# Les portails appellent /api/ sur leur propre sous-domaine : nginx transmet
+# ce nom à Django, qui répond 400 (DisallowedHost) s'il n'est pas autorisé.
+for var in DOMAIN_VENDEUR DOMAIN_LIVREUR DOMAIN_ADMIN; do
+    valeur="${!var:-}"
+    if [ -z "$valeur" ] && [ -n "${DOMAIN:-}" ]; then
+        valeur="$(tr '[:upper:]' '[:lower:]' <<<"${var#DOMAIN_}").$DOMAIN"
+    fi
+    [ -n "$valeur" ] || continue
+    if [ "${#HOTES_AUTORISES[@]}" -gt 0 ] && [[ "$valeur" =~ $MOTIF_HOTE ]] && ! hote_autorise "$valeur"; then
+        erreur "$var : « $valeur » doit figurer dans ALLOWED_HOSTS (sinon le portail n'atteint pas l'API : Django répond 400)."
+    fi
+done
+
+# Adresses autorisées sur /admin/ : vide (par défaut) = fermé à tous.
+# Jamais de préfixe /0 (tout Internet).
+cidr_valide() {
+    local entree="$1" prefixe
+    if [[ "$entree" =~ $MOTIF_CIDR_IPV4 ]]; then
+        local octet
+        for octet in "${BASH_REMATCH[@]:1:4}"; do (( 10#$octet <= 255 )) || return 1; done
+        prefixe="${BASH_REMATCH[6]:-32}"
+        (( 10#$prefixe >= 1 && 10#$prefixe <= 32 ))
+    elif [[ "$entree" =~ $MOTIF_CIDR_IPV6 ]]; then
+        prefixe="${BASH_REMATCH[2]:-128}"
+        (( 10#$prefixe >= 1 && 10#$prefixe <= 128 ))
+    else
+        return 1
+    fi
+}
+if [ -n "${ADMIN_ALLOWED_CIDRS:-}" ]; then
+    IFS=', ' read -r -a entrees <<< "$ADMIN_ALLOWED_CIDRS"
+    n=0
+    for entree in "${entrees[@]}"; do
+        [ -n "$entree" ] || continue
+        n=$((n + 1))
+        cidr_valide "$entree" \
+            || erreur "ADMIN_ALLOWED_CIDRS : l'entrée n°$n n'est pas une adresse IPv4 ou IPv6 valide, avec ou sans /préfixe (1 au moins) ; entrées séparées par des virgules."
+    done
+fi
+
+if [ -n "${NGINX_RELOAD_INTERVAL:-}" ] && [[ ! "$NGINX_RELOAD_INTERVAL" =~ ^[1-9][0-9]*[smhd]?$ ]]; then
+    erreur "NGINX_RELOAD_INTERVAL : nombre entier positif suivi de s, m, h ou d (ex. 6h)."
+fi
+
 # --- Paiements (prod.py) ----------------------------------------------------
-if [ -n "${PAIEMENT_FOURNISSEUR:-}" ] && [ "$PAIEMENT_FOURNISSEUR" != cinetpay ]; then
-    erreur "PAIEMENT_FOURNISSEUR doit valoir cinetpay en production (le fournisseur simulé n'encaisse rien)."
+# ANITCHE_STAGING_SANDBOX_PAIEMENT : exactement « true » ou « false », ou
+# absente. Définie mais vide, ou d'une autre valeur : refusée, comme prod.py.
+# Ne concerne que GeniusPay.
+STAGING_SANDBOX=faux
+if [ "${ANITCHE_STAGING_SANDBOX_PAIEMENT+defini}" = defini ]; then
+    case "$ANITCHE_STAGING_SANDBOX_PAIEMENT" in
+        true) STAGING_SANDBOX=vrai ;;
+        false) ;;
+        *) erreur "ANITCHE_STAGING_SANDBOX_PAIEMENT : « true » ou « false » exactement (ou absente), toute autre valeur est refusée ; elle ne concerne que GeniusPay en staging." ;;
+    esac
 fi
-if [[ "${CINETPAY_API_KEY:-}" == sk_test_* ]]; then
-    erreur "CINETPAY_API_KEY : clé de sandbox (sk_test_), interdite en production."
-fi
+
+case "${PAIEMENT_FOURNISSEUR:-}" in
+    '') ;; # absente : déjà signalée plus haut
+    geniuspay)
+        for var in GENIUSPAY_API_KEY GENIUSPAY_API_SECRET GENIUSPAY_WEBHOOK_SECRET; do
+            [ -n "$(nettoyer "${!var:-}")" ] || erreur "$var : absente ou vide (PAIEMENT_FOURNISSEUR=geniuspay)."
+        done
+        case "${GENIUSPAY_ENVIRONNEMENT:-}" in
+            live|sandbox) ;;
+            *) erreur "GENIUSPAY_ENVIRONNEMENT : « live » ou « sandbox » exactement (PAIEMENT_FOURNISSEUR=geniuspay)." ;;
+        esac
+        if [ "${GENIUSPAY_ENVIRONNEMENT:-}" = sandbox ] && [ "$STAGING_SANDBOX" != vrai ]; then
+            erreur "GENIUSPAY_ENVIRONNEMENT : « sandbox » est réservé au staging et exige ANITCHE_STAGING_SANDBOX_PAIEMENT=true (aucun paiement ne serait réel en production)."
+        fi
+        if [ "${GENIUSPAY_ENVIRONNEMENT:-}" = live ] && [ "$STAGING_SANDBOX" = vrai ]; then
+            erreur "ANITCHE_STAGING_SANDBOX_PAIEMENT : « true » est incompatible avec GENIUSPAY_ENVIRONNEMENT=live ; le mode staging ne se combine jamais à des clés live."
+        fi
+        # Clés et environnement cohérents : sk_live_/ss_live_ pour « live »,
+        # sk_sandbox_/ss_sandbox_ pour « sandbox ». Préfixes relevés sur le
+        # tableau de bord GeniusPay (sa documentation annonce pk_/sk_) ; ceux
+        # de « live » restent à confirmer.
+        case "${GENIUSPAY_ENVIRONNEMENT:-}" in
+            live|sandbox)
+                if [ -n "$(nettoyer "${GENIUSPAY_API_KEY:-}")" ] && [[ "$GENIUSPAY_API_KEY" != "sk_${GENIUSPAY_ENVIRONNEMENT}_"* ]]; then
+                    erreur "GENIUSPAY_API_KEY : doit commencer par sk_${GENIUSPAY_ENVIRONNEMENT}_ (GENIUSPAY_ENVIRONNEMENT=$GENIUSPAY_ENVIRONNEMENT) ; clés et environnement doivent être cohérents."
+                fi
+                if [ -n "$(nettoyer "${GENIUSPAY_API_SECRET:-}")" ] && [[ "$GENIUSPAY_API_SECRET" != "ss_${GENIUSPAY_ENVIRONNEMENT}_"* ]]; then
+                    erreur "GENIUSPAY_API_SECRET : doit commencer par ss_${GENIUSPAY_ENVIRONNEMENT}_ (GENIUSPAY_ENVIRONNEMENT=$GENIUSPAY_ENVIRONNEMENT) ; clés et environnement doivent être cohérents."
+                fi
+                ;;
+        esac
+        ;;
+    *)
+        erreur "PAIEMENT_FOURNISSEUR : geniuspay en production (le fournisseur simulé n'encaisse rien ; toute autre valeur est refusée)."
+        ;;
+esac
 
 # --- Emails (prod.py) -------------------------------------------------------
 if [ -n "${EMAIL_BACKEND:-}" ] && [ "$EMAIL_BACKEND" != "$BACKEND_EMAIL_SMTP" ]; then
@@ -243,9 +355,8 @@ fi
 
 # --- FastAPI : adresses publiques et rôle PostgreSQL en lecture seule -------
 # FRONTEND_BASE_URL : même valeur par défaut que docker-compose.prod.yml.
-verifier_url_publique FRONTEND_BASE_URL "${FRONTEND_BASE_URL:-https://anitche.com}"
+verifier_url_publique FRONTEND_BASE_URL "${FRONTEND_BASE_URL:-https://${DOMAIN:-}}"
 [ -z "${PUBLIC_BASE_URL:-}" ] || verifier_url_publique PUBLIC_BASE_URL "$PUBLIC_BASE_URL"
-[ -z "${MEDIA_BASE_URL:-}" ] || verifier_url_publique MEDIA_BASE_URL "$MEDIA_BASE_URL"
 
 if [ -n "${FASTAPI_DB_PASSWORD:-}" ]; then
     if [ "$FASTAPI_DB_PASSWORD" = "$MOT_DE_PASSE_FASTAPI_DEV" ]; then
@@ -259,11 +370,30 @@ if [ -n "${FASTAPI_DB_PASSWORD:-}" ]; then
 fi
 
 # --- PostgreSQL ---------------------------------------------------------------
-if [ -n "${DB_PASSWORD:-}" ]; then
-    case "$DB_PASSWORD" in
-        postgres|change-me-too) erreur "DB_PASSWORD : valeur d'exemple, à remplacer par un mot de passe aléatoire." ;;
-        *) [ "${#DB_PASSWORD}" -ge 12 ] || erreur "DB_PASSWORD : 12 caractères au moins." ;;
+# DB_PASSWORD : rôle applicatif anitche_app (Django, Celery) ;
+# DB_SUPERUSER_PASSWORD : superutilisateur postgres (scripts et sauvegardes).
+# Trois mots de passe distincts : aucun rôle ne connaît celui d'un autre.
+for var in DB_PASSWORD DB_SUPERUSER_PASSWORD; do
+    valeur="${!var:-}"
+    [ -n "$valeur" ] || continue
+    case "$valeur" in
+        postgres|change-me-too) erreur "$var : valeur d'exemple, à remplacer par un mot de passe aléatoire." ;;
+        *) [ "${#valeur}" -ge 12 ] || erreur "$var : 12 caractères au moins." ;;
     esac
+done
+if [ -n "${DB_SUPERUSER_PASSWORD:-}" ]         && { [ "$DB_SUPERUSER_PASSWORD" = "${DB_PASSWORD:-}" ] || [ "$DB_SUPERUSER_PASSWORD" = "${FASTAPI_DB_PASSWORD:-}" ]; }; then
+    erreur "DB_SUPERUSER_PASSWORD : distinct de DB_PASSWORD et de FASTAPI_DB_PASSWORD."
+fi
+if [ -n "${DB_PASSWORD:-}" ] && [ "$DB_PASSWORD" = "${FASTAPI_DB_PASSWORD:-}" ]; then
+    erreur "DB_PASSWORD : distinct de FASTAPI_DB_PASSWORD (rôle en lecture seule de FastAPI)."
+fi
+
+# --- Redis (prod.py) ----------------------------------------------------------
+# Inséré tel quel dans REDIS_URL et REDIS_CACHE_URL : lettres et chiffres
+# seulement (un « / », « @ » ou « : » couperait l'URL), 32 au moins
+# (openssl rand -hex 32).
+if [ -n "${REDIS_PASSWORD:-}" ] && [[ ! "$REDIS_PASSWORD" =~ ^[A-Za-z0-9]{32,}$ ]]; then
+    erreur "REDIS_PASSWORD : 32 caractères au moins, lettres et chiffres uniquement (inséré tel quel dans l'URL de Redis ; openssl rand -hex 32)."
 fi
 
 # --- Sauvegardes (infra/scripts/backup.sh, docs/SAUVEGARDES.md) --------------

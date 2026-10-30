@@ -242,7 +242,7 @@ def changer_statut(livraison, nouveau, acteur, commentaire="", code=""):
                 champs.append("date_expedition")
             # Expédiée / livrée se répercutent sur la commande (livrée ouvre
             # le délai de rétractation du reversement).
-            synchroniser_depuis_livraison(livraison.commande, nouveau)
+            synchroniser_depuis_livraison(livraison.commande, nouveau, acteur)
             _appliquer(livraison, nouveau, acteur, commentaire, champs)
 
     if code_refuse:
@@ -384,12 +384,15 @@ def resoudre_contestation(livraison, administrateur, decision, commentaire=""):
         contestation.date_resolution = timezone.now()
         contestation.save()
         commande = contestation.livraison.commande
+        deja_rembourse = False
         if decision == Decision.REJETEE:
             reversements.reprendre_reversement(commande)
         else:
             paiement = paiement_valide_de(commande)
             if paiement is not None:
-                creer_remboursement(paiement, commande, Remboursement.Motif.LIVRAISON_NON_RECUE)
+                # Ramené au reste dû si un retour a déjà été remboursé (plafond).
+                remboursement, _ = creer_remboursement(paiement, commande, Remboursement.Motif.LIVRAISON_NON_RECUE)
+                deja_rembourse = remboursement is None
             reversements.annuler_reversement(commande)
             # Colis jamais reçu : les points en attente de la commande sont annulés.
             annuler_gain(commande, "Livraison contestée : colis non reçu")
@@ -400,9 +403,11 @@ def resoudre_contestation(livraison, administrateur, decision, commentaire=""):
         commande.client,
         titre=f"Contestation de la commande {commande.numero_commande}",
         message=(
-            "Votre contestation est fondée : un remboursement va être effectué."
-            if decision == Decision.FONDEE
-            else "Après vérification, votre contestation n'a pas été retenue."
+            "Après vérification, votre contestation n'a pas été retenue."
+            if decision != Decision.FONDEE
+            else "Votre contestation est fondée : un remboursement va être effectué."
+            if not deja_rembourse
+            else "Votre contestation est fondée : le montant payé vous a déjà été remboursé."
         ),
         type_notification=Notification.TypeNotification.LIVRAISON,
         lien_redirection=liens.lien_livraison_client(livraison),

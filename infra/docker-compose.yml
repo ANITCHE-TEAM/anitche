@@ -1,5 +1,3 @@
-version: "3.9"
-
 # Environnement de DÉVELOPPEMENT local.
 # Lancer depuis la racine du repo : docker compose -f infra/docker-compose.yml up
 #
@@ -152,10 +150,8 @@ services:
       REDIS_URL: redis://redis:6379/2
       CORS_ALLOWED_ORIGINS: http://localhost:5173
       FRONTEND_BASE_URL: http://localhost:5173
-      # Recherche : liens next/previous (adresse publique de FastAPI) et URL
-      # des images (fichiers média servis par Django en dev).
+      # Recherche : liens next/previous (adresse publique de FastAPI).
       PUBLIC_BASE_URL: http://localhost:8001
-      MEDIA_BASE_URL: http://localhost:8000/media/
     volumes:
       - ../backend-fastapi:/app
     ports:
@@ -182,11 +178,13 @@ services:
     volumes:
       - ../frontend:/app
       - /app/node_modules
+      - /app/apps/client/node_modules
+      - /app/packages/config/node_modules
     ports:
       - "5173:5173"
     environment:
-      VITE_API_URL: http://localhost:8000
-      VITE_FASTAPI_URL: http://localhost:8001
+      VITE_PROXY_DJANGO: http://backend-django:8000
+      VITE_PROXY_FASTAPI: http://backend-fastapi:8001
     depends_on:
       - backend-django
       - backend-fastapi

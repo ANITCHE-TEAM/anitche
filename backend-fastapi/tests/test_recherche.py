@@ -302,8 +302,8 @@ def test_response_has_the_django_envelope_and_fields_only(client, db):
         "slug": "beurre-de-karite-pur-3d85cf",
         "prix_base": "3500.00",
         "prix_min": 3500.0,
-        "image_principale": "http://localhost:8000/media/catalogue/produits/2026/09/produit_GJzjrY5.png",
-        "miniature_principale": "http://localhost:8000/media/catalogue/miniatures/2026/09/produit_GJzjrY5.webp",
+        "image_principale": "/media/catalogue/produits/2026/09/produit_GJzjrY5.png",
+        "miniature_principale": "/media/catalogue/miniatures/2026/09/produit_GJzjrY5.webp",
         "categorie": 8,
         "categorie_nom": "Beauté",
         "boutique": 14,
@@ -339,20 +339,26 @@ def test_page_query_selects_the_thumbnail_column():
     assert "p.miniature_principale" in sql
 
 
-@pytest.mark.parametrize("settings", [{"media_base_url": "https://cdn.anitche.test/media"}], indirect=True)
-def test_image_url_uses_media_base_url_and_django_encoding(client, db):
+def test_image_url_is_a_relative_media_path_with_django_encoding(client, db):
     db.search_rows = [product_row(image_principale="catalogue/produits/photo été (1).png")]
     (item,) = client.get("/recherche/produits").json()["results"]
-    assert item["image_principale"] == "https://cdn.anitche.test/media/catalogue/produits/photo%20%C3%A9t%C3%A9%20(1).png"
+    assert item["image_principale"] == "/media/catalogue/produits/photo%20%C3%A9t%C3%A9%20(1).png"
 
 
-@pytest.mark.parametrize("settings", [{"media_base_url": "https://cdn.anitche.test/media"}], indirect=True)
-def test_thumbnail_url_uses_media_base_url_and_django_encoding(client, db):
+def test_thumbnail_url_is_a_relative_media_path_with_django_encoding(client, db):
     db.search_rows = [product_row(miniature_principale="catalogue/miniatures/2026/09/photo été (1).webp")]
     (item,) = client.get("/recherche/produits").json()["results"]
-    assert item["miniature_principale"] == (
-        "https://cdn.anitche.test/media/catalogue/miniatures/2026/09/photo%20%C3%A9t%C3%A9%20(1).webp"
-    )
+    assert item["miniature_principale"] == "/media/catalogue/miniatures/2026/09/photo%20%C3%A9t%C3%A9%20(1).webp"
+
+
+@pytest.mark.parametrize("path", ["/catalogue/produits/a.png", "\\catalogue\\produits\\a.png"])
+def test_media_path_never_doubles_the_separator(path):
+    assert search.media_url(path) == "/media/catalogue/produits/a.png"
+
+
+@pytest.mark.parametrize("path", [None, ""])
+def test_media_path_is_null_without_image(path):
+    assert search.media_url(path) is None
 
 
 @pytest.mark.parametrize("settings", [{"public_base_url": "https://anitche.test/fast"}], indirect=True)

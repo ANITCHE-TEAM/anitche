@@ -85,23 +85,101 @@ except ValueError as erreur:
         f"32 octets encodés en base64 URL) : {erreur}"
     )
 
-# Paiements : jamais le fournisseur simulé (il accepte des notifications
-# signées avec un secret de développement public), jamais une clé CinetPay
-# de sandbox, jamais sans clés. Transmis par docker-compose.prod.yml.
-if PAIEMENT_FOURNISSEUR == 'simule':
+# Paiements : liste fermée des fournisseurs autorisés. Jamais le fournisseur
+# simulé (il accepte des notifications signées avec un secret de
+# développement public), jamais une valeur inconnue ou un adaptateur non
+# listé ici (aucun des contrôles de clés ci-dessous ne s'y appliquerait),
+# jamais une clé de sandbox hors staging, jamais sans clés. Transmis par
+# docker-compose.prod.yml.
+PAIEMENT_FOURNISSEURS_AUTORISES = ('geniuspay',)
+
+# Staging uniquement : ANITCHE_STAGING_SANDBOX_PAIEMENT
+# vaut exactement « true » (staging, environnement et clés de sandbox) ou
+# « false » ; absente = « false ». Toute autre valeur est refusée, sans
+# conversion tolérante : un « 1 » ou un « True » mal compris ne doit jamais
+# ouvrir ou fermer le sandbox sans que personne ne le voie.
+ANITCHE_STAGING_SANDBOX_PAIEMENT = config('ANITCHE_STAGING_SANDBOX_PAIEMENT', default=None)
+if ANITCHE_STAGING_SANDBOX_PAIEMENT not in (None, 'true', 'false'):
     raise ImproperlyConfigured(
-        "PAIEMENT_FOURNISSEUR='simule' est interdit en production : définissez "
-        "PAIEMENT_FOURNISSEUR=cinetpay et ses clés (docs/MODULE_PAIEMENTS.md)."
+        "ANITCHE_STAGING_SANDBOX_PAIEMENT doit valoir exactement « true » ou « false » "
+        "(ou être absente) : toute autre valeur, y compris vide, « True » ou « 1 », est refusée. "
+        "Elle ne concerne que GeniusPay en staging."
     )
-if PAIEMENT_FOURNISSEUR == 'cinetpay':
-    if not CINETPAY_API_KEY or not CINETPAY_API_PASSWORD:
+STAGING_SANDBOX_PAIEMENT = ANITCHE_STAGING_SANDBOX_PAIEMENT == 'true'
+
+if PAIEMENT_FOURNISSEUR not in PAIEMENT_FOURNISSEURS_AUTORISES:
+    raise ImproperlyConfigured(
+        f"PAIEMENT_FOURNISSEUR={PAIEMENT_FOURNISSEUR!r} est interdit en production "
+        f"(valeurs autorisées : {', '.join(PAIEMENT_FOURNISSEURS_AUTORISES)}) : définissez "
+        "PAIEMENT_FOURNISSEUR et ses clés (docs/MODULE_PAIEMENTS.md)."
+    )
+if PAIEMENT_FOURNISSEUR == 'geniuspay':
+    _geniuspay_manquants = [
+        nom for nom, valeur in (
+            ('GENIUSPAY_API_KEY', GENIUSPAY_API_KEY),
+            ('GENIUSPAY_API_SECRET', GENIUSPAY_API_SECRET),
+            ('GENIUSPAY_WEBHOOK_SECRET', GENIUSPAY_WEBHOOK_SECRET),
+        ) if not valeur.strip()
+    ]
+    if _geniuspay_manquants:
         raise ImproperlyConfigured(
-            "CINETPAY_API_KEY et CINETPAY_API_PASSWORD doivent être définis en production."
+            f"{', '.join(_geniuspay_manquants)} doivent être définis en production "
+            "(GENIUSPAY_API_KEY, GENIUSPAY_API_SECRET et GENIUSPAY_WEBHOOK_SECRET)."
         )
-    if CINETPAY_API_KEY.startswith('sk_test_'):
+    if GENIUSPAY_ENVIRONNEMENT not in ('live', 'sandbox'):
         raise ImproperlyConfigured(
-            "Clé CinetPay de sandbox (sk_test_) interdite en production : aucun paiement ne serait réel."
+            "GENIUSPAY_ENVIRONNEMENT doit valoir « live » ou « sandbox » en production "
+            "(« sandbox » seulement en staging, avec ANITCHE_STAGING_SANDBOX_PAIEMENT=true)."
         )
+    if GENIUSPAY_ENVIRONNEMENT == 'sandbox' and not STAGING_SANDBOX_PAIEMENT:
+        raise ImproperlyConfigured(
+            "L'environnement GeniusPay « sandbox » est réservé au staging : il exige "
+            "ANITCHE_STAGING_SANDBOX_PAIEMENT=true. En production, aucun paiement ne serait réel."
+        )
+    if GENIUSPAY_ENVIRONNEMENT == 'live' and STAGING_SANDBOX_PAIEMENT:
+        raise ImproperlyConfigured(
+            "ANITCHE_STAGING_SANDBOX_PAIEMENT=true est incompatible avec l'environnement live "
+            "de GeniusPay : le mode staging ne peut jamais être combiné à des clés live."
+        )
+    # Clés et environnement cohérents : sk_live_/ss_live_ pour « live »,
+    # sk_sandbox_/ss_sandbox_ pour « sandbox ». Préfixes relevés sur le
+    # tableau de bord GeniusPay (sa documentation annonce pk_/sk_) ; ceux de
+    # « live » restent à confirmer.
+    for _nom, _valeur, _type in (
+        ('GENIUSPAY_API_KEY', GENIUSPAY_API_KEY, 'sk'),
+        ('GENIUSPAY_API_SECRET', GENIUSPAY_API_SECRET, 'ss'),
+    ):
+        _prefixe = f'{_type}_{GENIUSPAY_ENVIRONNEMENT}_'
+        if not _valeur.startswith(_prefixe):
+            raise ImproperlyConfigured(
+                f"{_nom} doit commencer par {_prefixe} (GENIUSPAY_ENVIRONNEMENT="
+                f"{GENIUSPAY_ENVIRONNEMENT}) : clés et environnement doivent être cohérents."
+            )
+# Redis (broker Celery, cache, compteurs OTP, limites de débit) exige un mot de
+# passe : REDIS_URL et REDIS_CACHE_URL portent REDIS_PASSWORD
+# (redis://:<mot de passe>@redis:6379/<base>, docker-compose.prod.yml).
+# Lettres et chiffres seulement, 32 au moins : inséré tel quel dans l'URL, un
+# « / », « @ » ou « : » la couperait ailleurs que prévu.
+REDIS_MOT_DE_PASSE_LONGUEUR_MINIMALE = 32
+for _nom, _url in (('REDIS_URL', REDIS_URL), ('REDIS_CACHE_URL', REDIS_CACHE_URL)):
+    _parties = urlsplit(_url)
+    try:
+        _port_valide = _parties.port is None or _parties.port > 0
+    except ValueError:
+        _port_valide = False
+    _mot_de_passe = _parties.password or ''
+    if (
+        _parties.scheme not in ('redis', 'rediss') or not _parties.hostname or not _port_valide
+        or len(_mot_de_passe) < REDIS_MOT_DE_PASSE_LONGUEUR_MINIMALE or not _mot_de_passe.isascii()
+        or not _mot_de_passe.isalnum()
+    ):
+        raise ImproperlyConfigured(
+            f"{_nom} doit contenir le mot de passe de Redis (redis://:<REDIS_PASSWORD>@redis:6379/<base>) : "
+            f"REDIS_PASSWORD de {REDIS_MOT_DE_PASSE_LONGUEUR_MINIMALE} caractères au moins, lettres et "
+            "chiffres uniquement. Sans lui, tout conteneur du réseau lit et écrit le broker Celery, le "
+            "cache, les codes OTP en cours et les limites de débit."
+        )
+
 if not BACKEND_BASE_URL.startswith('https://'):
     raise ImproperlyConfigured(
         "BACKEND_BASE_URL doit être l'adresse HTTPS publique de l'API (URL de notification des paiements)."
@@ -123,7 +201,7 @@ if '*' in ALLOWED_HOSTS:
         "ALLOWED_HOSTS='*' est interdit en production."
     )
 
-# L'URL de notification CinetPay (apps.paiements.fournisseurs.cinetpay) est
+# L'URL de notification des fournisseurs est
 # f"{BACKEND_BASE_URL}/api/paiements/webhook/...". Elle n'aboutit que si son
 # hôte est accepté par Django (sinon 400 DisallowedHost, et aucun paiement
 # n'est jamais confirmé) et si BACKEND_BASE_URL est l'origine seule : nginx
@@ -210,15 +288,17 @@ SERVER_EMAIL = DEFAULT_FROM_EMAIL
 CORS_ALLOW_CREDENTIALS = False
 
 SECURE_SSL_REDIRECT = True
-# Seule exception à la redirection HTTPS : la route interne de vérification
+# Exceptions à la redirection HTTPS : la route interne de vérification
 # du jeton, que FastAPI appelle directement sur le réseau Docker
-# (http://backend-django:8000), sans passer par nginx ni TLS. Sans cette
-# ligne, l'appel reçoit un 301 vers https et l'authentification FastAPI
-# échoue. SecurityMiddleware retire le « / » initial du chemin avant de
-# tester ces motifs, d'où « ^api/ » et non « ^/api/ ». Depuis Internet, nginx
-# répond 404 sur ce chemin sans le transmettre à Django (location
-# /api/utilisateurs/jeton/verification dans infra/nginx/nginx.conf).
-SECURE_REDIRECT_EXEMPT = [r'^api/utilisateurs/jeton/verification/$']
+# (http://backend-django:8000), sans passer par nginx ni TLS, et /health/,
+# que le healthcheck du conteneur appelle en HTTP sur 127.0.0.1. Sans ces
+# motifs, l'appel reçoit un 301 vers https et l'authentification FastAPI
+# échoue (le healthcheck aussi). SecurityMiddleware retire le « / » initial
+# du chemin avant de tester ces motifs, d'où « ^api/ » et non « ^/api/ ».
+# Depuis Internet, nginx répond 404 sur ces deux chemins sans les transmettre
+# à Django (locations /api/utilisateurs/jeton/verification et /health/ dans
+# infra/nginx/serveur-commun.conf).
+SECURE_REDIRECT_EXEMPT = [r'^api/utilisateurs/jeton/verification/$', r'^health/$']
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True
 
@@ -230,8 +310,8 @@ CSRF_COOKIE_SECURE = True
 # SECURE_SSL_REDIRECT ci-dessus provoquerait une boucle de redirection
 # infinie (Django croit que toute requête est en HTTP et redirige sans
 # fin). Nginx pose lui-même l'en-tête X-Forwarded-Proto à sa propre valeur
-# de $scheme (jamais à partir d'un en-tête client) sur les trois emplacements
-# proxy_pass (/, /api/, /admin/, /fast/) — voir infra/nginx/nginx.conf — donc
+# de $scheme (jamais à partir d'un en-tête client) sur chaque emplacement
+# proxy_pass (/, /api/, /admin/, /fast/) — voir infra/nginx/proxy-en-tetes.conf — donc
 # aucun client ne peut forger cet en-tête pour usurper du HTTPS auprès de
 # Django tant que ce dernier reste inaccessible autrement que via Nginx.
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
@@ -239,8 +319,9 @@ SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 # Adresse IP du client (limites de débit DRF, apps.core.reseau) : un seul
 # proxy de confiance, Nginx. Il résout lui-même l'IP réelle du visiteur
 # (module real_ip, uniquement pour les connexions venant des plages
-# Cloudflare) puis ÉCRASE X-Forwarded-For avec cette seule valeur — voir
-# infra/nginx/nginx.conf. Django lit donc la dernière (et unique) entrée.
+# Cloudflare, infra/nginx/nginx.conf) puis ÉCRASE X-Forwarded-For avec cette
+# seule valeur (infra/nginx/proxy-en-tetes.conf). Django lit donc la dernière
+# (et unique) entrée.
 # Même raisonnement que SECURE_PROXY_SSL_HEADER : valable tant que Django
 # n'est joignable que via Nginx.
 REST_FRAMEWORK['NUM_PROXIES'] = 1

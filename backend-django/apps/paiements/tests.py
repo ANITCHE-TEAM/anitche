@@ -1,23 +1,32 @@
+import hashlib
+import hmac
 import importlib
 import json
 import os
+import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
 from datetime import timedelta
 from decimal import Decimal
+from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
+from urllib.parse import unquote
 
+import requests
 from cryptography.fernet import Fernet
 from django.apps import apps as registre_apps
 from django.conf import settings
 from django.core.cache import cache
+from django.core.management import CommandError, call_command
 from django.db import IntegrityError, connection, transaction
 from django.db.migrations.executor import MigrationExecutor
-from django.test import TransactionTestCase, override_settings
+from django.test import SimpleTestCase, TransactionTestCase, override_settings
 from django.urls import Resolver404, clear_url_caches, resolve
 from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
@@ -36,15 +45,39 @@ from apps.retours.models import DemandeRetour, RetourItem
 from apps.utilisateurs.models import DocumentKYC, Role, StatutKYC, TypePieceIdentite, Utilisateur
 from apps.vendeurs.models import Boutique
 
-from . import reversements
-from .fournisseurs.base import EN_ATTENTE, ErreurFournisseur, EtatTransaction, hacher_jeton
-from .fournisseurs.cinetpay import FournisseurCinetPay
-from .fournisseurs.simule import EN_TETE_SIGNATURE, FournisseurSimule, definir_etat_distant, signer
+from . import reversements, services
+from .fournisseurs import FOURNISSEURS, FournisseurInconnu, obtenir_fournisseur
+from .fournisseurs import geniuspay
+from .fournisseurs.base import (
+    ECHEC,
+    EN_ATTENTE,
+    SUCCES,
+    ErreurFournisseur,
+    EtatTransaction,
+    MontantHorsLimites,
+    NotificationInvalide,
+    OperationNonSupportee,
+    TransactionIntrouvable,
+    TransfertRefuse,
+    hacher_jeton,
+)
+from .fournisseurs.geniuspay import FournisseurGeniusPay
+from .fournisseurs.simule import (
+    DELAI_APRES_ENVOI,
+    EN_TETE_SIGNATURE,
+    PANNE_AVANT_ENVOI,
+    REFUS_CERTAIN,
+    FournisseurSimule,
+    definir_comportement_transfert,
+    definir_etat_distant,
+    signer,
+)
 from .frais import bareme_en_vigueur, calculer_frais_ligne
+from .management.commands import essai_geniuspay
 from .models import AjustementVendeur, BaremeFrais, JournalWebhook, Paiement, Remboursement, Reversement
-from .services import reconcilier_paiement, reconcilier_paiements_en_suspens, valider_paiement
+from .services import reconcilier_paiement, reconcilier_paiements_en_suspens
 from .signals import paiement_valide
-from .tasks import reconcilier_paiements
+from .tasks import reconcilier_paiements, reconcilier_reversements
 
 URL_INITIER = "/api/paiements/initier/"
 URL_VALIDER_PANIER = "/api/commandes/valider-panier/"
@@ -407,9 +440,9 @@ class SimulationPaiementTests(Donnees, APITestCase):
         self.assertEqual(r.status_code, 401)
 
     def test_hors_fournisseur_simule_404(self):
-        with override_settings(PAIEMENT_FOURNISSEUR="cinetpay"):
+        with override_settings(PAIEMENT_FOURNISSEUR="geniuspay"):
             self.assertEqual(self.simuler().status_code, 404)
-        Paiement.objects.filter(pk=self.paiement.pk).update(fournisseur="cinetpay")
+        Paiement.objects.filter(pk=self.paiement.pk).update(fournisseur="geniuspay")
         self.assertEqual(self.simuler().status_code, 404)
         self.paiement.refresh_from_db()
         self.assertEqual(self.paiement.statut, Paiement.Statut.EN_ATTENTE)
@@ -478,7 +511,7 @@ class NotificationTests(Donnees, APITestCase):
         self.assertFalse(CompteFidelite.objects.filter(utilisateur=self.client1, solde_points__gt=0).exists())
 
     def test_notification_d_un_autre_fournisseur_refusee(self):
-        Paiement.objects.filter(pk=self.paiement.pk).update(fournisseur="cinetpay")
+        Paiement.objects.filter(pk=self.paiement.pk).update(fournisseur="geniuspay")
         self.assertEqual(self.notifier_succes(self.paiement).status_code, 404)
         self.paiement.refresh_from_db()
         self.assertEqual(self.paiement.statut, Paiement.Statut.EN_ATTENTE)
@@ -751,6 +784,71 @@ class DonneesReconciliation(Donnees):
         return Stock.objects.get(variante=self.variante1).quantite_disponible
 
 
+class MontantEtDeviseConfirmesTests(DonneesReconciliation, APITestCase):
+    """Contrat commun à tous les fournisseurs (fournisseurs/base.py) : un
+    succès n'est appliqué que s'il porte un montant entier égal au montant
+    dû et la devise du paiement. Information absente, illisible ou
+    différente : rien n'est validé, par la notification comme par la
+    réconciliation."""
+
+    def setUp(self):
+        self.preparer()
+        self.du = int(self.paiement.montant)
+
+    def confirmations_refusees(self):
+        """libellé → (montant, devise) confirmés par le fournisseur."""
+        return {
+            "montant absent": (None, "XOF"),
+            "devise absente": (self.du, None),
+            "devise vide": (self.du, ""),
+            "montant et devise absents": (None, None),
+            "montant fractionnaire": (self.du + 0.5, "XOF"),
+            "montant fractionnaire décimal": (Decimal(f"{self.du}.50"), "XOF"),
+            "montant invalide": ("abc", "XOF"),
+            "montant en texte": (str(self.du), "XOF"),
+            "montant flottant": (float(self.du), "XOF"),
+            "montant booléen": (True, "XOF"),
+            "devise différente": (self.du, "EUR"),
+            "montant inférieur": (self.du - 1, "XOF"),
+            "montant supérieur": (self.du + 1, "XOF"),
+        }
+
+    def verifier_rien_valide(self):
+        self.assertEqual(self.statuts(), ("en_attente", "creee"))
+        self.assertFalse(Livraison.objects.filter(commande=self.commande).exists())
+        self.assertFalse(Reversement.objects.filter(commande=self.commande).exists())
+
+    def test_notification_refusee_sans_montant_et_devise_conformes(self):
+        # La lecture d'une notification simulée refuse déjà un succès sans
+        # montant entier : l'état vérifié est fourni ici directement, pour
+        # exercer le contrôle commun à tous les fournisseurs.
+        for numero, (libelle, (montant, devise)) in enumerate(self.confirmations_refusees().items()):
+            with self.subTest(libelle):
+                etat = EtatTransaction(statut=SUCCES, identifiant_externe="SIM-TX", montant=montant, devise=devise)
+                with mock.patch.object(FournisseurSimule, "verifier_transaction", return_value=etat):
+                    r = self.notifier_succes(self.paiement, evenement_id=f"evt-refus-{numero}")
+                self.assertEqual(r.status_code, 400)
+                self.verifier_rien_valide()
+                self.assertEqual(JournalWebhook.objects.get(evenement_id=f"evt-refus-{numero}").statut_traitement,
+                                 "erreur")
+
+    def test_reconciliation_refusee_sans_montant_et_devise_conformes(self):
+        for libelle, (montant, devise) in self.confirmations_refusees().items():
+            with self.subTest(libelle):
+                definir_etat_distant(self.paiement.reference, "succes", montant, devise)
+                self.assertEqual(reconcilier_paiement(self.paiement), ("refuse", False))
+                self.verifier_rien_valide()
+
+    def test_notification_avec_montant_et_devise_conformes_valide(self):
+        self.assertEqual(self.notifier_succes(self.paiement).status_code, 200)
+        self.assertEqual(self.statuts(), ("valide", "confirmee"))
+
+    def test_reconciliation_avec_montant_et_devise_conformes_valide(self):
+        self.etat_distant("succes")
+        self.assertEqual(reconcilier_paiement(self.paiement), ("succes", True))
+        self.assertEqual(self.statuts(), ("valide", "confirmee"))
+
+
 class ReconciliationAvantExpirationTests(DonneesReconciliation, APITestCase):
     def setUp(self):
         self.preparer()
@@ -866,9 +964,8 @@ class ReconciliationPlanifieeTests(DonneesReconciliation, APITestCase):
         self.assertIsNone(self.paiement.date_derniere_reconciliation)
 
     def test_transaction_introuvable_refusee_sans_interrompre(self):
-        """Fournisseur simulé, même règle que CinetPay
-        (ReconciliationReponsesCinetPayTests) : refus pour ce paiement,
-        journalisé et daté ; les suivants sont vérifiés."""
+        """Refus pour ce paiement, journalisé et daté ; les suivants sont
+        vérifiés (ReconciliationRefusEtPanneTests pour l'expiration)."""
         from io import StringIO
 
         from django.core.management import call_command
@@ -939,7 +1036,7 @@ class ReconciliationPlanifieeTests(DonneesReconciliation, APITestCase):
         self.assertEqual(self.statuts(), ("valide", "confirmee"))
         with self.assertRaises(CommandError):
             call_command("simuler_etat_paiement", "PAY-INCONNU", "succes")
-        Paiement.objects.filter(pk=self.paiement.pk).update(fournisseur="cinetpay")
+        Paiement.objects.filter(pk=self.paiement.pk).update(fournisseur="geniuspay")
         with self.assertRaises(CommandError):
             call_command("simuler_etat_paiement", self.paiement.reference, "echec")
 
@@ -958,13 +1055,9 @@ class ReconciliationPlanifieeTests(DonneesReconciliation, APITestCase):
         self.assertEqual(verifies, [self.paiement.pk, autre_paiement.pk, self.paiement.pk])
 
 
-class ReconciliationConcurrenceTests(DonneesReconciliation, TransactionTestCase):
-    """PostgreSQL : vraies transactions concurrentes (fils d'exécution)."""
-
-    def setUp(self):
-        recreer_bareme_plateforme()
-        recreer_tarifs_initiaux()
-        self.preparer()
+class FilsConcurrents:
+    """Pour un TransactionTestCase sur PostgreSQL : fonctions exécutées en
+    même temps, chacune dans son fil et sa connexion."""
 
     def lancer(self, *fonctions, entre=None):
         """Exécute chaque fonction dans son fil (sa connexion). `entre` :
@@ -990,6 +1083,15 @@ class ReconciliationConcurrenceTests(DonneesReconciliation, TransactionTestCase)
         self.assertFalse(any(fil.is_alive() for fil in fils), "Fil bloqué : interblocage probable.")
         self.assertEqual(erreurs, [])
         return [resultats[i] for i in range(len(fonctions))]
+
+
+class ReconciliationConcurrenceTests(FilsConcurrents, DonneesReconciliation, TransactionTestCase):
+    """PostgreSQL : vraies transactions concurrentes (fils d'exécution)."""
+
+    def setUp(self):
+        recreer_bareme_plateforme()
+        recreer_tarifs_initiaux()
+        self.preparer()
 
     def verifier_invariant(self):
         """Webhook de succès reçu (argent encaissé) : paiement validé, et
@@ -1671,7 +1773,11 @@ class MigrationBaremeQuatorzePourcentTests(Donnees, TransactionTestCase):
 # REVERSEMENTS
 # =====================================================================
 
-class ReversementTests(Donnees, APITestCase):
+class DonneesReversement(Donnees):
+    """Commande de la boutique 1 payée : reversement en attente de livraison."""
+
+    URL_TRANSFERER = "/api/paiements/admin/reversements/{}/transferer/"
+
     def setUp(self):
         self.creer_donnees()
         (self.commande,) = self.commander((self.variante1, 2))  # 10 000 : 1 400 + 400 → net 8 200
@@ -1691,6 +1797,23 @@ class ReversementTests(Donnees, APITestCase):
         reversements.rendre_disponibles()
         self.reversement.refresh_from_db()
 
+    def transferer_avec(self, **resultat):
+        """Transfert dont le fournisseur répond tout de suite SUCCES, avec
+        les montant et devise donnés (absents s'ils ne sont pas passés)."""
+        from .fournisseurs.base import ResultatTransfert
+
+        reponse = ResultatTransfert(statut=SUCCES, identifiant_externe="T1", **resultat)
+        with mock.patch.object(FournisseurSimule, "transferer", return_value=reponse):
+            return self.api(self.admin).post(self.URL_TRANSFERER.format(self.reversement.pk), {"operateur": "wave"})
+
+    def versements_notifies(self):
+        return Notification.objects.filter(destinataire=self.vendeur1, titre="Reversement effectué").count()
+
+    def alertes(self, administrateur=None):
+        return Notification.objects.filter(destinataire=administrateur or self.admin, titre="Reversement à vérifier")
+
+
+class ReversementTests(DonneesReversement, APITestCase):
     def retour(self, statut=DemandeRetour.Statut.DEMANDE, quantite=1):
         demande = DemandeRetour.objects.create(
             commande=self.commande, client=self.client1, boutique=self.boutique1, description="x",
@@ -1711,7 +1834,9 @@ class ReversementTests(Donnees, APITestCase):
         self.assertEqual(reversements.rendre_disponibles(attendu), 1)
 
     @override_settings(RETOUR_DELAI_JOURS=30)
-    def test_retour_ouvert_suspend_puis_rejet_reprend(self):
+    def test_retour_ouvert_suspend_puis_refus_definitif_reprend(self):
+        from apps.retours.services import appliquer_echeances
+
         # Délai de retour configuré plus long que la rétractation : un retour
         # peut s'ouvrir sur un reversement déjà disponible.
         self.livrer(il_y_a_jours=8)
@@ -1727,6 +1852,10 @@ class ReversementTests(Donnees, APITestCase):
         r = self.api(self.vendeur1).patch(f"/api/retours/{r.data['id']}/traiter/",
                                           {"action": "rejeter", "reponse": "Article intact au déballage."}, format="json")
         self.assertEqual(r.status_code, 200, r.data)
+        # Refus contestable : le reversement attend la décision définitive.
+        self.reversement.refresh_from_db()
+        self.assertEqual(self.reversement.statut, Reversement.Statut.SUSPENDU)
+        self.assertEqual(appliquer_echeances(timezone.now() + timedelta(hours=73))[1], 1)
         self.reversement.refresh_from_db()
         self.assertEqual(self.reversement.statut, Reversement.Statut.DISPONIBLE)
 
@@ -1788,14 +1917,6 @@ class ReversementTests(Donnees, APITestCase):
         self.assertEqual((r.status_code, r.data["statut"], r.data["operateur"]), (200, "verse", "orange_money"))
         self.assertEqual(transferer.call_args.args[1:], ("+2250707070707", "orange_money"))
 
-    def test_transfert_echoue_reste_disponible(self):
-        self.livrer(il_y_a_jours=8)
-        with mock.patch.object(FournisseurSimule, "transferer", side_effect=ErreurFournisseur("solde")):
-            r = self.api(self.admin).post(f"/api/paiements/admin/reversements/{self.reversement.pk}/transferer/")
-        self.assertEqual(r.status_code, 409)
-        self.reversement.refresh_from_db()
-        self.assertEqual(self.reversement.statut, Reversement.Statut.DISPONIBLE)
-
     def test_transfert_confirme_par_notification(self):
         from .fournisseurs.base import ResultatTransfert
 
@@ -1810,6 +1931,115 @@ class ReversementTests(Donnees, APITestCase):
         self.assertEqual(r.status_code, 200)
         self.reversement.refresh_from_db()
         self.assertEqual(self.reversement.statut, Reversement.Statut.VERSE)
+
+    def test_transfert_confirme_sans_montant_et_devise_conformes_refuse(self):
+        from .fournisseurs.base import ResultatTransfert
+
+        self.livrer(il_y_a_jours=8)
+        with mock.patch.object(FournisseurSimule, "transferer",
+                               return_value=ResultatTransfert(statut=EN_ATTENTE, identifiant_externe="T1")):
+            self.api(self.admin).post(f"/api/paiements/admin/reversements/{self.reversement.pk}/transferer/",
+                                      {"operateur": "wave"})
+        du = 8200
+        confirmations = {
+            "montant absent": (None, "XOF"),
+            "devise absente": (du, None),
+            "devise vide": (du, ""),
+            "montant et devise absents": (None, None),
+            "montant fractionnaire": (du + 0.5, "XOF"),
+            "montant fractionnaire décimal": (Decimal(f"{du}.50"), "XOF"),
+            "montant invalide": ("abc", "XOF"),
+            "montant en texte": (str(du), "XOF"),
+            "montant flottant": (float(du), "XOF"),
+            "montant booléen": (True, "XOF"),
+            "devise différente": (du, "EUR"),
+            "montant inférieur": (du - 1, "XOF"),
+            "montant supérieur": (du + 1, "XOF"),
+        }
+        # La lecture d'une notification simulée refuse déjà un succès sans
+        # montant entier : l'état vérifié est fourni ici directement, pour
+        # exercer le contrôle commun à tous les fournisseurs.
+        for numero, (libelle, (montant, devise)) in enumerate(confirmations.items()):
+            with self.subTest(libelle):
+                etat = EtatTransaction(statut=SUCCES, identifiant_externe="T1", montant=montant, devise=devise)
+                with mock.patch.object(FournisseurSimule, "verifier_transfert", return_value=etat):
+                    r = self.notifier(self.reversement.reference, montant=du, transfert=True,
+                                      evenement_id=f"evt-transfert-{numero}")
+                self.assertEqual(r.status_code, 400)
+                self.reversement.refresh_from_db()
+                self.assertEqual((self.reversement.statut, self.reversement.date_versement), ("en_cours", None))
+                self.assertEqual(
+                    JournalWebhook.objects.get(evenement_id=f"evt-transfert-{numero}").statut_traitement, "erreur")
+                self.assertFalse(Notification.objects.filter(
+                    destinataire=self.vendeur1, titre="Reversement effectué").exists())
+                # Même règle que le succès immédiat et la réconciliation :
+                # l'argent a pu partir avec un autre montant, l'administration est alertée.
+                self.assertTrue(Notification.objects.filter(
+                    destinataire=self.admin, titre="Reversement à vérifier").exists())
+
+    # --- Succès immédiat d'un transfert : même contrôle que la notification ---
+
+    def test_succes_immediat_sans_montant_et_devise_conformes_reste_en_cours(self):
+        self.livrer(il_y_a_jours=8)
+        du = 8200
+        confirmations = {
+            "montant et devise absents": {},
+            "montant absent": {"devise": "XOF"},
+            "devise absente": {"montant": du},
+            "devise vide": {"montant": du, "devise": ""},
+            "montant fractionnaire": {"montant": du + 0.5, "devise": "XOF"},
+            "montant fractionnaire décimal": {"montant": Decimal(f"{du}.50"), "devise": "XOF"},
+            "montant en texte": {"montant": str(du), "devise": "XOF"},
+            "montant flottant": {"montant": float(du), "devise": "XOF"},
+            "montant booléen": {"montant": True, "devise": "XOF"},
+            "devise différente": {"montant": du, "devise": "EUR"},
+            "montant inférieur": {"montant": du - 1, "devise": "XOF"},
+            "montant supérieur": {"montant": du + 1, "devise": "XOF"},
+        }
+        for libelle, resultat in confirmations.items():
+            with self.subTest(libelle):
+                Reversement.objects.filter(pk=self.reversement.pk).update(statut=Reversement.Statut.DISPONIBLE)
+                with self.assertLogs("securite", "ERROR") as journaux:
+                    r = self.transferer_avec(**resultat)
+                # L'argent a pu partir : ni versé, ni rendu disponible.
+                self.assertEqual((r.status_code, r.data["statut"]), (200, "en_cours"))
+                self.reversement.refresh_from_db()
+                self.assertEqual(
+                    (self.reversement.statut, self.reversement.date_versement, self.reversement.montant_a_verser,
+                     self.reversement.reference_externe),
+                    ("en_cours", None, Decimal(du), "T1"),
+                )
+                self.assertIn(f"Transfert {self.reversement.reference} : succès immédiat non appliqué",
+                              journaux.output[0])
+                self.assertFalse(Notification.objects.filter(
+                    destinataire=self.vendeur1, titre="Reversement effectué").exists())
+
+    def test_succes_immediat_conforme_applique(self):
+        self.livrer(il_y_a_jours=8)
+        r = self.transferer_avec(montant=8200, devise="XOF")
+        self.assertEqual((r.status_code, r.data["statut"]), (200, "verse"))
+        self.reversement.refresh_from_db()
+        self.assertIsNotNone(self.reversement.date_versement)
+        self.assertEqual(Notification.objects.filter(
+            destinataire=self.vendeur1, titre="Reversement effectué").count(), 1)
+
+    def test_succes_immediat_refuse_puis_finalise_par_la_notification(self):
+        self.livrer(il_y_a_jours=8)
+        with self.assertLogs("securite", "ERROR"):
+            self.transferer_avec(montant=8199, devise="XOF")
+        r = self.notifier(self.reversement.reference, montant=8200, transfert=True)
+        self.assertEqual(r.status_code, 200)
+        self.reversement.refresh_from_db()
+        self.assertEqual(self.reversement.statut, Reversement.Statut.VERSE)
+        self.assertEqual(Notification.objects.filter(
+            destinataire=self.vendeur1, titre="Reversement effectué").count(), 1)
+
+    def test_fournisseur_simule_confirme_montant_et_devise_du_transfert(self):
+        self.livrer(il_y_a_jours=8)
+        Reversement.objects.filter(pk=self.reversement.pk).update(montant_a_verser=Decimal("8200"))
+        self.reversement.refresh_from_db()
+        resultat = FournisseurSimule().transferer(self.reversement, "+2250707070707", "orange_money")
+        self.assertEqual((resultat.statut, resultat.montant, resultat.devise), (SUCCES, 8200, "XOF"))
 
     def test_vue_vendeur(self):
         self.livrer()
@@ -1834,314 +2064,2133 @@ class ReversementTests(Donnees, APITestCase):
             self.assertEqual(api.get("/api/paiements/vendeur/reversements/").data["count"], 2)
 
 
-# =====================================================================
-# ADAPTATEUR CINETPAY (appels HTTP simulés, format des SDK officiels)
-# =====================================================================
+class RetourPendantLeVersementTests(DonneesReversement, APITestCase):
+    """Retour remboursé alors que le reversement de la commande est en cours
+    de transfert ou déjà versé : la part du vendeur ne bouge plus, la
+    déduction passe par un ajustement imputé une seule fois."""
 
-class ReponseHTTP:
-    def __init__(self, donnees, code=200):
-        self.donnees, self.status_code = donnees, code
-
-    def json(self):
-        return self.donnees
-
-
-class ReponseIllisible(ReponseHTTP):
-    """Corps non JSON (page HTML d'un proxy, par exemple)."""
-
-    def json(self):
-        raise ValueError("Expecting value")
-
-
-class ReponsesCinetPay:
-    """CinetPay en sandbox, réponses HTTP simulées : aucun appel au vrai CinetPay."""
-
-    def configurer_cinetpay(self):
-        reglages = self.settings(PAIEMENT_FOURNISSEUR="cinetpay", CINETPAY_API_KEY="sk_test_cle",
-                                 CINETPAY_API_PASSWORD="mdp", CINETPAY_API_URL="")
-        reglages.enable()
-        self.addCleanup(reglages.disable)
-        self.appels = []
-        self.reponses = {}
-
-    def repondre(self, methode, url, json=None, headers=None, timeout=None):
-        self.appels.append((methode, url, json, headers))
-        chemin = url.replace("https://api.cinetpay.net", "")
-        reponse = self.reponses.get((methode, chemin))
-        if callable(reponse):
-            return reponse()
-        return reponse or ReponseHTTP({"access_token": "jwt"} if chemin == "/v1/oauth/login" else {}, 200)
-
-    def initier_cinetpay(self, commande=None, client=None, transaction_id="CP-TX-1"):
-        self.reponses[("POST", "/v1/payment")] = ReponseHTTP({
-            "code": 200, "status": "OK", "payment_token": "pt", "notify_token": "jeton-secret",
-            "transaction_id": transaction_id, "merchant_transaction_id": "x",
-            "payment_url": "https://pay.cinetpay.co/p/1",
-        })
-        with mock.patch("requests.request", side_effect=self.repondre):
-            paiement = self.payer(commande or self.commande, client=client, methode="orange_money")
-        return paiement
-
-    def verifications(self):
-        """Références vérifiées par GET /v1/payment/{référence}, dans l'ordre."""
-        return [url.rsplit("/", 1)[1] for methode, url, _, _ in self.appels
-                if methode == "GET" and "/v1/payment/" in url]
-
-
-class CinetPayTests(ReponsesCinetPay, Donnees, APITestCase):
     def setUp(self):
-        self.creer_donnees()
-        (self.commande,) = self.commander((self.variante1, 3))
-        self.configurer_cinetpay()
+        super().setUp()
+        self.livrer(il_y_a_jours=8)
 
-    def notification(self, paiement, jeton="jeton-secret", transaction_id="CP-TX-1"):
-        return self.api().post(url_webhook("cinetpay"), {
-            "notify_token": jeton, "merchant_transaction_id": paiement.reference, "transaction_id": transaction_id,
-            "status": "SUCCESS",
-        }, format="json")
+    def transfert_en_attente(self):
+        from .fournisseurs.base import ResultatTransfert
 
-    def test_initiation(self):
-        paiement = self.initier_cinetpay()
-        self.assertEqual(paiement.fournisseur, "cinetpay")
-        self.assertEqual(paiement.url_paiement, "https://pay.cinetpay.co/p/1")
-        self.assertEqual(paiement.hash_jeton_notification, hacher_jeton("jeton-secret"))
-        (_, url, corps, entetes) = self.appels[-1]
-        self.assertEqual(url, "https://api.cinetpay.net/v1/payment")
-        self.assertEqual(entetes["Authorization"], "Bearer jwt")
-        self.assertEqual((corps["amount"], corps["currency"], corps["payment_method"], corps["merchant_transaction_id"]),
-                         (15000 + FRAIS_ABIDJAN, "XOF", "OM_CI", paiement.reference))
-        self.assertEqual(corps["notify_url"], "https://api.anitche.test/api/paiements/webhook/cinetpay/")
-        self.assertNotIn(b"jeton-secret", self.api(self.client1).get(f"/api/paiements/{paiement.pk}/").content)
+        with mock.patch.object(FournisseurSimule, "transferer",
+                               return_value=ResultatTransfert(statut=EN_ATTENTE, identifiant_externe="T1")):
+            self.api(self.admin).post(self.URL_TRANSFERER.format(self.reversement.pk), {"operateur": "wave"})
+        self.reversement.refresh_from_db()
+        self.assertEqual(self.reversement.statut, Reversement.Statut.EN_COURS)
 
-    def test_carte_bancaire_sans_moyen_impose(self):
-        self.reponses[("POST", "/v1/payment")] = ReponseHTTP({"payment_url": "https://p", "notify_token": "t",
-                                                               "transaction_id": "T"})
-        with mock.patch("requests.request", side_effect=self.repondre):
-            self.payer(self.commande, methode="carte_bancaire")
-        self.assertNotIn("payment_method", self.appels[-1][2])
+    def issue_du_transfert(self, statut, montant=None):
+        from .fournisseurs.base import ResultatTransfert
 
-    def test_notification_verifiee_aupres_de_cinetpay(self):
-        paiement = self.initier_cinetpay()
-        self.reponses[("GET", f"/v1/payment/{paiement.reference}")] = ReponseHTTP({
-            "code": 100, "status": "SUCCESS", "merchant_transaction_id": paiement.reference, "transaction_id": "CP-TX-1",
-        })
-        with mock.patch("requests.request", side_effect=self.repondre):
-            self.assertEqual(self.notification(paiement, jeton="mauvais").status_code, 401)
-            self.assertEqual(self.notification(paiement).status_code, 200)
-        paiement.refresh_from_db()
-        self.assertEqual(paiement.statut, Paiement.Statut.VALIDE)
-        self.assertEqual(self.appels[-1][:2], ("GET", f"https://api.cinetpay.net/v1/payment/{paiement.reference}"))
+        etat = ResultatTransfert(statut=statut, identifiant_externe="T1", montant=montant, devise="XOF")
+        return reversements.appliquer_etat_transfert(self.reversement.pk, etat, "immediat")
 
-    def test_statut_de_la_notification_ignore_seule_l_api_fait_foi(self):
-        paiement = self.initier_cinetpay()
-        self.reponses[("GET", f"/v1/payment/{paiement.reference}")] = ReponseHTTP({
-            "code": 2010, "status": "FAILED", "merchant_transaction_id": paiement.reference, "transaction_id": "CP-TX-1",
-        })
-        with mock.patch("requests.request", side_effect=self.repondre):
-            self.assertEqual(self.notification(paiement).status_code, 200)  # la notification dit SUCCESS
-        paiement.refresh_from_db()
-        self.assertEqual(paiement.statut, Paiement.Statut.ECHOUE)
+    def retour_rembourse(self):
+        demande = DemandeRetour.objects.create(
+            commande=self.commande, client=self.client1, boutique=self.boutique1, description="x",
+            montant_remboursement=Decimal("5000"), statut=DemandeRetour.Statut.RECEPTIONNE,
+        )
+        RetourItem.objects.create(demande_retour=demande, commande_item=self.commande.article.get(), quantite=1)
+        r = self.api(self.vendeur1).patch(f"/api/retours/{demande.pk}/traiter/", {"action": "rembourser"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        return demande
 
-    def test_transaction_ou_montant_incoherents_refuses(self):
-        paiement = self.initier_cinetpay()
-        chemin = ("GET", f"/v1/payment/{paiement.reference}")
-        self.reponses[chemin] = ReponseHTTP({"status": "SUCCESS", "merchant_transaction_id": paiement.reference,
-                                             "transaction_id": "AUTRE"})
-        with mock.patch("requests.request", side_effect=self.repondre):
-            self.assertEqual(self.notification(paiement).status_code, 400)
-            self.reponses[chemin] = ReponseHTTP({"status": "SUCCESS", "merchant_transaction_id": paiement.reference,
-                                                 "transaction_id": "CP-TX-2", "amount": "100", "currency": "XOF"})
-            self.assertEqual(self.notification(paiement, transaction_id="CP-TX-2").status_code, 400)
-        paiement.refresh_from_db()
-        self.assertEqual(paiement.statut, Paiement.Statut.EN_ATTENTE)
+    def test_transfert_en_cours_puis_echoue(self):
+        anterieur = AjustementVendeur.objects.create(boutique=self.boutique1, montant=Decimal("-1000"), motif="x")
+        self.transfert_en_attente()
+        ajustement = AjustementVendeur.objects.get(retour=self.retour_rembourse())
+        self.reversement.refresh_from_db()
+        # Montant figé pendant le transfert : seule la déduction en attente.
+        self.assertEqual((ajustement.montant, ajustement.reversement_impute, self.reversement.montant_net,
+                          self.reversement.montant_retours, self.reversement.montant_a_verser),
+                         (Decimal("-4300"), None, Decimal("8200"), Decimal("0"), Decimal("7200")))
+        self.assertEqual(self.issue_du_transfert(ECHEC).reversement.statut, Reversement.Statut.DISPONIBLE)
+        # Nouveau transfert du même reversement : 8 200 − 1 000 − 4 300.
+        r = self.transferer_avec(montant=2900, devise="XOF")
+        self.assertEqual((r.data["statut"], Decimal(r.data["montant_a_verser"])), ("verse", Decimal("2900")))
+        for dette in (anterieur, ajustement):
+            dette.refresh_from_db()
+            self.assertEqual(dette.reversement_impute_id, self.reversement.pk)
 
-    def test_jeton_expire_renouvele_une_fois(self):
-        paiement = self.initier_cinetpay()
-        reponses = iter([ReponseHTTP({"code": 1003, "status": "EXPIRED_TOKEN"}, 401),
-                         ReponseHTTP({"status": "SUCCESS", "merchant_transaction_id": paiement.reference,
-                                      "transaction_id": "CP-TX-1"})])
-        self.reponses[("GET", f"/v1/payment/{paiement.reference}")] = lambda: next(reponses)
-        with mock.patch("requests.request", side_effect=self.repondre):
-            self.assertEqual(self.notification(paiement).status_code, 200)
-        self.assertEqual(sum(1 for appel in self.appels if appel[1].endswith("/v1/oauth/login")), 2)
+    def test_transfert_en_cours_puis_reussi_impute_au_suivant_une_fois(self):
+        self.transfert_en_attente()
+        ajustement = AjustementVendeur.objects.get(retour=self.retour_rembourse())
+        self.assertTrue(self.issue_du_transfert(SUCCES, 8200).change)
+        ajustement.refresh_from_db()
+        self.assertIsNone(ajustement.reversement_impute)
+        imputes = []
+        for _ in range(2):
+            (suivante,) = self.commander((self.variante1, 2))
+            self.notifier_succes(self.payer(suivante))
+            self.livrer(suivante, il_y_a_jours=8)
+            suivant = Reversement.objects.get(commande=suivante)
+            r = self.api(self.admin).post(f"/api/paiements/admin/reversements/{suivant.pk}/verser/",
+                                          {"reference_externe": f"OM-{suivant.pk}"})
+            imputes.append(Decimal(r.data["montant_ajustements"]))
+        self.assertEqual(imputes, [Decimal("-4300"), Decimal("0")])
 
-    def test_cinetpay_injoignable(self):
-        import requests
+    def test_apres_versement_un_seul_ajustement(self):
+        self.api(self.admin).post(f"/api/paiements/admin/reversements/{self.reversement.pk}/verser/",
+                                  {"reference_externe": "OM-1"})
+        demande = self.retour_rembourse()
+        reversements.appliquer_retour_rembourse(demande)
+        self.assertEqual(list(AjustementVendeur.objects.values_list("montant", flat=True)), [Decimal("-4300")])
 
-        with mock.patch("requests.request", side_effect=requests.ConnectionError()):
-            r = self.initier(commande_id=str(self.commande.pk))
-        self.assertEqual(r.status_code, 502)
-        paiement = self.initier_cinetpay()
-        with mock.patch("requests.request", side_effect=requests.Timeout()):
-            self.assertEqual(self.notification(paiement).status_code, 503)
+    def test_remboursement_de_retour_ne_se_refuse_pas(self):
+        remboursement = Remboursement.objects.get(retour=self.retour_rembourse())
+        url = f"/api/paiements/admin/remboursements/{remboursement.pk}/traiter/"
+        admin = self.api(self.admin)
+        r = admin.post(url, {"decision": "refuse", "commentaire": "Échec chez le fournisseur"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("ne peut pas être refusé", str(r.data))
+        remboursement.refresh_from_db()
+        self.assertEqual(remboursement.statut, Remboursement.Statut.A_TRAITER)
+        r = admin.post(url, {"decision": "effectue", "reference_externe": "WAVE-R1", "commentaire": "Remboursé à la main"})
+        self.assertEqual((r.status_code, r.data["statut"]), (200, "effectue"))
 
-    def test_classement_des_reponses_a_la_verification(self):
-        """Un 400 ou un 404 sur la vérification vise CE paiement
-        (TransactionIntrouvable, qui n'est pas une ErreurFournisseur). Tout
-        le reste est une panne du fournisseur, y compris un 4xx de
-        l'authentification ou d'un transfert."""
-        import requests
 
-        from .fournisseurs.base import TransactionIntrouvable
+class TransfertIncertainTests(DonneesReversement, APITestCase):
+    """Après l'envoi d'un transfert, seul un refus certain ou un échec
+    confirmé rend le reversement disponible : toute autre erreur laisse
+    l'issue incertaine, le reversement reste « en cours » (montant et
+    ajustements figés) et ne peut être ni retransféré ni versé à la main."""
 
-        paiement = self.initier_cinetpay()
-        adaptateur = FournisseurCinetPay()
-        verification = ("GET", f"/v1/payment/{paiement.reference}")
+    def setUp(self):
+        super().setUp()
+        self.livrer(il_y_a_jours=8)
+        # Dû par la boutique : imputé au transfert (8 200 − 1 000 = 7 200).
+        self.ajustement = AjustementVendeur.objects.create(boutique=self.boutique1, montant=Decimal("-1000"),
+                                                           motif="Retour remboursé après versement")
 
-        def lever(erreur):
-            def reponse():
-                raise erreur
-            return reponse
+    def transferer(self):
+        return self.api(self.admin).post(self.URL_TRANSFERER.format(self.reversement.pk), {"operateur": "orange_money"})
 
-        cas = {
-            "404": (ReponseHTTP({"code": 404, "status": "TRANSACTION_NOT_FOUND"}, 404), TransactionIntrouvable),
-            "400": (ReponseHTTP({"code": 400, "status": "INVALID_REQUEST"}, 400), TransactionIntrouvable),
-            "500": (ReponseHTTP({"code": 500, "status": "INTERNAL_ERROR"}, 500), ErreurFournisseur),
-            "503": (ReponseHTTP({"code": 503, "status": "SERVICE_UNAVAILABLE"}, 503), ErreurFournisseur),
-            "429": (ReponseHTTP({"code": 429, "status": "TOO_MANY_REQUESTS"}, 429), ErreurFournisseur),
-            "401 hors jeton": (ReponseHTTP({"code": 401, "status": "UNAUTHORIZED"}, 401), ErreurFournisseur),
-            "403": (ReponseHTTP({"code": 403, "status": "FORBIDDEN"}, 403), ErreurFournisseur),
-            "jeton refusé après renouvellement": (ReponseHTTP({"code": 1003, "status": "EXPIRED_TOKEN"}, 401),
-                                                  ErreurFournisseur),
-            "404 illisible": (ReponseIllisible(None, 404), ErreurFournisseur),
-            "200 illisible": (ReponseIllisible(None, 200), ErreurFournisseur),
-            "délai dépassé": (lever(requests.Timeout()), ErreurFournisseur),
-            "connexion": (lever(requests.ConnectionError()), ErreurFournisseur),
+    def remettre_disponible(self):
+        Reversement.objects.filter(pk=self.reversement.pk).update(
+            statut=Reversement.Statut.DISPONIBLE, montant_a_verser=0, montant_ajustements=0)
+        AjustementVendeur.objects.update(reversement_impute=None)
+
+    def etat(self):
+        self.reversement.refresh_from_db()
+        self.ajustement.refresh_from_db()
+        return (self.reversement.statut, self.reversement.montant_a_verser, self.reversement.montant_ajustements,
+                self.ajustement.reversement_impute_id)
+
+    def en_cours_fige(self):
+        return ("en_cours", Decimal("7200"), Decimal("-1000"), self.reversement.pk)
+
+    def disponible_libere(self):
+        return ("disponible", Decimal("0"), Decimal("0"), None)
+
+    def test_delai_depasse_apres_envoi_reste_en_cours(self):
+        definir_comportement_transfert(self.reversement.reference, DELAI_APRES_ENVOI)
+        with self.assertLogs("securite", "ERROR") as journaux:
+            r = self.transferer()
+        self.assertEqual((r.status_code, r.data["statut"]), (200, "en_cours"))
+        self.assertEqual(self.etat(), self.en_cours_fige())
+        self.assertIsNotNone(self.reversement.date_debut_transfert)
+        self.assertIsNotNone(r.data["date_debut_transfert"])  # vu par l'administration
+        self.assertIn(f"Transfert {self.reversement.reference} : issue incertaine", journaux.output[0])
+        self.assertEqual(self.versements_notifies(), 0)
+        # Le transfert est bien parti chez le fournisseur.
+        self.assertEqual(FournisseurSimule().verifier_transfert(self.reversement).statut, SUCCES)
+
+    def test_erreur_fournisseur_non_certifiee_reste_en_cours(self):
+        class ErreurInconnue(ErreurFournisseur):
+            pass
+
+        erreurs = {
+            "générique": ErreurFournisseur("solde"),
+            "sous-classe inconnue": ErreurInconnue("nouvelle erreur d'un adaptateur"),
+            "délai dépassé": ErreurFournisseur("GeniusPay injoignable : timeout"),
+            "503": ErreurFournisseur("GeniusPay : HTTP 503"),
+            "réponse illisible": ErreurFournisseur("GeniusPay : réponse illisible"),
         }
-        with mock.patch("requests.request", side_effect=self.repondre):
-            for libelle, (reponse, attendue) in cas.items():
-                with self.subTest(libelle):
-                    self.reponses[verification] = reponse
-                    with self.assertRaises(attendue) as contexte:
-                        adaptateur.verifier_transaction(paiement)
-                    if attendue is TransactionIntrouvable:
-                        self.assertNotIsInstance(contexte.exception, ErreurFournisseur)
+        for libelle, erreur in erreurs.items():
+            with self.subTest(libelle):
+                self.remettre_disponible()
+                with mock.patch.object(FournisseurSimule, "transferer", side_effect=erreur), \
+                        self.assertLogs("securite", "ERROR"):
+                    r = self.transferer()
+                self.assertEqual((r.status_code, r.data["statut"]), (200, "en_cours"))
+                self.assertEqual(self.etat(), self.en_cours_fige())
 
-            with self.subTest("4xx de l'authentification"):
-                cache.clear()
-                self.reponses[("POST", "/v1/oauth/login")] = ReponseHTTP({"code": 400, "status": "INVALID_CREDENTIALS"},
-                                                                         400)
-                with self.assertRaises(ErreurFournisseur):
-                    adaptateur.verifier_transaction(paiement)
-                del self.reponses[("POST", "/v1/oauth/login")]
+    def test_refus_certain_rend_disponible_et_libere_les_ajustements(self):
+        for libelle in ("TransfertRefuse", "MontantHorsLimites"):
+            with self.subTest(libelle):
+                self.remettre_disponible()
+                if libelle == "TransfertRefuse":
+                    definir_comportement_transfert(self.reversement.reference, REFUS_CERTAIN)
+                    r = self.transferer()
+                else:
+                    with mock.patch.object(FournisseurSimule, "transferer",
+                                           side_effect=MontantHorsLimites("Montant hors limites")):
+                        r = self.transferer()
+                self.assertEqual(r.status_code, 409)
+                self.assertIn("Transfert refusé", str(r.data))
+                self.assertEqual(self.etat(), self.disponible_libere())
 
-            with self.subTest("404 d'un transfert"):
-                self.reponses[("GET", "/v1/transfer/REV-2026-A")] = ReponseHTTP({"code": 404, "status": "NOT_FOUND"}, 404)
-                with self.assertRaises(ErreurFournisseur):
-                    adaptateur.verifier_transfert(Reversement(reference="REV-2026-A"))
+    def test_operation_non_supportee_rend_disponible(self):
+        with mock.patch.object(FournisseurSimule, "transferer",
+                               side_effect=OperationNonSupportee("Transfert par API non disponible")):
+            r = self.transferer()
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(self.etat(), self.disponible_libere())
 
-    def test_webhook_transaction_inconnue_toujours_503(self):
-        # Webhook : vérification impossible → 503, CinetPay rejoue la notification.
-        paiement = self.initier_cinetpay()
-        self.reponses[("GET", f"/v1/payment/{paiement.reference}")] = ReponseHTTP(
-            {"code": 404, "status": "TRANSACTION_NOT_FOUND"}, 404)
-        with mock.patch("requests.request", side_effect=self.repondre):
-            self.assertEqual(self.notification(paiement).status_code, 503)
-        self.assertEqual(JournalWebhook.objects.get().statut_traitement, JournalWebhook.StatutTraitement.ERREUR)
-        paiement.refresh_from_db()
-        self.assertEqual(paiement.statut, Paiement.Statut.EN_ATTENTE)
+    def test_relance_refusee_tant_que_en_cours(self):
+        definir_comportement_transfert(self.reversement.reference, DELAI_APRES_ENVOI)
+        with mock.patch.object(FournisseurSimule, "transferer", autospec=True,
+                               side_effect=FournisseurSimule.transferer) as transferer, \
+                self.assertLogs("securite", "ERROR"):
+            self.assertEqual(self.transferer().status_code, 200)
+            self.assertEqual(self.transferer().status_code, 409)
+            r = self.api(self.admin).post(f"/api/paiements/admin/reversements/{self.reversement.pk}/verser/",
+                                          {"reference_externe": "OM-1"})
+            self.assertEqual(r.status_code, 409)
+        self.assertEqual(transferer.call_count, 1)
+        self.assertEqual(self.etat(), self.en_cours_fige())
 
-    def test_montant_hors_limites(self):
-        Commande.objects.filter(pk=self.commande.pk).update(montant_total=Decimal("3000000"))
-        self.assertEqual(self.initier(commande_id=str(self.commande.pk)).status_code, 400)
+    def test_nouveau_transfert_remet_le_suivi_a_zero(self):
+        ancien = timezone.now() - timedelta(days=3)
+        Reversement.objects.filter(pk=self.reversement.pk).update(
+            date_debut_transfert=ancien, date_derniere_reconciliation=ancien, date_derniere_alerte=ancien)
+        definir_comportement_transfert(self.reversement.reference, DELAI_APRES_ENVOI)
+        avant = timezone.now()
+        with self.assertLogs("securite", "ERROR"):
+            self.transferer()
+        self.reversement.refresh_from_db()
+        self.assertGreaterEqual(self.reversement.date_debut_transfert, avant)
+        self.assertEqual((self.reversement.date_derniere_reconciliation, self.reversement.date_derniere_alerte),
+                         (None, None))
 
-    def test_transfert(self):
-        adaptateur = FournisseurCinetPay()
-        reversement = Reversement(reference="REV-2026-A", montant_a_verser=Decimal("8400"))
-        self.reponses[("POST", "/v1/transfer")] = ReponseHTTP({"code": 200, "status": "PENDING",
-                                                                "transaction_id": "TR-1", "notify_token": "nt"})
-        with mock.patch("requests.request", side_effect=self.repondre):
-            resultat = adaptateur.transferer(reversement, "+2250707070707", "wave")
-        self.assertEqual((resultat.statut, resultat.identifiant_externe), (EN_ATTENTE, "TR-1"))
-        corps = self.appels[-1][2]
-        self.assertEqual((corps["payment_method"], corps["amount"], corps["phone_number"]),
-                         ("WAVE_CI", 8400, "+2250707070707"))
+    def test_rendre_disponibles_ne_touche_que_en_retractation(self):
+        for statut in ("en_cours", "verse", "suspendu", "annule", "en_attente_livraison"):
+            with self.subTest(statut):
+                Reversement.objects.filter(pk=self.reversement.pk).update(
+                    statut=statut, date_disponibilite=timezone.now() - timedelta(days=1))
+                self.assertEqual(reversements.rendre_disponibles(), 0)
+                self.reversement.refresh_from_db()
+                self.assertEqual(self.reversement.statut, statut)
+
+    def test_resultat_echec_immediat_rend_disponible(self):
+        from .fournisseurs.base import ResultatTransfert
+
+        with mock.patch.object(FournisseurSimule, "transferer",
+                               return_value=ResultatTransfert(statut=ECHEC, identifiant_externe="T1")), \
+                self.assertLogs("securite", "WARNING") as journaux:
+            r = self.transferer()
+        self.assertEqual((r.status_code, r.data["statut"]), (200, "disponible"))
+        self.assertEqual(self.etat(), self.disponible_libere())
+        self.assertIn("en_cours → disponible, échec confirmé (source=immediat)", "\n".join(journaux.output))
+
+    def test_succes_tardif_sur_reversement_non_en_cours_alerte_sans_transition(self):
+        """Notification de succès (transaction SIM-TX) pour un reversement qui
+        n'est plus en cours : aucune transition ; alerte, sauf si le
+        reversement a été versé par ce même transfert."""
+        cas = {
+            "disponible": ("disponible", "simule", ""),
+            "versé à la main": ("verse", "", "OM-1"),
+            "versé par un autre transfert": ("verse", "simule", "SIMT-AUTRE"),
+            "annulé": ("annule", "simule", ""),
+            "versé par ce transfert": ("verse", "simule", "SIM-TX"),
+        }
+        for numero, (libelle, (statut, fournisseur, reference_externe)) in enumerate(cas.items()):
+            with self.subTest(libelle):
+                Reversement.objects.filter(pk=self.reversement.pk).update(
+                    statut=statut, fournisseur=fournisseur, reference_externe=reference_externe,
+                    montant_a_verser=Decimal("7200"))
+                avant = self.alertes().count()
+                r = self.notifier(self.reversement.reference, montant=7200, transfert=True,
+                                  evenement_id=f"evt-tardif-{numero}")
+                self.assertEqual(r.status_code, 200)
+                self.assertEqual(JournalWebhook.objects.get(evenement_id=f"evt-tardif-{numero}").statut_traitement,
+                                 "traite")
+                self.reversement.refresh_from_db()
+                self.assertEqual((self.reversement.statut, self.reversement.reference_externe),
+                                 (statut, reference_externe))
+                self.assertEqual(self.versements_notifies(), 0)
+                attendu = 0 if libelle == "versé par ce transfert" else 1
+                self.assertEqual(self.alertes().count() - avant, attendu)
+                if attendu:
+                    self.assertIn("double paiement possible", self.alertes().latest("date_creation").message)
+
+    def test_alerte_immediate_sur_succes_non_conforme(self):
+        with self.assertLogs("securite", "ERROR") as journaux:
+            r = self.transferer_avec(montant=7199, devise="XOF")
+        self.assertEqual((r.status_code, r.data["statut"]), (200, "en_cours"))
+        (alerte,) = self.alertes()
+        self.assertEqual((alerte.lien_redirection, alerte.type_notification),
+                         ("/administration/reversements", Notification.TypeNotification.PAIEMENT))
+        self.assertIn(self.reversement.reference, alerte.message)
+        self.assertIn("7199", alerte.message)
+        self.assertNotIn("0707070707", alerte.message)
+        self.assertIn("ALERTE ADMINISTRATION", "\n".join(journaux.output))
+        self.assertEqual(self.versements_notifies(), 0)
 
 
-class ReconciliationReponsesCinetPayTests(ReponsesCinetPay, DonneesReconciliation, TransactionTestCase):
-    """Un 4xx de CinetPay pour UN paiement P1 (transaction inconnue) est un
-    refus pour P1, pas une panne du fournisseur : la réconciliation vérifie
-    ensuite P2, encaissé et placé derrière. Une vraie panne (5xx, délai
-    dépassé) arrête l'exécution. PostgreSQL, vraies transactions ; réponses
-    HTTP simulées."""
+class MigrationSuiviTransfertTests(Donnees, TransactionTestCase):
+    """Migration 0010 : seuls les reversements « en cours » reçoivent une date
+    de début de transfert (leur dernière mise à jour), les autres restent
+    NULL ; retour arrière et nouvel aller sans erreur."""
+
+    AVANT = [("paiements", "0009_paiement_date_derniere_reconciliation")]
 
     def setUp(self):
         recreer_bareme_plateforme()
         recreer_tarifs_initiaux()
         self.creer_donnees()
-        self.configurer_cinetpay()
+
+    def tearDown(self):
+        self.migrer()
+
+    def migrer(self, cible=None):
+        executeur = MigrationExecutor(connection)
+        executeur.migrate(cible or executeur.loader.graph.leaf_nodes())
+
+    def test_rattrapage_des_seuls_reversements_en_cours(self):
+        dates = {}
+        for jours, statut in enumerate(Reversement.Statut.values, start=1):
+            (commande,) = self.commander((self.variante1, 1))
+            self.notifier_succes(self.payer(commande))
+            dates[statut] = timezone.now() - timedelta(days=jours)
+            Reversement.objects.filter(commande=commande).update(statut=statut, date_mise_a_jour=dates[statut])
+
+        self.migrer(self.AVANT)
+        self.migrer()
+        self.assertEqual(Reversement.objects.count(), len(Reversement.Statut.values))
+        for reversement in Reversement.objects.all():
+            with self.subTest(reversement.statut):
+                attendu = dates["en_cours"] if reversement.statut == "en_cours" else None
+                self.assertEqual(
+                    (reversement.date_debut_transfert, reversement.date_derniere_reconciliation,
+                     reversement.date_derniere_alerte),
+                    (attendu, None, None),
+                )
+
+        # Retour arrière (colonnes retirées), puis de nouveau vers l'avant.
+        self.migrer(self.AVANT)
+        self.migrer()
+        self.assertEqual(Reversement.objects.get(statut="en_cours").date_debut_transfert, dates["en_cours"])
+
+
+def compter_verifications_de_transfert():
+    """Le vrai verifier_transfert du fournisseur simulé, appels comptés."""
+    return mock.patch.object(FournisseurSimule, "verifier_transfert", autospec=True,
+                             side_effect=FournisseurSimule.verifier_transfert)
+
+
+def transferts_verifies(verifier):
+    return [appel.args[1].reference for appel in verifier.call_args_list]
+
+
+class DonneesReconciliationReversement(DonneesReversement):
+    """Reversement livré puis transféré : le fournisseur a répondu « en
+    attente » (référence T1) il y a 30 minutes, la notification n'est
+    jamais arrivée."""
+
+    def setUp(self):
+        super().setUp()
+        self.livrer(il_y_a_jours=8)
+        self.mettre_en_cours(self.reversement)
+
+    def mettre_en_cours(self, reversement, minutes=30, identifiant="T1"):
+        from .fournisseurs.base import ResultatTransfert
+
+        with mock.patch.object(FournisseurSimule, "transferer",
+                               return_value=ResultatTransfert(statut=EN_ATTENTE, identifiant_externe=identifiant)):
+            r = self.api(self.admin).post(self.URL_TRANSFERER.format(reversement.pk), {"operateur": "wave"})
+        assert (r.status_code, r.data["statut"]) == (200, "en_cours"), r.data
+        Reversement.objects.filter(pk=reversement.pk).update(
+            date_debut_transfert=timezone.now() - timedelta(minutes=minutes))
+        reversement.refresh_from_db()
+        return reversement
+
+    def autre_reversement(self, minutes=30):
+        """Autre commande de la boutique 1 (net 4 100), transférée et en cours."""
+        (commande,) = self.commander((self.variante1, 1))
+        self.notifier_succes(self.payer(commande))
+        self.livrer(commande, il_y_a_jours=8)
+        return self.mettre_en_cours(Reversement.objects.get(commande=commande), minutes)
+
+    def distant(self, statut, reversement=None, montant=None, devise="XOF", identifiant="T1"):
+        """État du transfert « chez le fournisseur » (simulé)."""
+        reversement = reversement or self.reversement
+        definir_etat_distant(reversement.reference, statut,
+                             int(reversement.montant_a_verser) if montant is None else montant, devise, identifiant)
+
+
+class ReconciliationReversementTests(DonneesReconciliationReversement, APITestCase):
+    """Un reversement « en cours » dont la notification se perd est
+    redemandé au fournisseur ; l'état est appliqué par la même règle que la
+    notification. Seuls un succès conforme et un échec confirmé changent le
+    statut."""
+
+    def test_succes_conforme_verse_une_seule_fois(self):
+        self.distant(SUCCES)
+        with self.assertLogs("securite", "INFO") as journaux:
+            self.assertEqual(reversements.reconcilier_reversements_en_cours(), (1, 1, False))
+        self.reversement.refresh_from_db()
+        self.assertEqual((self.reversement.statut, self.reversement.reference_externe), ("verse", "T1"))
+        self.assertIsNotNone(self.reversement.date_versement)
+        self.assertIsNotNone(self.reversement.date_derniere_reconciliation)
+        self.assertEqual(self.versements_notifies(), 1)
+        self.assertEqual(self.alertes().count(), 0)
+        self.assertIn(f"Reversement {self.reversement.reference} : en_cours → verse (source=reconciliation)",
+                      "\n".join(journaux.output))
+
+    def test_succes_renseigne_la_reference_du_fournisseur_si_elle_manque(self):
+        Reversement.objects.filter(pk=self.reversement.pk).update(reference_externe="")
+        self.distant(SUCCES, identifiant="T-RECONCILIE")
+        self.assertEqual(reversements.reconcilier_reversement(self.reversement), (SUCCES, True))
+        self.reversement.refresh_from_db()
+        self.assertEqual((self.reversement.statut, self.reversement.reference_externe), ("verse", "T-RECONCILIE"))
+
+    def test_succes_non_conforme_refuse(self):
+        du = int(self.reversement.montant_a_verser)
+        confirmations = {
+            "montant et devise absents": (None, None),
+            "montant absent": (None, "XOF"),
+            "devise absente": (du, None),
+            "devise vide": (du, ""),
+            "montant fractionnaire": (du + 0.5, "XOF"),
+            "montant fractionnaire décimal": (Decimal(f"{du}.50"), "XOF"),
+            "montant en texte": (str(du), "XOF"),
+            "montant flottant": (float(du), "XOF"),
+            "montant booléen": (True, "XOF"),
+            "devise différente": (du, "EUR"),
+            "montant inférieur": (du - 1, "XOF"),
+            "montant supérieur": (du + 1, "XOF"),
+        }
+        for libelle, (montant, devise) in confirmations.items():
+            with self.subTest(libelle):
+                Reversement.objects.filter(pk=self.reversement.pk).update(date_derniere_alerte=None)
+                avant = self.alertes().count()
+                definir_etat_distant(self.reversement.reference, SUCCES, montant, devise, "T1")
+                with self.assertLogs("securite", "ERROR") as journaux:
+                    self.assertEqual(reversements.reconcilier_reversement(self.reversement), (reversements.REFUSE, False))
+                self.reversement.refresh_from_db()
+                self.assertEqual((self.reversement.statut, self.reversement.date_versement), ("en_cours", None))
+                self.assertIn(f"Transfert {self.reversement.reference} : succès constaté par réconciliation non "
+                              "appliqué", journaux.output[0])
+                self.assertEqual(self.alertes().count(), avant + 1)
+                self.assertEqual(self.versements_notifies(), 0)
+
+    def test_echec_confirme_rend_disponible(self):
+        ajustement = AjustementVendeur.objects.create(boutique=self.boutique1, montant=Decimal("-1000"),
+                                                      motif="Retour remboursé après versement")
+        autre = self.autre_reversement()
+        self.assertEqual((autre.montant_a_verser, AjustementVendeur.objects.get(pk=ajustement.pk).reversement_impute),
+                         (Decimal("3100"), autre))
+        self.distant(ECHEC, autre)
+        with self.assertLogs("securite", "WARNING") as journaux:
+            self.assertEqual(reversements.reconcilier_reversement(autre), (ECHEC, True))
+        autre.refresh_from_db()
+        self.assertEqual((autre.statut, autre.montant_a_verser, autre.montant_ajustements),
+                         ("disponible", Decimal("0"), Decimal("0")))
+        self.assertIsNone(AjustementVendeur.objects.get(pk=ajustement.pk).reversement_impute)
+        self.assertIn("en_cours → disponible, échec confirmé (source=reconciliation)", "\n".join(journaux.output))
+
+    def test_introuvable_ne_rend_jamais_disponible(self):
+        suivant = self.autre_reversement(minutes=20)
+        self.distant("introuvable")
+        self.distant(SUCCES, suivant)
+        with self.assertLogs("securite", "ERROR"), compter_verifications_de_transfert() as verifier:
+            self.assertEqual(reversements.reconcilier_reversements_en_cours(), (2, 1, False))
+        self.assertEqual(transferts_verifies(verifier), [self.reversement.reference, suivant.reference])
+        self.reversement.refresh_from_db()
+        suivant.refresh_from_db()
+        self.assertEqual((self.reversement.statut, self.reversement.montant_a_verser), ("en_cours", Decimal("8200")))
+        self.assertIsNotNone(self.reversement.date_derniere_reconciliation)
+        self.assertEqual(suivant.statut, "verse")
+
+    def test_en_attente_inchange_et_date(self):
+        mise_a_jour = self.reversement.date_mise_a_jour
+        self.assertEqual(reversements.reconcilier_reversements_en_cours(), (1, 0, False))
+        self.reversement.refresh_from_db()
+        self.assertEqual((self.reversement.statut, self.reversement.date_mise_a_jour), ("en_cours", mise_a_jour))
+        self.assertIsNotNone(self.reversement.date_derniere_reconciliation)
+
+    def test_fournisseur_injoignable_arret_propre(self):
+        suivant = self.autre_reversement(minutes=20)
+        self.distant("injoignable")
+        self.distant(SUCCES, suivant)
+        with compter_verifications_de_transfert() as verifier:
+            self.assertEqual(reconcilier_reversements(), "0 reversement(s) vérifié(s), 0 statut(s) changé(s), "
+                                                         "0 alerte(s). Interrompue : fournisseur injoignable.")
+        self.assertEqual(transferts_verifies(verifier), [self.reversement.reference])
+        self.reversement.refresh_from_db()
+        suivant.refresh_from_db()
+        self.assertEqual((self.reversement.statut, suivant.statut), ("en_cours", "en_cours"))
+        self.assertIsNone(self.reversement.date_derniere_reconciliation)
+
+    def test_fournisseur_inconnu_ou_reponse_incoherente_reste_en_cours(self):
+        with self.subTest("fournisseur inconnu"):
+            Reversement.objects.filter(pk=self.reversement.pk).update(fournisseur="ancien_fournisseur")
+            self.reversement.refresh_from_db()
+            with self.assertLogs("securite", "ERROR"):
+                self.assertEqual(reversements.reconcilier_reversement(self.reversement), (reversements.REFUSE, False))
+        with self.subTest("réponse incohérente"):
+            Reversement.objects.filter(pk=self.reversement.pk).update(fournisseur="simule",
+                                                                       date_derniere_reconciliation=None)
+            self.reversement.refresh_from_db()
+            with mock.patch.object(FournisseurSimule, "verifier_transfert",
+                                   side_effect=NotificationInvalide("Réponse pour un autre reversement")), \
+                    self.assertLogs("securite", "ERROR"):
+                self.assertEqual(reversements.reconcilier_reversement(self.reversement), (reversements.REFUSE, False))
+        self.reversement.refresh_from_db()
+        self.assertEqual(self.reversement.statut, "en_cours")
+        self.assertIsNotNone(self.reversement.date_derniere_reconciliation)
+
+    def test_seuls_les_en_cours_assez_anciens_sont_verifies(self):
+        recent = self.autre_reversement(minutes=5)
+        autre = self.autre_reversement(minutes=30)
+        for statut in ("disponible", "verse", "suspendu", "annule", "en_retractation", "en_attente_livraison"):
+            with self.subTest(statut):
+                Reversement.objects.filter(pk=autre.pk).update(statut=statut)
+                with compter_verifications_de_transfert() as verifier:
+                    reversements.reconcilier_reversements_en_cours()
+                self.assertEqual(transferts_verifies(verifier), [self.reversement.reference])
+        recent.refresh_from_db()
+        self.assertIsNone(recent.date_derniere_reconciliation)
+
+    @override_settings(REVERSEMENT_RECONCILIATION_LOT=2)
+    def test_lot_et_ordre_jamais_verifies_d_abord(self):
+        Reversement.objects.filter(pk=self.reversement.pk).update(
+            date_debut_transfert=timezone.now() - timedelta(minutes=60),
+            date_derniere_reconciliation=timezone.now() - timedelta(minutes=1))
+        deuxieme = self.autre_reversement(minutes=30)
+        troisieme = self.autre_reversement(minutes=20)
+        with compter_verifications_de_transfert() as verifier:
+            self.assertEqual(reversements.reconcilier_reversements_en_cours(), (2, 0, False))
+        self.assertEqual(transferts_verifies(verifier), [deuxieme.reference, troisieme.reference])
+
+    def test_reconciliation_idempotente(self):
+        self.distant(SUCCES)
+        self.assertEqual(reversements.reconcilier_reversement(self.reversement), (SUCCES, True))
+        self.reversement.refresh_from_db()
+        date_versement = self.reversement.date_versement
+        self.assertEqual(reversements.reconcilier_reversement(self.reversement), (SUCCES, False))
+        self.reversement.refresh_from_db()
+        self.assertEqual((self.reversement.statut, self.reversement.date_versement), ("verse", date_versement))
+        self.assertEqual(self.versements_notifies(), 1)
+        self.assertEqual(self.alertes().count(), 0)
+
+    def test_commande_de_developpement_pour_un_transfert(self):
+        sortie = StringIO()
+        call_command("simuler_etat_paiement", self.reversement.reference, "succes", stdout=sortie)
+        self.assertIn("état simulé « succes » (8200 XOF)", sortie.getvalue())
+        self.assertEqual(reversements.reconcilier_reversements_en_cours(), (1, 1, False))
+        Reversement.objects.filter(pk=self.reversement.pk).update(fournisseur="")
+        with self.assertRaises(CommandError):
+            call_command("simuler_etat_paiement", self.reversement.reference, "echec")
+
+    # --- Tâche planifiée et commande d'exploitation ---------------------------
+
+    def test_tache_planifiee_enregistree(self):
+        from django.utils.module_loading import import_string
+
+        entree = settings.CELERY_BEAT_SCHEDULE["paiements-reconcilier-reversements"]
+        self.assertEqual(entree["task"], "apps.paiements.tasks.reconcilier_reversements")
+        self.assertEqual(entree["schedule"].minute, set(range(5, 60, 10)))
+        self.assertEqual((settings.REVERSEMENT_RECONCILIATION_AGE_MINUTES, settings.REVERSEMENT_RECONCILIATION_LOT,
+                          settings.REVERSEMENT_ALERTE_BLOCAGE_HEURES), (10, 50, 2))
+        tache = import_string(entree["task"])
+        self.distant(SUCCES)
+        self.assertEqual(tache(), "1 reversement(s) vérifié(s), 1 statut(s) changé(s), 0 alerte(s).")
+
+    def test_commande_reconcilier_reversements(self):
+        recent = self.autre_reversement(minutes=1)
+        self.distant(SUCCES, recent)
+        # --reference : un seul reversement, sans condition d'âge.
+        sortie = StringIO()
+        call_command("reconcilier_reversements", "--reference", recent.reference, stdout=sortie)
+        self.assertIn(f"{recent.reference} : issue « succes », statut verse (changé).", sortie.getvalue())
+        self.reversement.refresh_from_db()
+        self.assertIsNone(self.reversement.date_derniere_reconciliation)
+        # Sans argument : le travail de la tâche planifiée.
+        sortie = StringIO()
+        call_command("reconcilier_reversements", stdout=sortie)
+        self.assertIn("1 reversement(s) vérifié(s), 0 statut(s) changé(s), 0 alerte(s).", sortie.getvalue())
+        for arguments in (("--reference", "REV-INCONNU"), ("--reference", recent.reference), ("--lecture-seule",)):
+            with self.subTest(arguments), self.assertRaises(CommandError):
+                call_command("reconcilier_reversements", *arguments, stdout=StringIO())
+
+    def test_lecture_seule_n_ecrit_rien(self):
+        self.distant(SUCCES)
+        avant = Reversement.objects.filter(pk=self.reversement.pk).values().get()
+        notifications = Notification.objects.count()
+        sortie = StringIO()
+        call_command("reconcilier_reversements", "--reference", self.reversement.reference, "--lecture-seule",
+                     stdout=sortie)
+        self.assertIn(f"{self.reversement.reference} (simule) : succes, montant confirmé 8200 XOF (à verser : 8200 XOF)",
+                      sortie.getvalue())
+        self.assertIn("Rien n'a été écrit.", sortie.getvalue())
+        self.assertEqual(Reversement.objects.filter(pk=self.reversement.pk).values().get(), avant)
+        self.assertEqual(Notification.objects.count(), notifications)
+        self.distant("introuvable")
+        sortie = StringIO()
+        call_command("reconcilier_reversements", "--reference", self.reversement.reference, "--lecture-seule",
+                     stdout=sortie)
+        self.assertIn("TransactionIntrouvable", sortie.getvalue())
+
+    # --- Alertes ------------------------------------------------------------
+
+    def test_alerte_bloque_apres_le_seuil(self):
+        creer = Utilisateur.objects.create_user
+        admin2 = creer(email="admin2@pay.ci", password="x", nom="A", prenom="E", role=Role.ADMIN)
+        inactif = creer(email="admin3@pay.ci", password="x", nom="A", prenom="F", role=Role.ADMIN, is_active=False)
+        debut = self.reversement.date_debut_transfert
+        self.assertEqual(reversements.alerter_reversements_bloques(debut + timedelta(hours=2, minutes=-1)), 0)
+        with self.assertLogs("securite", "ERROR") as journaux:
+            self.assertEqual(reversements.alerter_reversements_bloques(debut + timedelta(hours=2, minutes=1)), 1)
+        self.assertIn("ALERTE ADMINISTRATION", journaux.output[0])
+        self.assertEqual((self.alertes().count(), self.alertes(admin2).count(), self.alertes(inactif).count()),
+                         (1, 1, 0))
+        alerte = self.alertes().get()
+        self.assertEqual(alerte.lien_redirection, "/administration/reversements")
+        for attendu in (self.reversement.reference, "en cours depuis 2 h",
+                        f"reconcilier_reversements --reference {self.reversement.reference} --lecture-seule"):
+            self.assertIn(attendu, alerte.message)
+        self.assertNotIn("0707070707", alerte.message)
+
+    def test_alerte_non_repetee_avant_24h_puis_repetee(self):
+        debut = self.reversement.date_debut_transfert
+        with self.assertLogs("securite", "ERROR"):
+            self.assertEqual(reversements.alerter_reversements_bloques(debut + timedelta(hours=3)), 1)
+        self.assertEqual(reversements.alerter_reversements_bloques(debut + timedelta(hours=26, minutes=59)), 0)
+        with self.assertLogs("securite", "ERROR"):
+            self.assertEqual(reversements.alerter_reversements_bloques(debut + timedelta(hours=27)), 1)
+        self.assertEqual(self.alertes().count(), 2)
+
+    def test_alerte_sur_succes_non_conforme_non_repetee_par_la_reconciliation(self):
+        self.distant(SUCCES, montant=8199)
+        for _ in range(2):
+            with self.assertLogs("securite", "ERROR"):
+                reversements.reconcilier_reversement(self.reversement)
+        self.assertEqual(self.alertes().count(), 1)
+        # Même compteur que l'alerte de blocage : une alerte par 24 h et par reversement.
+        self.assertEqual(reversements.alerter_reversements_bloques(timezone.now() + timedelta(hours=3)), 0)
+
+
+class ResolutionManuelleTests(DonneesReconciliationReversement, APITestCase):
+    """resoudre_reversement : seule sortie d'un reversement en cours que le
+    fournisseur ne tranche pas. Administrateur actif nommé, motif
+    obligatoire, référence obligatoire pour « verse », journal de sécurité."""
+
+    def resoudre(self, reference, decision, *options, par="admin@pay.ci", motif="Vérifié dans le tableau de bord"):
+        sortie = StringIO()
+        call_command("resoudre_reversement", reference, decision, "--par", par, "--motif", motif, *options,
+                     stdout=sortie)
+        return sortie.getvalue()
+
+    def test_resoudre_non_parti(self):
+        ajustement = AjustementVendeur.objects.create(boutique=self.boutique1, montant=Decimal("-1000"),
+                                                      motif="Retour remboursé après versement")
+        autre = self.autre_reversement()
+        with self.assertLogs("securite", "WARNING") as journaux:
+            sortie = self.resoudre(autre.reference, "non-parti", motif="Absent du tableau de bord du fournisseur")
+        self.assertIn(f"{autre.reference} : Disponible", sortie)
+        autre.refresh_from_db()
+        self.assertEqual((autre.statut, autre.montant_a_verser, autre.montant_ajustements),
+                         ("disponible", Decimal("0"), Decimal("0")))
+        self.assertIsNone(AjustementVendeur.objects.get(pk=ajustement.pk).reversement_impute)
+        journal = "\n".join(journaux.output)
+        for attendu in (f"Reversement {autre.reference} : en_cours → disponible (source=admin, admin_id={self.admin.id}",
+                        "décision=non-parti", "Absent du tableau de bord du fournisseur"):
+            self.assertIn(attendu, journal)
+        self.assertEqual(self.versements_notifies(), 0)
+        # Le versement manuel redevient possible.
+        r = self.api(self.admin).post(f"/api/paiements/admin/reversements/{autre.pk}/verser/",
+                                      {"reference_externe": "OM-7"})
+        self.assertEqual((r.status_code, r.data["statut"]), (200, "verse"))
+
+    def test_resoudre_verse(self):
+        with self.assertLogs("securite", "WARNING"):
+            self.resoudre(self.reversement.reference, "verse", "--reference-externe", "T-TABLEAU")
+        self.reversement.refresh_from_db()
+        self.assertEqual((self.reversement.statut, self.reversement.reference_externe, self.reversement.verse_par,
+                          self.reversement.fournisseur), ("verse", "T-TABLEAU", self.admin, "simule"))
+        self.assertIsNotNone(self.reversement.date_versement)
+        self.assertEqual(self.versements_notifies(), 1)
+        # Succès tardif de ce même transfert : silencieux.
+        r = self.notifier(self.reversement.reference, montant=8200, transfert=True, transaction_id="T-TABLEAU")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual((self.versements_notifies(), self.alertes().count()), (1, 0))
+
+    def test_resolution_refusee(self):
+        creer = Utilisateur.objects.create_user
+        creer(email="inactif@pay.ci", password="x", nom="A", prenom="I", role=Role.ADMIN, is_active=False)
+        refus = {
+            "motif vide": ("non-parti", (), {"motif": "   "}),
+            "vendeur": ("non-parti", (), {"par": "v1@pay.ci"}),
+            "client": ("non-parti", (), {"par": "c1@pay.ci"}),
+            "administrateur inactif": ("non-parti", (), {"par": "inactif@pay.ci"}),
+            "utilisateur inconnu": ("non-parti", (), {"par": "personne@pay.ci"}),
+            "versé sans référence": ("verse", (), {}),
+            "référence trop longue": ("verse", ("--reference-externe", "X" * 151), {}),
+            "décision inconnue": ("annule", (), {}),
+        }
+        for libelle, (decision, options, parametres) in refus.items():
+            with self.subTest(libelle), self.assertRaises(CommandError):
+                self.resoudre(self.reversement.reference, decision, *options, **parametres)
+        self.reversement.refresh_from_db()
+        self.assertEqual((self.reversement.statut, self.reversement.montant_a_verser), ("en_cours", Decimal("8200")))
+        # Hors « en cours » : refusé (un reversement versé ou disponible ne se résout pas).
+        Reversement.objects.filter(pk=self.reversement.pk).update(statut=Reversement.Statut.DISPONIBLE)
+        with self.assertRaises(CommandError):
+            self.resoudre(self.reversement.reference, "verse", "--reference-externe", "T-1")
+        with self.assertRaises(CommandError):
+            self.resoudre("REV-INCONNU", "non-parti")
+        self.assertEqual(self.versements_notifies(), 0)
+
+
+class ReconciliationReversementConcurrenceTests(FilsConcurrents, DonneesReconciliationReversement,
+                                                TransactionTestCase):
+    """PostgreSQL : la réconciliation, une autre réconciliation et la
+    notification appliquent l'état sous le même verrou ; une seule transition,
+    un seul message au vendeur."""
+
+    def setUp(self):
+        recreer_bareme_plateforme()
+        recreer_tarifs_initiaux()
+        super().setUp()
+
+    def bloquer_premiere_finalisation(self):
+        """Le premier fil qui verse attend, verrou tenu, que l'autre soit
+        bloqué sur ce verrou."""
+        vraie = reversements._finaliser
+        premiere = threading.Event()
+
+        def finaliser(reversement):
+            if not premiere.is_set():
+                premiere.set()
+                if not attendre_transactions_bloquees():
+                    raise AssertionError("Aucune transaction n'attend le verrou du reversement.")
+            return vraie(reversement)
+
+        return mock.patch.object(reversements, "_finaliser", side_effect=finaliser)
+
+    def test_deux_reconciliations_simultanees(self):
+        self.distant(SUCCES)
+        with self.bloquer_premiere_finalisation():
+            resultats = self.lancer(lambda: reversements.reconcilier_reversement(self.reversement),
+                                    lambda: reversements.reconcilier_reversement(self.reversement))
+        self.assertEqual(sorted(resultats), [(SUCCES, False), (SUCCES, True)])
+        self.reversement.refresh_from_db()
+        self.assertEqual(self.reversement.statut, "verse")
+        self.assertEqual((self.versements_notifies(), self.alertes().count()), (1, 0))
+
+    def test_reconciliation_pendant_une_notification(self):
+        self.distant(SUCCES)
+        with self.bloquer_premiere_finalisation():
+            code_http, (issue, _) = self.lancer(
+                lambda: self.notifier(self.reversement.reference, montant=8200, transfert=True, transaction_id="T1",
+                                      evenement_id="evt-concurrent").status_code,
+                lambda: reversements.reconcilier_reversement(self.reversement),
+            )
+        self.assertEqual((code_http, issue), (200, SUCCES))
+        self.reversement.refresh_from_db()
+        self.assertEqual(self.reversement.statut, "verse")
+        self.assertEqual(JournalWebhook.objects.get(evenement_id="evt-concurrent").statut_traitement, "traite")
+        self.assertEqual((self.versements_notifies(), self.alertes().count()), (1, 0))
+
+    def test_echec_reconcilie_puis_succes_notifie(self):
+        self.distant(ECHEC)
+        self.assertEqual(reversements.reconcilier_reversement(self.reversement), (ECHEC, True))
+        with self.assertLogs("securite", "ERROR"):
+            r = self.notifier(self.reversement.reference, montant=8200, transfert=True, transaction_id="T1")
+        self.assertEqual(r.status_code, 200)
+        self.reversement.refresh_from_db()
+        self.assertEqual(self.reversement.statut, "disponible")
+        self.assertEqual(self.versements_notifies(), 0)
+        self.assertIn("double paiement possible", self.alertes().get().message)
+
+
+class FournisseurSimuleTransfertTests(SimpleTestCase):
+    """Le transfert simulé tient un état « côté fournisseur », relu par
+    verifier_transfert sans notification (réconciliation), et répond comme
+    programmé : délai dépassé après exécution, refus certain, panne avant
+    envoi."""
+
+    def setUp(self):
+        cache.clear()
+        self.fournisseur = FournisseurSimule()
+        self.reversement = SimpleNamespace(reference=f"REV-SIM-{uuid.uuid4().hex[:8]}",
+                                           montant_a_verser=Decimal("8200"), reference_externe="")
+
+    def transferer(self):
+        return self.fournisseur.transferer(self.reversement, "+2250707070707", "orange_money")
+
+    def etat(self):
+        return self.fournisseur.verifier_transfert(self.reversement)
+
+    def test_transfert_refuse_est_une_erreur_fournisseur(self):
+        self.assertTrue(issubclass(TransfertRefuse, ErreurFournisseur))
+
+    def test_transfert_execute_retrouve_par_la_verification(self):
+        resultat = self.transferer()
+        etat = self.etat()
+        self.assertEqual((etat.statut, etat.montant, etat.devise, etat.identifiant_externe),
+                         (SUCCES, 8200, "XOF", resultat.identifiant_externe))
+
+    def test_transfert_inconnu_en_attente(self):
+        self.reversement.reference_externe = "T-CONNU"
+        etat = self.etat()
+        self.assertEqual((etat.statut, etat.identifiant_externe, etat.montant), (EN_ATTENTE, "T-CONNU", None))
+
+    def test_delai_apres_envoi_erreur_incertaine_transfert_execute(self):
+        definir_comportement_transfert(self.reversement.reference, DELAI_APRES_ENVOI)
+        with self.assertRaises(ErreurFournisseur) as erreur:
+            self.transferer()
+        self.assertNotIsInstance(erreur.exception, TransfertRefuse)
+        etat = self.etat()
+        self.assertEqual((etat.statut, etat.montant, etat.devise), (SUCCES, 8200, "XOF"))
+        # Programmé pour un seul transfert : le suivant répond normalement.
+        self.assertEqual(self.transferer().statut, SUCCES)
+
+    def test_refus_certain_et_panne_avant_envoi_ne_creent_rien(self):
+        for comportement, exception in ((REFUS_CERTAIN, TransfertRefuse), (PANNE_AVANT_ENVOI, ErreurFournisseur)):
+            with self.subTest(comportement):
+                cache.clear()
+                definir_comportement_transfert(self.reversement.reference, comportement)
+                with self.assertRaises(exception) as erreur:
+                    self.transferer()
+                if comportement == PANNE_AVANT_ENVOI:
+                    self.assertNotIsInstance(erreur.exception, TransfertRefuse)
+                self.assertEqual(self.etat().statut, EN_ATTENTE)
+
+    def test_panne_et_transfert_introuvable_a_la_verification(self):
+        definir_etat_distant(self.reversement.reference, "injoignable")
+        with self.assertRaises(ErreurFournisseur):
+            self.etat()
+        definir_etat_distant(self.reversement.reference, "introuvable")
+        with self.assertRaises(TransactionIntrouvable):
+            self.etat()
+
+    def test_notification_devient_l_etat_distant(self):
+        from .fournisseurs.base import Notification as NotificationFournisseur
+
+        notification = NotificationFournisseur(reference=self.reversement.reference, identifiant_externe="T9",
+                                               cle_idempotence="evt-1", donnees={"statut": ECHEC})
+        self.assertEqual(self.fournisseur.verifier_transfert(self.reversement, notification).statut, ECHEC)
+        self.assertEqual((self.etat().statut, self.etat().identifiant_externe), (ECHEC, "T9"))
+
+    def test_comportement_inconnu_refuse(self):
+        with self.assertRaises(ValueError):
+            definir_comportement_transfert(self.reversement.reference, "succes")
+
+
+# =====================================================================
+# RÉCONCILIATION : REFUS D'UN PAIEMENT ET PANNE DU FOURNISSEUR
+# =====================================================================
+
+class ReconciliationRefusEtPanneTests(DonneesReconciliation, APITestCase):
+    """Une transaction inconnue du fournisseur pour UN paiement P1 est un
+    refus pour P1, pas une panne : la tâche et l'expiration vérifient ensuite
+    P2, encaissé et placé derrière. Une vraie panne arrête l'exécution."""
+
+    def setUp(self):
+        self.creer_donnees()
         (premiere,) = self.commander((self.variante1, 1))
         (seconde,) = self.commander((self.variante2, 1), client=self.client2)
         # P1 passe toujours en premier : plus petite clé de commande
         # (expiration, triée par pk) et paiement le plus ancien (tâche).
         self.c1, self.c2 = sorted((premiere, seconde), key=lambda commande: commande.pk)
-        self.p1 = self.initier_cinetpay(self.c1, self.c1.client, "CP-TX-1")
-        self.p2 = self.initier_cinetpay(self.c2, self.c2.client, "CP-TX-2")
+        self.p1 = self.payer(self.c1, client=self.c1.client)
+        self.p2 = self.payer(self.c2, client=self.c2.client)
         vieillir_paiement(self.p1, 20)
         vieillir_paiement(self.p2, 16)
-        self.repondre_a(self.p1, ReponseHTTP({"code": 404, "status": "TRANSACTION_NOT_FOUND"}, 404))
-        self.repondre_a(self.p2, ReponseHTTP({"code": 100, "status": "SUCCESS", "transaction_id": "CP-TX-2",
-                                              "merchant_transaction_id": self.p2.reference}))
-        self.appels.clear()
 
-    def repondre_a(self, paiement, reponse):
-        self.reponses[("GET", f"/v1/payment/{paiement.reference}")] = reponse
+    @staticmethod
+    def verifies(verifier):
+        return [appel.args[1].reference for appel in verifier.call_args_list]
 
-    def reconcilier(self):
-        with mock.patch("requests.request", side_effect=self.repondre):
-            return reconcilier_paiements()
-
-    def expirer(self):
-        from apps.commandes.tasks import expirer_commandes_non_payees
-
-        with mock.patch("requests.request", side_effect=self.repondre):
-            return expirer_commandes_non_payees()
-
-    def test_404_sur_p1_n_empeche_pas_la_tache_de_valider_p2(self):
-        with self.assertLogs("securite", "ERROR") as journaux:
-            self.assertEqual(self.reconcilier(), "2 paiement(s) vérifié(s), 1 statut(s) changé(s).")
-        self.assertEqual(self.verifications(), [self.p1.reference, self.p2.reference])
-        self.assertEqual(self.statuts(self.p2, self.c2), ("valide", "confirmee"))
-        self.assertEqual(self.statuts(self.p1, self.c1), ("en_attente", "creee"))
-        # Daté : P1 passe ensuite après les paiements jamais vérifiés.
-        self.assertIsNotNone(self.p1.date_derniere_reconciliation)
-        self.assertIn(f"Réconciliation de {self.p1.reference} : transaction refusée par le fournisseur cinetpay",
-                      journaux.output[0])
-
-    def test_404_sur_p1_n_empeche_pas_l_expiration_de_valider_p2(self):
+    def test_refus_sur_p1_n_empeche_pas_l_expiration_de_valider_p2(self):
+        self.etat_distant("introuvable", self.p1)
+        self.etat_distant("succes", self.p2)
         vieillir_commandes(self.c1, self.c2, minutes=31)
-        with self.assertLogs("securite", "ERROR"):
-            self.assertEqual(self.expirer(), "0 commande(s) non payée(s) annulée(s).")
-        self.assertEqual(self.verifications(), [self.p1.reference, self.p2.reference])
+        with self.assertLogs("securite", "ERROR"), compter_verifications() as verifier:
+            self.assertEqual(expirer_commandes_impayees(), 0)
+        self.assertEqual(self.verifies(verifier), [self.p1.reference, self.p2.reference])
         self.assertEqual(self.statuts(self.p2, self.c2), ("valide", "confirmee"))
         # Refus pour P1 : état incertain, expiration repoussée jusqu'à la fin
         # du délai de grâce, puis faite.
         self.assertEqual(self.statuts(self.p1, self.c1), ("en_attente", "creee"))
         vieillir_commandes(self.c1, minutes=61)
         with self.assertLogs("securite", "ERROR"):
-            self.assertEqual(self.expirer(), "1 commande(s) non payée(s) annulée(s).")
+            self.assertEqual(expirer_commandes_impayees(), 1)
         self.assertEqual(self.statuts(self.p1, self.c1), ("annule", "annulee"))
 
-    def test_5xx_ou_delai_depasse_arretent_toujours_l_execution(self):
-        import requests
-
-        def delai_depasse():
-            raise requests.Timeout()
-
+    def test_panne_arrete_la_tache_et_l_expiration_sans_demander_p2(self):
+        self.etat_distant("injoignable", self.p1)
+        self.etat_distant("succes", self.p2)
         vieillir_commandes(self.c1, self.c2, minutes=31)
-        for libelle, panne in (("503", ReponseHTTP({"code": 503, "status": "SERVICE_UNAVAILABLE"}, 503)),
-                               ("délai dépassé", delai_depasse)):
+        with compter_verifications() as verifier:
+            self.assertEqual(reconcilier_paiements(), "0 paiement(s) vérifié(s), 0 statut(s) changé(s). "
+                                                      "Interrompue : fournisseur injoignable.")
+            self.assertEqual(expirer_commandes_impayees(), 0)
+        # Un seul appel par exécution, sur P1 : P2 n'est jamais demandé.
+        self.assertEqual(self.verifies(verifier), [self.p1.reference, self.p1.reference])
+        self.assertEqual(self.statuts(self.p2, self.c2), ("en_attente", "creee"))
+        self.assertEqual(self.statuts(self.p1, self.c1), ("en_attente", "creee"))
+        self.assertIsNone(self.p1.date_derniere_reconciliation)
+
+
+# =====================================================================
+# ADAPTATEUR GENIUSPAY (faux serveur branché sur requests, aucun appel réel)
+# =====================================================================
+
+BASE_GENIUSPAY = "https://geniuspay.test/api/v1/merchant"
+CLE_GENIUSPAY = "sk_sandbox_cle-factice"
+SECRET_GENIUSPAY = "ss_sandbox_secret-factice"
+SECRET_WEBHOOK_GENIUSPAY = "whsec_secret-factice"
+#: Secret renvoyé par le faux serveur à la création d'un webhook.
+SECRET_WEBHOOK_CREE = "whsec_secret-cree-jamais-affiche"
+#: Heure figée de l'adaptateur pendant les tests (tolérance de la signature).
+MAINTENANT_GENIUSPAY = 1_800_000_000
+#: Champ retiré du corps (différent de « null »).
+ABSENT = object()
+
+
+class Brut:
+    """Valeur écrite telle quelle dans le JSON : Brut("10000.00") donne
+    10000.00, sans guillemets, comme dans les exemples de la documentation."""
+
+    def __init__(self, texte):
+        self.texte = texte
+
+
+def json_brut(donnees):
+    texte = json.dumps(donnees, default=lambda valeur: f"@@{valeur.texte}@@")
+    return re.sub(r'"@@(.*?)@@"', r"\1", texte).encode()
+
+
+def sans_absents(donnees):
+    return {cle: valeur for cle, valeur in donnees.items() if valeur is not ABSENT}
+
+
+def signature_geniuspay(corps, horodatage, secret=SECRET_WEBHOOK_GENIUSPAY):
+    """Calcul indépendant de l'adaptateur : HMAC-SHA256(horodatage + "." + corps), en hexadécimal."""
+    return hmac.new(secret.encode(), f"{horodatage}.".encode() + corps, hashlib.sha256).hexdigest()
+
+
+def erreur_geniuspay(code, message="Erreur"):
+    return {"success": False, "error": {"code": code, "message": message}}
+
+
+class FauxGeniusPay:
+    """Faux serveur GeniusPay, branché sous `requests` (HTTPAdapter.send) :
+    tout appel HTTP du processus passe ici, quelle que soit la fonction de
+    `requests` utilisée. Une URL hors de la base configurée, un appel sans
+    délai maximal ou sans vérification TLS lèvent AssertionError.
+
+    Réponses au format exact de la documentation (POST /payments,
+    GET /payments/{reference}, erreur 404). `panne` remplace toute réponse :
+    une exception (levée) ou (code, corps[, en-têtes]). POST /webhooks : la
+    documentation ne montre pas sa réponse, `reponse_webhook` la remplace."""
+
+    def __init__(self, environnement="sandbox"):
+        self.environnement = environnement
+        self.transactions = {}
+        self.appels = []  # (méthode, chemin, corps, en-têtes)
+        self.panne = None
+        self.reponse_initiation = {}  # champs remplacés dans la réponse du POST
+        self.prochaine_reference = None
+        self.reponse_webhook = None  # « data » renvoyé par POST /webhooks
+
+    def envoyer(self, _adaptateur, requete, **options):
+        assert requete.url.startswith(f"{BASE_GENIUSPAY}/"), f"Appel réseau hors du faux GeniusPay : {requete.url}"
+        assert options.get("timeout"), "Appel sans délai maximal."
+        assert options.get("verify") is not False, "Vérification TLS désactivée."
+        chemin = requete.url[len(BASE_GENIUSPAY):]
+        corps = json.loads(requete.body) if requete.body else None
+        self.appels.append((requete.method, chemin, corps, dict(requete.headers)))
+        if isinstance(self.panne, Exception):
+            raise self.panne
+        code, contenu, *entetes = self.panne or self.traiter(requete.method, chemin, corps, requete.headers)
+        reponse = requests.Response()
+        reponse.status_code, reponse.url, reponse.request = code, requete.url, requete
+        reponse._content = contenu if isinstance(contenu, bytes) else json_brut(contenu)
+        reponse._content_consumed = True
+        reponse.headers.update(entetes[0] if entetes else {})
+        return reponse
+
+    def traiter(self, methode, chemin, corps, entetes):
+        if entetes.get("X-API-Key") != CLE_GENIUSPAY or entetes.get("X-API-Secret") != SECRET_GENIUSPAY:
+            return 401, erreur_geniuspay("UNAUTHORIZED", "Invalid API credentials")
+        if (methode, chemin) == ("POST", "/payments"):
+            return 201, {"success": True, "data": self.creer(corps)}
+        if (methode, chemin) == ("POST", "/webhooks"):
+            return 201, {"success": True, "data": self.reponse_webhook or {
+                "id": 77, "name": corps["name"], "url": corps["url"], "events": corps["events"],
+                "secret": SECRET_WEBHOOK_CREE, "is_active": True,
+            }}
+        if methode == "GET" and chemin.startswith("/payments/"):
+            transaction = self.transactions.get(unquote(chemin[len("/payments/"):]))
+            if transaction is None:
+                return 404, erreur_geniuspay("TRANSACTION_NOT_FOUND", "Transaction not found")
+            return 200, {"success": True, "data": transaction}
+        raise AssertionError(f"Appel inattendu au faux GeniusPay : {methode} {chemin}")
+
+    def creer(self, corps):
+        numero = len(self.transactions) + 1
+        reference = self.prochaine_reference or f"MTX-FAUX{numero:06d}"
+        self.prochaine_reference = None
+        montant = corps["amount"]
+        self.transactions[reference] = {
+            "id": 455 + numero, "reference": reference, "amount": montant, "currency": "XOF", "fees": 450,
+            "net_amount": montant - 450, "status": "pending", "payment_method": "wave", "payment_provider": "wave",
+            "environment": self.environnement, "customer": corps["customer"], "success_url": corps["success_url"],
+            "error_url": corps["error_url"], "metadata": corps["metadata"],
+            "created_at": "2025-01-15T10:30:00.000000Z", "completed_at": None,
+        }
+        return sans_absents({
+            "id": 455 + numero, "reference": reference, "amount": montant, "fees": 450, "net_amount": montant - 450,
+            "status": "pending", "checkout_url": f"https://pay.geniuspay.test/checkout/{reference}", "gateway": "wave",
+            "environment": self.environnement, "metadata": corps["metadata"], **self.reponse_initiation,
+        })
+
+
+class DonneesGeniusPay(Donnees):
+    """GeniusPay configuré en sandbox, faux serveur branché, heure figée."""
+
+    def configurer_geniuspay(self, environnement="sandbox"):
+        reglages = self.settings(
+            PAIEMENT_FOURNISSEUR="geniuspay", GENIUSPAY_API_KEY=CLE_GENIUSPAY, GENIUSPAY_API_SECRET=SECRET_GENIUSPAY,
+            GENIUSPAY_WEBHOOK_SECRET=SECRET_WEBHOOK_GENIUSPAY, GENIUSPAY_ENVIRONNEMENT=environnement,
+            GENIUSPAY_API_URL=BASE_GENIUSPAY,
+        )
+        reglages.enable()
+        self.addCleanup(reglages.disable)
+        self.faux = FauxGeniusPay(environnement)
+        branchement = mock.patch.object(requests.adapters.HTTPAdapter, "send", autospec=True,
+                                        side_effect=self.faux.envoyer)
+        branchement.start()
+        self.addCleanup(branchement.stop)
+        horloge = mock.patch.object(geniuspay, "time")
+        horloge.start().time.return_value = float(MAINTENANT_GENIUSPAY)
+        self.addCleanup(horloge.stop)
+        self.adaptateur = FournisseurGeniusPay()
+
+    def encaisser(self, paiement=None, **champs):
+        """La transaction devient « completed » chez GeniusPay ; `champs`
+        remplace des champs de la réponse du GET (ABSENT : champ retiré)."""
+        transaction = self.faux.transactions[(paiement or self.paiement).transaction_id_externe]
+        transaction.update({"status": "completed", "completed_at": "2025-01-15T10:31:22.000000Z", **champs})
+        for cle in [cle for cle, valeur in transaction.items() if valeur is ABSENT]:
+            del transaction[cle]
+
+    def evenement(self, evenement="payment.success", paiement=None, identifiant=None, environnement="sandbox",
+                  **data):
+        """Corps d'un webhook au format de la documentation (montants décimaux)."""
+        paiement = paiement or self.paiement
+        du = int(paiement.montant)
+        return sans_absents({
+            "id": identifiant or str(uuid.uuid4()),
+            "event": evenement,
+            "timestamp": MAINTENANT_GENIUSPAY,
+            "created_at": "2025-12-30T12:00:00.000000Z",
+            "data": sans_absents({
+                "object": "transaction", "id": 12345, "reference": paiement.transaction_id_externe,
+                "amount": Brut(f"{du}.00"), "currency": "XOF", "fees": Brut("250.00"),
+                "net_amount": Brut(f"{du - 250}.00"), "status": "completed", "payment_method": "mobile_money",
+                "provider": "wave", "customer_name": "Jean Kouassi", "customer_phone": "+2250748123456",
+                "merchant_id": 25, "metadata": {"reference": paiement.reference},
+                "environment": environnement, **data,
+            }),
+            "api_version": "2024-01-01",
+        })
+
+    def poster(self, corps, horodatage=MAINTENANT_GENIUSPAY, secret=SECRET_WEBHOOK_GENIUSPAY, signe=None,
+               transfert=False, **entetes):
+        """Envoie le webhook. `signe` : octets sur lesquels la signature est
+        calculée, s'ils diffèrent du corps envoyé. En-tête à ABSENT : retiré."""
+        brut = corps if isinstance(corps, bytes) else json_brut(corps)
+        valeurs = sans_absents({
+            "HTTP_X_WEBHOOK_SIGNATURE": signature_geniuspay(brut if signe is None else signe, horodatage, secret),
+            "HTTP_X_WEBHOOK_TIMESTAMP": str(horodatage),
+            **entetes,
+        })
+        return self.api().post(url_webhook("geniuspay", transfert), data=brut, content_type="application/json",
+                               **valeurs)
+
+    def verifications(self):
+        """Chemins demandés par GET au faux serveur, dans l'ordre."""
+        return [chemin for methode, chemin, _, _ in self.faux.appels if methode == "GET"]
+
+    def statuts(self, paiement=None, commande=None):
+        paiement, commande = paiement or self.paiement, commande or self.commande
+        paiement.refresh_from_db()
+        commande.refresh_from_db()
+        return paiement.statut, commande.status
+
+
+class GeniusPayTests(DonneesGeniusPay, APITestCase):
+    """Encaissement par GeniusPay. Le webhook n'est qu'un signal signé :
+    seule la réponse du GET /payments/{reference} fait foi."""
+
+    def setUp(self):
+        self.creer_donnees()
+        (self.commande,) = self.commander((self.variante1, 3))
+        self.configurer_geniuspay()
+        self.paiement = self.payer(self.commande)
+        self.du = int(self.paiement.montant)
+        self.reference = self.paiement.transaction_id_externe
+
+    def autre_paiement(self):
+        (commande,) = self.commander((self.variante2, 1))
+        return self.payer(commande), commande
+
+    # --- Initiation ---------------------------------------------------------
+
+    def test_initiation(self):
+        (methode, chemin, corps, entetes), = self.faux.appels
+        self.assertEqual((methode, chemin), ("POST", "/payments"))
+        self.assertEqual((entetes["X-API-Key"], entetes["X-API-Secret"]), (CLE_GENIUSPAY, SECRET_GENIUSPAY))
+        self.assertEqual(corps["amount"], 15000 + FRAIS_ABIDJAN)
+        self.assertIs(type(corps["amount"]), int)
+        self.assertEqual(corps["customer"], {"name": "Aya Konan", "email": "c1@pay.ci", "country": "CI"})
+        retour = f"{settings.FRONTEND_BASE_URL}/paiement/retour?reference={self.paiement.reference}"
+        self.assertEqual((corps["success_url"], corps["error_url"]), (retour, retour))
+        self.assertEqual(corps["metadata"], {"reference": self.paiement.reference})
+        self.assertEqual(
+            (self.paiement.fournisseur, self.paiement.statut, self.reference, self.paiement.url_paiement,
+             self.paiement.hash_jeton_notification),
+            ("geniuspay", "en_attente", "MTX-FAUX000001", "https://pay.geniuspay.test/checkout/MTX-FAUX000001", ""),
+        )
+        contenu = self.api(self.client1).get(f"/api/paiements/{self.paiement.pk}/").content
+        for secret in (CLE_GENIUSPAY, SECRET_GENIUSPAY, SECRET_WEBHOOK_GENIUSPAY):
+            self.assertNotIn(secret.encode(), contenu)
+
+    def test_initiation_avec_le_telephone_du_client(self):
+        Utilisateur.objects.filter(pk=self.client2.pk).update(telephone="+2250101010101")
+        self.client2.refresh_from_db()
+        (commande,) = self.commander((self.variante2, 1), client=self.client2)
+        self.payer(commande, client=self.client2)
+        self.assertEqual(self.faux.appels[-1][2]["customer"]["phone"], "+2250101010101")
+
+    def test_initiation_refusee(self):
+        _, commande = self.autre_paiement()
+        cible = {"commande_id": str(commande.pk)}
+        cas = {
+            "environnement de la réponse différent": {"reponse_initiation": {"environment": "live"}},
+            "environnement absent": {"reponse_initiation": {"environment": ABSENT}},
+            "référence absente": {"reponse_initiation": {"reference": ABSENT}},
+            "référence non textuelle": {"reponse_initiation": {"reference": 456}},
+            "URL de paiement absente": {"reponse_initiation": {"checkout_url": ABSENT}},
+            "URL de paiement sans TLS": {"reponse_initiation": {"checkout_url": "http://pay.geniuspay.test/x"}},
+            "redirection (jamais suivie)": {"panne": (302, b"", {"Location": "https://ailleurs.test/vol"})},
+            "délai dépassé": {"panne": requests.Timeout()},
+            "500": {"panne": (500, erreur_geniuspay("INTERNAL_ERROR"))},
+            "401": {"panne": (401, erreur_geniuspay("UNAUTHORIZED"))},
+        }
+        for libelle, reglage in cas.items():
             with self.subTest(libelle):
-                self.repondre_a(self.p1, panne)
-                self.appels.clear()
-                self.assertEqual(self.reconcilier(), "0 paiement(s) vérifié(s), 0 statut(s) changé(s). "
-                                                     "Interrompue : fournisseur injoignable.")
-                self.assertEqual(self.expirer(), "0 commande(s) non payée(s) annulée(s).")
-                # Un seul appel par exécution, sur P1 : P2 n'est jamais demandé.
-                self.assertEqual(self.verifications(), [self.p1.reference, self.p1.reference])
-                self.assertEqual(self.statuts(self.p2, self.c2), ("en_attente", "creee"))
-                self.assertEqual(self.statuts(self.p1, self.c1), ("en_attente", "creee"))
-                self.assertIsNone(self.p1.date_derniere_reconciliation)
+                Paiement.objects.filter(commandes=commande).update(statut=Paiement.Statut.ANNULE)
+                deja = list(Paiement.objects.filter(commandes=commande).values_list("pk", flat=True))
+                self.faux.reponse_initiation, self.faux.panne = reglage.get("reponse_initiation", {}), reglage.get("panne")
+                self.assertEqual(self.initier(**cible).status_code, 502)
+                refuse = Paiement.objects.filter(commandes=commande).exclude(pk__in=deja).get()
+                self.assertEqual((refuse.statut, refuse.transaction_id_externe, refuse.url_paiement),
+                                 ("echoue", None, None))
+        self.faux.reponse_initiation, self.faux.panne = {}, None
+        self.assertEqual(self.initier(**cible).status_code, 201)
+
+    def test_initiation_minimum_200_fcfa(self):
+        _, commande = self.autre_paiement()
+        Paiement.objects.filter(commandes=commande).update(statut=Paiement.Statut.ANNULE)
+        nombre = len(self.faux.appels)
+        Commande.objects.filter(pk=commande.pk).update(montant_total=Decimal("199"))
+        self.assertEqual(self.initier(commande_id=str(commande.pk)).status_code, 400)
+        self.assertEqual(len(self.faux.appels), nombre)  # refusé avant tout appel
+        Commande.objects.filter(pk=commande.pk).update(montant_total=Decimal("200"))
+        self.assertEqual(self.initier(commande_id=str(commande.pk)).status_code, 201)
+        self.assertEqual(self.faux.appels[-1][2]["amount"], 200)
+
+    def test_cles_absentes_aucun_appel(self):
+        _, commande = self.autre_paiement()
+        Paiement.objects.filter(commandes=commande).update(statut=Paiement.Statut.ANNULE)
+        nombre = len(self.faux.appels)
+        for reglage in ({"GENIUSPAY_API_KEY": ""}, {"GENIUSPAY_API_SECRET": ""}, {"GENIUSPAY_ENVIRONNEMENT": ""},
+                        {"GENIUSPAY_ENVIRONNEMENT": "production"}):
+            with self.subTest(reglage=reglage), self.settings(**reglage):
+                self.assertEqual(self.initier(commande_id=str(commande.pk)).status_code, 502)
+                with self.assertRaises(ErreurFournisseur):
+                    self.adaptateur.verifier_transaction(self.paiement)
+        self.assertEqual(len(self.faux.appels), nombre)
+
+    # --- Signature du webhook (règle 4) --------------------------------------
+
+    def test_webhook_signe_puis_get_completed_valide(self):
+        self.encaisser()
+        r = self.poster(self.evenement())
+        self.assertEqual((r.status_code, r.data["message"]), (200, f"Paiement {self.paiement.reference} traité."))
+        self.assertEqual(self.statuts(), ("valide", "confirmee"))
+        self.assertEqual(self.verifications(), [f"/payments/{self.reference}"])
+        self.assertEqual(Reversement.objects.filter(commande=self.commande).count(), 1)
+
+    def test_route_du_webhook_passe_par_le_registre_jusqu_a_l_adaptateur(self):
+        self.encaisser()
+        lire_reel = FournisseurGeniusPay.lire_notification
+        # Le fournisseur de la route vient de l'URL, pas du réglage actif.
+        with self.settings(PAIEMENT_FOURNISSEUR="simule"), mock.patch.object(
+            FournisseurGeniusPay, "lire_notification", autospec=True, side_effect=lire_reel,
+        ) as lire:
+            self.assertEqual(self.poster(self.evenement(), secret="whsec_autre").status_code, 401)
+            self.assertEqual(lire.call_count, 1)
+            self.assertIsInstance(lire.call_args.args[0], FournisseurGeniusPay)
+            self.assertEqual(self.statuts(), ("en_attente", "creee"))
+            self.assertEqual(self.poster(self.evenement()).status_code, 200)
+            self.assertEqual(lire.call_count, 2)
+        self.assertEqual(self.statuts(), ("valide", "confirmee"))
+
+    def test_corps_reserialise_refuse(self):
+        self.encaisser()
+        # Montants entiers : json.dumps(json.loads(corps)) redonne exactement le corps signé.
+        signe = json.dumps(self.evenement(amount=self.du, fees=250, net_amount=self.du - 250)).encode()
+        reserialise = json.dumps(json.loads(signe), separators=(",", ":")).encode()
+        self.assertNotEqual(signe, reserialise)
+        self.assertEqual(json.loads(signe), json.loads(reserialise))
+        self.assertEqual(self.poster(reserialise, signe=signe).status_code, 401)
+        self.assertEqual(self.statuts(), ("en_attente", "creee"))
+        self.assertEqual(self.verifications(), [])
+        self.assertEqual(self.poster(signe).status_code, 200)
+        self.assertEqual(self.statuts(), ("valide", "confirmee"))
+
+    def test_signature_invalide_absente_ou_secret_vide(self):
+        self.encaisser()
+        corps = self.evenement()
+        cas = {
+            "mauvais secret": {"secret": "whsec_autre"},
+            "signature absente": {"HTTP_X_WEBHOOK_SIGNATURE": ABSENT},
+            "signature vide": {"HTTP_X_WEBHOOK_SIGNATURE": ""},
+            "signature non ASCII": {"HTTP_X_WEBHOOK_SIGNATURE": "é" * 64},
+            "horodatage absent": {"HTTP_X_WEBHOOK_TIMESTAMP": ABSENT},
+            "horodatage non numérique": {"HTTP_X_WEBHOOK_TIMESTAMP": "maintenant"},
+            "horodatage décimal": {"HTTP_X_WEBHOOK_TIMESTAMP": f"{MAINTENANT_GENIUSPAY}.0"},
+            "horodatage d'un autre envoi": {"HTTP_X_WEBHOOK_TIMESTAMP": str(MAINTENANT_GENIUSPAY + 1)},
+        }
+        for libelle, options in cas.items():
+            with self.subTest(libelle):
+                self.assertEqual(self.poster(corps, **options).status_code, 401)
+        with self.subTest("secret non configuré"), self.settings(GENIUSPAY_WEBHOOK_SECRET=""):
+            # Même signée avec la clé vide, la notification est refusée.
+            self.assertEqual(self.poster(corps, secret="").status_code, 401)
+        self.assertEqual(self.statuts(), ("en_attente", "creee"))
+        self.assertEqual(self.verifications(), [])
+        self.assertFalse(JournalWebhook.objects.exists())
+
+    def test_horodatage_tolerance_de_300_secondes(self):
+        self.encaisser()
+        for ecart in (-301, 301):
+            with self.subTest(ecart=ecart):
+                r = self.poster(self.evenement(), horodatage=MAINTENANT_GENIUSPAY + ecart)
+                self.assertEqual(r.status_code, 401)
+                self.assertEqual(self.statuts(), ("en_attente", "creee"))
+        self.assertEqual(self.verifications(), [])
+        for ecart in (-299, 299):
+            with self.subTest(ecart=ecart):
+                r = self.poster(self.evenement(), horodatage=MAINTENANT_GENIUSPAY + ecart)
+                self.assertEqual(r.status_code, 200)
+        self.assertEqual(self.statuts(), ("valide", "confirmee"))
+
+    def test_comparaison_a_temps_constant(self):
+        with mock.patch.object(geniuspay.hmac, "compare_digest", wraps=hmac.compare_digest) as comparer:
+            self.assertEqual(self.poster(self.evenement(), secret="whsec_autre").status_code, 401)
+            self.assertEqual(self.poster(self.evenement()).status_code, 200)
+        self.assertEqual(comparer.call_count, 2)
+
+    def test_json_lu_seulement_apres_la_signature(self):
+        with mock.patch.object(geniuspay.json, "loads", wraps=json.loads) as lire:
+            self.assertEqual(self.poster(b"{pas du json", secret="whsec_autre").status_code, 401)
+            self.assertEqual(self.poster(json_brut(self.evenement()), secret="whsec_autre").status_code, 401)
+            lire.assert_not_called()
+            # Signé mais illisible : refusé aussi, après lecture.
+            for corps in (b"{pas du json", b"[]", b'"texte"', b'{"event": "payment.success", "data": {"amount": NaN}}'):
+                self.assertEqual(self.poster(corps).status_code, 401)
+            self.assertTrue(lire.called)
+
+    # --- Le GET seul fait foi (règles 1, 2, 3) --------------------------------
+
+    def test_webhook_succes_signe_mais_get_pending_ne_valide_pas(self):
+        corps = self.evenement(identifiant="evt-attente")  # « payment.success », statut « completed »
+        r = self.poster(corps)
+        self.assertEqual((r.status_code, r.data["message"]), (200, "Transaction non finalisée."))
+        self.assertEqual(self.statuts(), ("en_attente", "creee"))
+        self.assertEqual(JournalWebhook.objects.get(evenement_id="evt-attente").statut_traitement, "ignore")
+        self.assertFalse(Reversement.objects.exists())
+        # Rejoué une fois la transaction finalisée chez GeniusPay : traité.
+        self.encaisser()
+        self.assertEqual(self.poster(corps).status_code, 200)
+        self.assertEqual(self.statuts(), ("valide", "confirmee"))
+
+    def test_contenu_du_webhook_jamais_utilise(self):
+        # Webhook d'échec, montant et devise faux : le GET dit « completed », montant dû, XOF.
+        self.encaisser()
+        r = self.poster(self.evenement("payment.failed", status="failed", amount=1, currency="EUR"))
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(self.statuts(), ("valide", "confirmee"))
+        # Webhook de succès : le GET dit « failed ».
+        paiement, commande = self.autre_paiement()
+        self.faux.transactions[paiement.transaction_id_externe]["status"] = "failed"
+        self.assertEqual(self.poster(self.evenement(paiement=paiement)).status_code, 200)
+        self.assertEqual(self.statuts(paiement, commande), ("echoue", "creee"))
+
+    def test_montant_decimal_a_fraction_nulle_accepte(self):
+        # Forme du webhook de la documentation (10000.00), ici dans le GET.
+        self.encaisser(amount=Brut(f"{self.du}.00"), fees=Brut("450.00"), net_amount=Brut(f"{self.du - 450}.00"))
+        self.assertEqual(self.poster(self.evenement()).status_code, 200)
+        self.assertEqual(self.statuts(), ("valide", "confirmee"))
+
+    def test_lecture_du_montant_du_get(self):
+        du = self.du
+        acceptes = {"entier": du, "décimal .00": Brut(f"{du}.00"), "décimal .0": Brut(f"{du}.0"),
+                    "exposant": Brut(f"{du // 100}E2")}
+        refuses = {"fractionnaire": Brut(f"{du}.50"), "fractionnaire infime": Brut(f"{du}.0000001"),
+                   "texte": str(du), "texte décimal": f"{du}.00", "booléen": True, "absent": ABSENT, "nul": None,
+                   "liste": [du], "objet": {"value": du}}
+        for libelle, valeur in acceptes.items():
+            with self.subTest(libelle):
+                self.encaisser(amount=valeur)
+                etat = self.adaptateur.verifier_transaction(self.paiement)
+                self.assertEqual((etat.statut, etat.montant, etat.devise), (SUCCES, du, "XOF"))
+                self.assertIs(type(etat.montant), int)
+        for libelle, valeur in refuses.items():
+            with self.subTest(libelle):
+                self.encaisser(amount=valeur)
+                etat = self.adaptateur.verifier_transaction(self.paiement)
+                self.assertEqual((etat.statut, etat.montant), (SUCCES, None))
+
+    def test_succes_refuse_sans_montant_et_devise_conformes(self):
+        du = self.du
+        cas = {
+            "montant fractionnaire (.50)": {"amount": Brut(f"{du}.50")},
+            "montant en texte": {"amount": str(du)},
+            "montant booléen": {"amount": True},
+            "montant absent": {"amount": ABSENT},
+            "montant nul": {"amount": None},
+            "montant inférieur": {"amount": du - 1},
+            "montant supérieur": {"amount": du + 1},
+            "net_amount égal au dû, amount différent": {"amount": du + 450, "fees": 450, "net_amount": du},
+            "fees égal au dû, amount différent": {"amount": du * 2, "fees": du, "net_amount": du},
+            "devise absente": {"currency": ABSENT},
+            "devise EUR": {"currency": "EUR"},
+            "devise vide": {"currency": ""},
+            "devise nulle": {"currency": None},
+            "devise non textuelle": {"currency": 952},
+        }
+        for libelle, champs in cas.items():
+            with self.subTest(libelle):
+                self.encaisser(**{"amount": du, "currency": "XOF", "fees": 450, "net_amount": du - 450, **champs})
+                # Le webhook, lui, annonce le montant dû en XOF.
+                self.assertEqual(self.poster(self.evenement()).status_code, 400)
+                self.assertEqual(reconcilier_paiement(self.paiement), ("refuse", False))
+                self.assertEqual(self.statuts(), ("en_attente", "creee"))
+        self.assertEqual(JournalWebhook.objects.filter(statut_traitement="erreur").count(), len(cas))
+        self.assertFalse(Reversement.objects.exists())
+        self.assertFalse(Livraison.objects.exists())
+
+    def test_net_amount_et_fees_ignores(self):
+        # amount = dû ; net_amount et fees quelconques, absents ou illisibles.
+        self.encaisser(amount=self.du, fees="x", net_amount=ABSENT)
+        self.assertEqual(self.poster(self.evenement()).status_code, 200)
+        self.assertEqual(self.statuts(), ("valide", "confirmee"))
+
+    # --- Référence, metadata, environnement (règles 6 et 7) -------------------
+
+    def test_format_de_la_reference_indifferent(self):
+        # « TXN-… » dans le webhook de la documentation, « MTX-… » ailleurs.
+        self.faux.prochaine_reference = "TXN-2025-001"
+        paiement, commande = self.autre_paiement()
+        self.assertEqual(paiement.transaction_id_externe, "TXN-2025-001")
+        self.encaisser(paiement)
+        self.assertEqual(self.poster(self.evenement(paiement=paiement)).status_code, 200)
+        self.assertEqual(self.statuts(paiement, commande), ("valide", "confirmee"))
+        self.assertEqual(self.verifications(), ["/payments/TXN-2025-001"])
+        self.assertEqual(self.statuts(), ("en_attente", "creee"))
+
+    def test_reference_inconnue_absente_ou_differente_dans_le_get(self):
+        self.encaisser()
+        self.assertEqual(self.poster(self.evenement(reference="MTX-INCONNUE")).status_code, 404)
+        # La référence ANITCHE (PAY-…) n'est pas une clé de recherche.
+        self.assertEqual(self.poster(self.evenement(reference=self.paiement.reference)).status_code, 404)
+        for valeur in (ABSENT, "", None, 456):
+            with self.subTest(reference=valeur):
+                self.assertEqual(self.poster(self.evenement(reference=valeur)).status_code, 401)
+        self.assertEqual(self.verifications(), [])
+        # Le GET renvoie une autre référence que celle stockée à l'initiation.
+        for valeur in ("MTX-AUTRE", ABSENT, None):
+            with self.subTest(reference_du_get=valeur):
+                self.encaisser(reference=valeur)
+                self.assertEqual(self.poster(self.evenement()).status_code, 400)
+                self.assertEqual(reconcilier_paiement(self.paiement), ("refuse", False))
+        self.assertEqual(self.statuts(), ("en_attente", "creee"))
+
+    def test_paiement_ouvert_chez_un_autre_fournisseur_refuse(self):
+        self.encaisser()
+        Paiement.objects.filter(pk=self.paiement.pk).update(fournisseur="simule")
+        self.assertEqual(self.poster(self.evenement()).status_code, 404)
+        self.assertEqual(self.statuts(), ("en_attente", "creee"))
+        self.assertEqual(self.verifications(), [])
+
+    def test_recoupement_par_metadata(self):
+        autre, autre_commande = self.autre_paiement()
+        self.encaisser()
+        # Webhook : référence GeniusPay de ce paiement, référence ANITCHE d'un autre.
+        r = self.poster(self.evenement(metadata={"reference": autre.reference}))
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(self.verifications(), [])
+        # GET : metadata d'un autre paiement, vide, absente ou illisible.
+        for metadata in ({"reference": autre.reference}, {"order_id": self.paiement.reference}, {}, None, ABSENT,
+                         {"reference": 12}, "texte"):
+            with self.subTest(metadata_du_get=metadata):
+                self.encaisser(metadata=metadata)
+                self.assertEqual(self.poster(self.evenement(metadata=ABSENT)).status_code, 400)
+                self.assertEqual(reconcilier_paiement(self.paiement), ("refuse", False))
+        self.assertEqual(self.statuts(), ("en_attente", "creee"))
+        self.assertEqual(self.statuts(autre, autre_commande), ("en_attente", "creee"))
+        # Webhook sans metadata, GET conforme : validé (le GET fait foi).
+        self.encaisser(metadata={"reference": self.paiement.reference})
+        self.assertEqual(self.poster(self.evenement(metadata=ABSENT)).status_code, 200)
+        self.assertEqual(self.statuts(), ("valide", "confirmee"))
+
+    def test_reference_geniuspay_portee_par_deux_paiements_refusee(self):
+        autre, autre_commande = self.autre_paiement()
+        Paiement.objects.filter(pk=autre.pk).update(transaction_id_externe=self.reference)
+        self.encaisser()
+        self.assertEqual(self.poster(self.evenement(metadata=ABSENT)).status_code, 400)
+        self.assertEqual(self.verifications(), [])
+        self.assertEqual(self.statuts(), ("en_attente", "creee"))
+        self.assertEqual(self.statuts(autre, autre_commande), ("en_attente", "creee"))
+
+    def test_environnement_croise_refuse(self):
+        self.encaisser()
+        # Webhook d'un autre environnement, ou sans environnement.
+        for environnement in ("live", "LIVE", "", ABSENT):
+            with self.subTest(environnement_du_webhook=environnement):
+                self.assertEqual(self.poster(self.evenement(environnement=environnement)).status_code, 401)
+        self.assertEqual(self.verifications(), [])
+        self.assertFalse(JournalWebhook.objects.exists())
+        # GET d'un autre environnement, ou sans environnement.
+        for environnement in ("live", ABSENT, None):
+            with self.subTest(environnement_du_get=environnement):
+                self.encaisser(environment=environnement)
+                self.assertEqual(self.poster(self.evenement()).status_code, 400)
+                self.assertEqual(reconcilier_paiement(self.paiement), ("refuse", False))
+        # Configuration « live », webhook et transaction « sandbox ».
+        self.encaisser(environment="sandbox")
+        with self.settings(GENIUSPAY_ENVIRONNEMENT="live"):
+            self.assertEqual(self.poster(self.evenement()).status_code, 401)
+            self.assertEqual(reconcilier_paiement(self.paiement), ("refuse", False))
+        self.assertEqual(self.statuts(), ("en_attente", "creee"))
+        # Environnements concordants : validé.
+        self.assertEqual(self.poster(self.evenement()).status_code, 200)
+        self.assertEqual(self.statuts(), ("valide", "confirmee"))
+
+    # --- Idempotence (règle 5) -------------------------------------------------
+
+    def test_rejeu_du_meme_id_traite_une_fois(self):
+        self.encaisser()
+        corps = self.evenement(identifiant="550e8400-e29b-41d4-a716-446655440000")
+        self.assertEqual(self.poster(corps).status_code, 200)
+        for _ in range(2):
+            r = self.poster(corps)
+            self.assertEqual((r.status_code, r.data["message"]), (200, "Événement déjà traité."))
+        journal = JournalWebhook.objects.get()
+        self.assertEqual((journal.fournisseur, journal.evenement_id, journal.statut_traitement),
+                         ("geniuspay", "550e8400-e29b-41d4-a716-446655440000", "traite"))
+        self.assertEqual(len(self.verifications()), 1)
+        self.assertEqual(Reversement.objects.count(), 1)
+        self.assertEqual(Notification.objects.filter(destinataire=self.client1, titre="Paiement confirmé").count(), 1)
+
+    def test_cle_de_secours_sans_id(self):
+        self.encaisser()
+        for identifiant in (ABSENT, "", 42):
+            with self.subTest(id=identifiant):
+                corps = self.evenement()
+                corps["id"] = identifiant
+                self.assertEqual(self.poster(sans_absents(corps)).status_code, 200)
+        self.assertEqual(JournalWebhook.objects.get().evenement_id, f"payment.success:{self.reference}")
+        self.assertEqual(len(self.verifications()), 1)
+
+    # --- Événements sans effet (règle 8) et statuts (règle 9) -----------------
+
+    def test_webhook_test_sans_effet(self):
+        self.encaisser()
+        essai = {"id": str(uuid.uuid4()), "event": "webhook.test", "timestamp": MAINTENANT_GENIUSPAY,
+                 "data": {"message": "Test webhook"}, "environment": "sandbox", "api_version": "2024-01-01"}
+        # Même s'il désigne un vrai paiement encaissé.
+        for corps in (essai, self.evenement("webhook.test")):
+            with self.assertLogs("apps.paiements.services", "INFO") as journaux:
+                r = self.poster(corps)
+            self.assertEqual((r.status_code, r.data["message"]), (200, "Événement ignoré."))
+            self.assertIn("essai du webhook", journaux.output[0])
+        self.assertEqual(self.statuts(), ("en_attente", "creee"))
+        self.assertEqual(self.verifications(), [])
+        self.assertFalse(JournalWebhook.objects.exists())
+        # Non signé : refusé comme tout autre.
+        self.assertEqual(self.poster(essai, secret="whsec_autre").status_code, 401)
+
+    def test_cashout_et_evenements_hors_perimetre_ignores_et_journalises(self):
+        self.encaisser()
+        for evenement in ("cashout.completed", "cashout.failed", "invoice.created"):
+            with self.subTest(evenement), self.assertLogs("apps.paiements.services", "INFO") as journaux:
+                r = self.poster(self.evenement(evenement))
+                self.assertEqual((r.status_code, r.data["message"]), (200, "Événement ignoré."))
+                self.assertIn(evenement, journaux.output[0])
+        self.assertEqual(self.statuts(), ("en_attente", "creee"))
+        self.assertEqual(self.verifications(), [])
+        self.assertFalse(JournalWebhook.objects.exists())
+        self.assertEqual(self.poster(self.evenement("cashout.completed", environnement="live")).status_code, 401)
+
+    def test_statuts_du_get(self):
+        cas = {"completed": SUCCES, "failed": ECHEC, "cancelled": ECHEC, "expired": ECHEC, "pending": EN_ATTENTE,
+               "processing": EN_ATTENTE, "refunded": EN_ATTENTE, "inconnu": EN_ATTENTE, "COMPLETED": EN_ATTENTE,
+               "": EN_ATTENTE,
+               None: EN_ATTENTE, ABSENT: EN_ATTENTE, True: EN_ATTENTE}
+        for statut, attendu in cas.items():
+            with self.subTest(statut=statut):
+                self.encaisser(status=statut)
+                self.assertEqual(self.adaptateur.verifier_transaction(self.paiement).statut, attendu)
+
+    def test_echecs_confirmes_par_le_get(self):
+        for statut in ("failed", "cancelled", "expired"):
+            with self.subTest(statut):
+                paiement, commande = self.autre_paiement()
+                self.encaisser(paiement, status=statut)
+                self.assertEqual(self.poster(self.evenement(f"payment.{statut}", paiement=paiement)).status_code, 200)
+                self.assertEqual(self.statuts(paiement, commande), ("echoue", "creee"))
+                self.api(self.client1).post(f"/api/commandes/{commande.pk}/annuler/")
+
+    def test_rembourse_aucune_transition_journalise(self):
+        corps = self.evenement("payment.refunded", status="refunded")
+        # Paiement encore en attente chez nous.
+        self.encaisser(status="refunded")
+        with self.assertLogs("securite", "WARNING") as journaux:
+            self.assertEqual(self.poster(corps).status_code, 200)
+            self.assertEqual(reconcilier_paiement(self.paiement), ("en_attente", False))
+        self.assertIn(self.reference, journaux.output[0])
+        self.assertIn("rembours", journaux.output[0])
+        self.assertEqual(self.statuts(), ("en_attente", "creee"))
+        # Paiement déjà validé : il le reste.
+        self.encaisser()
+        self.assertEqual(self.poster(self.evenement()).status_code, 200)
+        self.encaisser(status="refunded")
+        with self.assertLogs("securite", "WARNING"):
+            self.assertEqual(self.poster(self.evenement("payment.refunded", status="refunded")).status_code, 200)
+        self.assertEqual(self.statuts(), ("valide", "confirmee"))
+        self.assertFalse(Remboursement.objects.exists())
+
+    # --- Erreurs HTTP (règle 10) et réconciliation ------------------------------
+
+    def test_classement_des_reponses_du_get(self):
+        self.encaisser()
+        encaissee = {"success": True, "data": self.faux.transactions[self.reference]}
+        cas = {
+            # Corps d'un succès conforme, mais code HTTP d'échec ou de redirection.
+            "500 avec un corps de succès": ((500, encaissee), ErreurFournisseur),
+            "302 avec un corps de succès": ((302, encaissee, {"Location": "https://ailleurs.test/vol"}),
+                                            ErreurFournisseur),
+            "404 TRANSACTION_NOT_FOUND": ((404, erreur_geniuspay("TRANSACTION_NOT_FOUND")), TransactionIntrouvable),
+            "404 autre code": ((404, erreur_geniuspay("ROUTE_NOT_FOUND")), ErreurFournisseur),
+            "404 illisible": ((404, b"<html>Not Found</html>"), ErreurFournisseur),
+            "400": ((400, erreur_geniuspay("VALIDATION_ERROR")), ErreurFournisseur),
+            "401": ((401, erreur_geniuspay("UNAUTHORIZED")), ErreurFournisseur),
+            "403": ((403, erreur_geniuspay("FORBIDDEN")), ErreurFournisseur),
+            "429": ((429, erreur_geniuspay("RATE_LIMITED")), ErreurFournisseur),
+            "500": ((500, erreur_geniuspay("INTERNAL_ERROR")), ErreurFournisseur),
+            "503 illisible": ((503, b"Service Unavailable"), ErreurFournisseur),
+            "302": ((302, b"", {"Location": "https://ailleurs.test/vol"}), ErreurFournisseur),
+            "200 illisible": ((200, b"<html>"), ErreurFournisseur),
+            "200 vide": ((200, b""), ErreurFournisseur),
+            "200 non UTF-8": ((200, b"\xff\xfe"), ErreurFournisseur),
+            "200 liste": ((200, b"[]"), ErreurFournisseur),
+            "200 NaN": ((200, b'{"success": true, "data": {"amount": NaN}}'), ErreurFournisseur),
+            "200 success false": ((200, erreur_geniuspay("TRANSACTION_NOT_FOUND")), ErreurFournisseur),
+            "200 sans success": ((200, {"data": {"status": "completed"}}), ErreurFournisseur),
+            "200 sans data": ((200, {"success": True}), ErreurFournisseur),
+            "200 data non objet": ((200, {"success": True, "data": []}), ErreurFournisseur),
+            "délai dépassé": (requests.Timeout(), ErreurFournisseur),
+            "connexion": (requests.ConnectionError(), ErreurFournisseur),
+            "TLS": (requests.exceptions.SSLError(), ErreurFournisseur),
+        }
+        for libelle, (panne, attendue) in cas.items():
+            with self.subTest(libelle):
+                self.faux.panne = panne
+                with self.assertRaises(attendue) as contexte:
+                    self.adaptateur.verifier_transaction(self.paiement)
+                if attendue is TransactionIntrouvable:
+                    self.assertNotIsInstance(contexte.exception, ErreurFournisseur)
+                # Rien n'est validé, par le webhook comme par la réconciliation.
+                self.assertEqual(self.poster(self.evenement()).status_code, 503)
+                issue = "refuse" if attendue is TransactionIntrouvable else "injoignable"
+                self.assertEqual(reconcilier_paiement(self.paiement), (issue, False))
+                self.assertEqual(self.statuts(), ("en_attente", "creee"))
+        self.faux.panne = None
+        with self.subTest("identifiants refusés par GeniusPay"), self.settings(GENIUSPAY_API_SECRET="sk_autre"):
+            with self.assertRaises(ErreurFournisseur):
+                self.adaptateur.verifier_transaction(self.paiement)
+        with self.subTest("transaction inconnue de GeniusPay"):
+            transaction = self.faux.transactions.pop(self.reference)
+            with self.assertRaises(TransactionIntrouvable):
+                self.adaptateur.verifier_transaction(self.paiement)
+            self.faux.transactions[self.reference] = transaction
+        with self.subTest("paiement sans référence GeniusPay"):
+            nombre = len(self.faux.appels)
+            for valeur in (None, ""):
+                self.paiement.transaction_id_externe = valeur
+                with self.assertRaises(TransactionIntrouvable):
+                    self.adaptateur.verifier_transaction(self.paiement)
+            self.assertEqual(len(self.faux.appels), nombre)
+
+    def test_reference_encodee_dans_l_url(self):
+        Paiement.objects.filter(pk=self.paiement.pk).update(transaction_id_externe="MTX/../payments?x=1")
+        self.paiement.refresh_from_db()
+        with self.assertRaises(TransactionIntrouvable):
+            self.adaptateur.verifier_transaction(self.paiement)
+        self.assertEqual(self.verifications(), ["/payments/MTX%2F..%2Fpayments%3Fx%3D1"])
+
+    def test_reconciliation_sans_webhook(self):
+        self.assertEqual(reconcilier_paiement(self.paiement), ("en_attente", False))
+        self.encaisser()
+        self.assertEqual(reconcilier_paiement(self.paiement), ("succes", True))
+        self.assertEqual(self.statuts(), ("valide", "confirmee"))
+        self.assertFalse(JournalWebhook.objects.exists())
+        # Webhook tardif : sans second effet.
+        self.assertEqual(self.poster(self.evenement()).status_code, 200)
+        self.assertEqual(Reversement.objects.count(), 1)
+
+    def test_tache_de_reconciliation(self):
+        autre, autre_commande = self.autre_paiement()
+        vieillir_paiement(self.paiement, 20)
+        vieillir_paiement(autre, 16)
+        self.faux.transactions.pop(self.reference)  # 404 pour le premier
+        self.encaisser(autre)
+        with self.assertLogs("securite", "ERROR"):
+            self.assertEqual(reconcilier_paiements_en_suspens(), (2, 1, False))
+        self.assertEqual(self.statuts(), ("en_attente", "creee"))
+        self.assertEqual(self.statuts(autre, autre_commande), ("valide", "confirmee"))
+
+    # --- Secrets (règle 11) et transferts ---------------------------------------
+
+    def test_aucun_secret_ni_donnee_client_dans_les_journaux_ni_en_base(self):
+        self.encaisser()
+        corps = json_brut(self.evenement())
+        signature = signature_geniuspay(corps, MAINTENANT_GENIUSPAY)
+        with self.assertLogs("securite", "DEBUG") as securite, self.assertLogs("apps.paiements", "DEBUG") as module:
+            self.poster(corps, secret="whsec_autre")
+            self.poster(self.evenement(environnement="live"))
+            self.poster(self.evenement("cashout.completed"))
+            for panne in ((401, erreur_geniuspay("UNAUTHORIZED")), (500, b"<html>"), requests.Timeout(),
+                          requests.ConnectionError(f"{CLE_GENIUSPAY} {SECRET_GENIUSPAY}")):
+                self.faux.panne = panne
+                self.poster(self.evenement())
+                reconcilier_paiement(self.paiement)
+            self.faux.panne = None
+            self.assertEqual(self.poster(corps).status_code, 200)
+        journaux = "\n".join(securite.output + module.output)
+        for interdit in (CLE_GENIUSPAY, SECRET_GENIUSPAY, SECRET_WEBHOOK_GENIUSPAY, signature, "+2250748123456",
+                         "Jean Kouassi"):
+            self.assertNotIn(interdit, journaux)
+        enregistre = json.dumps(list(JournalWebhook.objects.values("payload", "erreur")), default=str)
+        for interdit in (CLE_GENIUSPAY, SECRET_GENIUSPAY, SECRET_WEBHOOK_GENIUSPAY, signature, "+2250748123456",
+                         "Jean Kouassi"):
+            self.assertNotIn(interdit, enregistre)
+        self.assertIn(self.reference, enregistre)
+
+    def test_transfert_non_implemente_versement_manuel_possible(self):
+        self.encaisser()
+        self.assertEqual(self.poster(self.evenement()).status_code, 200)
+        reversement = Reversement.objects.get(commande=self.commande)
+        Reversement.objects.filter(pk=reversement.pk).update(statut=Reversement.Statut.DISPONIBLE)
+        with self.assertRaises(OperationNonSupportee):
+            self.adaptateur.transferer(reversement, "+2250707070707", "wave")
+        with self.assertRaises(OperationNonSupportee):
+            self.adaptateur.verifier_transfert(reversement)
+        nombre = len(self.faux.appels)
+        admin = self.api(self.admin)
+        r = admin.post(f"/api/paiements/admin/reversements/{reversement.pk}/transferer/", {"operateur": "wave"})
+        self.assertEqual(r.status_code, 409)
+        reversement.refresh_from_db()
+        self.assertEqual((reversement.statut, reversement.montant_a_verser), ("disponible", Decimal("0")))
+        self.assertEqual(len(self.faux.appels), nombre)
+        r = admin.post(f"/api/paiements/admin/reversements/{reversement.pk}/verser/", {"reference_externe": "WAVE-1"})
+        self.assertEqual((r.status_code, r.data["statut"]), (200, "verse"))
+        self.assertEqual(Notification.objects.filter(
+            destinataire=self.vendeur1, titre="Reversement effectué").count(), 1)
+
+    def test_notification_de_transfert_refusee(self):
+        for evenement in ("cashout.completed", "payment.success", "webhook.test"):
+            with self.subTest(evenement):
+                self.assertEqual(self.poster(self.evenement(evenement), transfert=True).status_code, 401)
+        with self.assertRaises(NotificationInvalide):
+            self.adaptateur.lire_notification_transfert(None)
+
+
+class ReconciliationGeniusPayTests(DonneesGeniusPay, DonneesReconciliationReversement, APITestCase):
+    """GeniusPay n'a pas de transferts par API : la réconciliation d'un
+    reversement en cours chez lui est « non disponible », sans appel réseau
+    ni changement d'état, et n'arrête pas le lot."""
+
+    def setUp(self):
+        super().setUp()
+        self.chez_geniuspay = self.autre_reversement(minutes=60)  # premier du lot
+        Reversement.objects.filter(pk=self.chez_geniuspay.pk).update(fournisseur="geniuspay")
+        self.chez_geniuspay.refresh_from_db()
+        self.distant(SUCCES)  # le reversement du fournisseur simulé, derrière
+        self.configurer_geniuspay()
+
+    def test_reconciliation_geniuspay_non_disponible(self):
+        with self.assertLogs("apps.paiements.reversements", "WARNING") as journaux, \
+                compter_verifications_de_transfert() as verifier:
+            self.assertEqual(reversements.reconcilier_reversements_en_cours(), (2, 1, False))
+        self.assertEqual(self.faux.appels, [])
+        self.assertEqual(transferts_verifies(verifier), [self.reversement.reference])
+        self.assertIn("Transfert par API non disponible chez geniuspay", "\n".join(journaux.output))
+        self.chez_geniuspay.refresh_from_db()
+        self.assertEqual((self.chez_geniuspay.statut, self.chez_geniuspay.montant_a_verser),
+                         ("en_cours", Decimal("4100")))
+        self.assertIsNotNone(self.chez_geniuspay.date_derniere_reconciliation)
+        self.reversement.refresh_from_db()
+        self.assertEqual(self.reversement.statut, "verse")
+        self.assertEqual(reversements.reconcilier_reversement(self.chez_geniuspay),
+                         (reversements.NON_DISPONIBLE, False))
+        self.assertEqual(self.faux.appels, [])
+
+
+class GeniusPayInactifParDefautTests(Donnees, APITestCase):
+    """Sans configuration (réglages vides de base.py et test.py), GeniusPay
+    est inscrit au registre mais n'ouvre, ne vérifie et n'accepte rien."""
+
+    def setUp(self):
+        self.creer_donnees()
+        (self.commande,) = self.commander((self.variante1, 1))
+        aucun_appel = mock.patch.object(requests.adapters.HTTPAdapter, "send",
+                                        side_effect=AssertionError("Appel réseau réel interdit."))
+        aucun_appel.start()
+        self.addCleanup(aucun_appel.stop)
+
+    def test_reglages_vides_et_fournisseur_actif_inchange(self):
+        for nom in ("GENIUSPAY_API_KEY", "GENIUSPAY_API_SECRET", "GENIUSPAY_WEBHOOK_SECRET",
+                    "GENIUSPAY_ENVIRONNEMENT", "GENIUSPAY_API_URL"):
+            with self.subTest(nom):
+                self.assertEqual(getattr(settings, nom), "")
+        self.assertEqual(settings.PAIEMENT_FOURNISSEUR, "simule")
+        self.assertEqual(self.payer(self.commande).fournisseur, "simule")
+
+    def test_registre(self):
+        self.assertEqual(set(FOURNISSEURS), {"simule", "geniuspay"})
+        self.assertIsInstance(obtenir_fournisseur("geniuspay"), FournisseurGeniusPay)
+        with self.assertRaises(FournisseurInconnu):
+            obtenir_fournisseur("cinetpay")
+
+    def test_url_de_l_api_par_defaut(self):
+        self.assertEqual(FournisseurGeniusPay()._url("/payments"), "https://geniuspay.ci/api/v1/merchant/payments")
+        with self.settings(GENIUSPAY_API_URL="https://exemple.test/api/"):
+            self.assertEqual(FournisseurGeniusPay()._url("/payments"), "https://exemple.test/api/payments")
+
+    def test_sans_configuration_rien_n_est_ouvert_verifie_ni_accepte(self):
+        paiement = self.payer(self.commande)
+        Paiement.objects.filter(pk=paiement.pk).update(fournisseur="geniuspay", transaction_id_externe="MTX-A1B2C3D4E5")
+        paiement.refresh_from_db()
+        adaptateur = FournisseurGeniusPay()
+        with self.assertRaises(ErreurFournisseur):
+            adaptateur.initier(paiement)
+        with self.assertRaises(ErreurFournisseur):
+            adaptateur.verifier_transaction(paiement)
+        self.assertEqual(reconcilier_paiement(paiement), ("injoignable", False))
+        corps = json.dumps({"id": "e", "event": "payment.success", "environment": "sandbox",
+                            "data": {"reference": "MTX-A1B2C3D4E5"}}).encode()
+        horodatage = int(time.time())
+        r = self.api().post(url_webhook("geniuspay"), data=corps, content_type="application/json",
+                            HTTP_X_WEBHOOK_SIGNATURE=signature_geniuspay(corps, horodatage, ""),
+                            HTTP_X_WEBHOOK_TIMESTAMP=str(horodatage))
+        self.assertEqual(r.status_code, 401)
+        paiement.refresh_from_db()
+        self.assertEqual(paiement.statut, Paiement.Statut.EN_ATTENTE)
+
+
+# =====================================================================
+# ESSAI EN SANDBOX (commande essai_geniuspay, réglages et journal de dev)
+# =====================================================================
+
+URL_TUNNEL = "https://essai-anitche.trycloudflare.com"
+URL_WEBHOOK_TUNNEL = f"{URL_TUNNEL}/api/paiements/webhook/geniuspay/"
+ENV_INITIAL = "SECRET_KEY=valeur-factice\n# clés GeniusPay\nGENIUSPAY_ENVIRONNEMENT=sandbox\n"
+
+
+class EssaiGeniusPayTests(DonneesGeniusPay, APITestCase):
+    """Commande essai_geniuspay : réservée au développement en sandbox, le
+    secret du webhook ne va que dans .env (un fichier temporaire ici), le
+    paiement passe par le vrai checkout et le vrai service."""
+
+    def setUp(self):
+        cache.clear()
+        self.configurer_geniuspay()
+        # Le lanceur de tests force DEBUG=False.
+        reglages = self.settings(DEBUG=True, ALLOWED_HOSTS=["testserver", ".trycloudflare.com"])
+        reglages.enable()
+        self.addCleanup(reglages.disable)
+        dossier = tempfile.TemporaryDirectory()
+        self.addCleanup(dossier.cleanup)
+        self.dossier = Path(dossier.name)
+        self.env = self.dossier / ".env"
+        self.ecrire_env(ENV_INITIAL)
+        chemin = mock.patch.object(essai_geniuspay, "chemin_env", return_value=self.env)
+        chemin.start()
+        self.addCleanup(chemin.stop)
+
+    def ecrire_env(self, texte):
+        self.env.write_bytes(texte.encode())
+
+    def lire_env(self):
+        return self.env.read_bytes().decode()
+
+    def lancer(self, *arguments, reponse=AssertionError("Confirmation demandée.")):
+        """Sortie complète de la commande (stdout et stderr). `reponse` :
+        saisie à la demande de confirmation, ou exception levée par input."""
+        sortie = StringIO()
+        with mock.patch("builtins.input", side_effect=[reponse]) as saisie:
+            call_command("essai_geniuspay", *arguments, stdout=sortie, stderr=sortie)
+        self.questions = [appel.args[0] for appel in saisie.call_args_list]
+        return sortie.getvalue()
+
+    def payer_par_la_commande(self, montant=500, *options):
+        sortie = self.lancer("payer", "--montant", str(montant), *options)
+        return sortie, Paiement.objects.latest("date_creation")
+
+    # --- Réservée au développement en sandbox -----------------------------------
+
+    def test_refusee_hors_developpement(self):
+        cas = {
+            "DEBUG désactivé": ({"DEBUG": False}, "DEBUG est désactivé"),
+            "settings de production": ({"SETTINGS_MODULE": "config.settings.prod"}, "settings de production"),
+            "fournisseur simulé": ({"PAIEMENT_FOURNISSEUR": "simule"}, "PAIEMENT_FOURNISSEUR n'est pas geniuspay"),
+            "fournisseur inconnu": ({"PAIEMENT_FOURNISSEUR": "autre"}, "PAIEMENT_FOURNISSEUR n'est pas geniuspay"),
+            "environnement live": ({"GENIUSPAY_ENVIRONNEMENT": "live"}, "GENIUSPAY_ENVIRONNEMENT n'est pas sandbox"),
+            "clé publique live": ({"GENIUSPAY_API_KEY": "sk_live_factice"}, "GENIUSPAY_API_KEY ne commence pas"),
+            "clé secrète live": ({"GENIUSPAY_API_SECRET": "ss_live_factice"}, "GENIUSPAY_API_SECRET ne commence pas"),
+            "clés absentes": ({"GENIUSPAY_API_KEY": "", "GENIUSPAY_API_SECRET": ""}, "GENIUSPAY_API_KEY"),
+        }
+        actions = (("creer-webhook", "--url", URL_TUNNEL), ("payer", "--montant", "500"),
+                   ("etat", "--reference", "PAY-INCONNU"))
+        for nom, (reglages, message) in cas.items():
+            for action in actions:
+                with self.subTest(nom, action=action[0]), self.settings(**reglages):
+                    with self.assertRaises(CommandError) as refus:
+                        self.lancer(*action)
+                    self.assertIn("réservée au développement en sandbox", str(refus.exception))
+                    self.assertIn(message, str(refus.exception))
+                    for secret in ("sk_live_factice", "ss_live_factice", CLE_GENIUSPAY, SECRET_GENIUSPAY):
+                        self.assertNotIn(secret, str(refus.exception))
+        self.assertEqual(self.faux.appels, [])
+        self.assertEqual(self.lire_env(), ENV_INITIAL)
+        self.assertFalse(Paiement.objects.exists() or Utilisateur.objects.exists())
+
+    # --- creer-webhook ----------------------------------------------------------
+
+    def test_creer_webhook_enregistre_le_secret_sans_jamais_l_afficher(self):
+        with self.assertLogs("apps.paiements", "DEBUG") as journaux:
+            sortie = self.lancer("creer-webhook", "--url", URL_TUNNEL)
+        (methode, chemin, corps, entetes), = self.faux.appels
+        self.assertEqual((methode, chemin), ("POST", "/webhooks"))
+        self.assertEqual((entetes["X-API-Key"], entetes["X-API-Secret"]), (CLE_GENIUSPAY, SECRET_GENIUSPAY))
+        self.assertEqual(corps, {
+            "name": "ANITCHE essai sandbox", "url": URL_WEBHOOK_TUNNEL,
+            "events": ["payment.initiated", "payment.success", "payment.failed", "payment.cancelled",
+                       "payment.refunded", "payment.expired"],
+        })
+        self.assertIn("secret enregistré dans .env", sortie)
+        self.assertIn("Webhook 77", sortie)
+        self.assertIn(URL_WEBHOOK_TUNNEL, sortie)
+        for texte in (sortie, "\n".join(journaux.output)):
+            for interdit in (SECRET_WEBHOOK_CREE, "whsec_", CLE_GENIUSPAY, SECRET_GENIUSPAY):
+                self.assertNotIn(interdit, texte)
+        self.assertEqual(self.lire_env(), f"{ENV_INITIAL}GENIUSPAY_WEBHOOK_SECRET={SECRET_WEBHOOK_CREE}\n")
+        self.assertEqual(self.questions, [])
+        # Aucun fichier provisoire ne reste à côté du .env.
+        self.assertEqual([fichier.name for fichier in self.dossier.iterdir()], [".env"])
+
+    def test_creer_webhook_formes_de_l_url(self):
+        for url in (URL_TUNNEL, f"{URL_TUNNEL}/", URL_WEBHOOK_TUNNEL):
+            with self.subTest(url):
+                self.faux.appels.clear()
+                self.ecrire_env(ENV_INITIAL)
+                self.lancer("creer-webhook", "--url", url)
+                self.assertEqual(self.faux.appels[0][2]["url"], URL_WEBHOOK_TUNNEL)
+        self.faux.appels.clear()
+        self.ecrire_env(ENV_INITIAL)
+        refusees = {
+            "http": "http://essai-anitche.trycloudflare.com",
+            "sans schéma": "essai-anitche.trycloudflare.com",
+            "autre chemin": f"{URL_TUNNEL}/api/",
+            "paramètres": f"{URL_TUNNEL}/?a=1",
+            "hôte hors ALLOWED_HOSTS": "https://exemple.test",
+        }
+        for nom, url in refusees.items():
+            with self.subTest(nom), self.assertRaises(CommandError):
+                self.lancer("creer-webhook", "--url", url)
+        self.assertEqual(self.faux.appels, [])
+        self.assertEqual(self.lire_env(), ENV_INITIAL)
+
+    def test_creer_webhook_variable_deja_definie_demande_confirmation(self):
+        existant = f"{ENV_INITIAL}GENIUSPAY_WEBHOOK_SECRET=whsec_ancien\nFRONTEND_BASE_URL=http://localhost:5173\n"
+        for nom, reponse in {"non": "n", "vide": "", "autre": "yes", "sans terminal": EOFError()}.items():
+            with self.subTest(nom):
+                self.ecrire_env(existant)
+                with self.assertRaises(CommandError) as refus:
+                    self.lancer("creer-webhook", "--url", URL_TUNNEL, reponse=reponse)
+                self.assertNotIn("whsec_", str(refus.exception))
+                self.assertEqual(self.lire_env(), existant)
+        # Refusé avant tout appel : aucun webhook créé dont le secret serait perdu.
+        self.assertEqual(self.faux.appels, [])
+        for reponse in ("o", " OUI "):
+            with self.subTest(reponse):
+                self.ecrire_env(existant)
+                sortie = self.lancer("creer-webhook", "--url", URL_TUNNEL, reponse=reponse)
+                self.assertEqual(len(self.questions), 1)
+                self.assertNotIn("whsec_", self.questions[0] + sortie)
+                self.assertEqual(self.lire_env(), (
+                    f"{ENV_INITIAL}GENIUSPAY_WEBHOOK_SECRET={SECRET_WEBHOOK_CREE}\n"
+                    "FRONTEND_BASE_URL=http://localhost:5173\n"
+                ))
+
+    def test_creer_webhook_variable_vide_doublon_et_fins_de_ligne(self):
+        # Variable sans valeur : pas de confirmation. Doublon retiré, CRLF et
+        # dernière ligne sans fin de ligne conservés.
+        self.ecrire_env("A=1\r\nGENIUSPAY_WEBHOOK_SECRET=\r\nB=2\r\nexport GENIUSPAY_WEBHOOK_SECRET = ''\r\nC=3")
+        self.lancer("creer-webhook", "--url", URL_TUNNEL)
+        self.assertEqual(self.lire_env(), f"A=1\r\nGENIUSPAY_WEBHOOK_SECRET={SECRET_WEBHOOK_CREE}\r\nB=2\r\nC=3")
+        self.ecrire_env("A=1")
+        self.lancer("creer-webhook", "--url", URL_TUNNEL)
+        self.assertEqual(self.lire_env(), f"A=1\nGENIUSPAY_WEBHOOK_SECRET={SECRET_WEBHOOK_CREE}\n")
+
+    def test_creer_webhook_secret_cherche_dans_la_reponse(self):
+        trouves = {
+            "autre nom de champ": {"id": "wh_1", "signing_secret": SECRET_WEBHOOK_CREE},
+            "objet imbriqué": {"webhook": {"id": 5, "url": URL_WEBHOOK_TUNNEL, "secret": SECRET_WEBHOOK_CREE}},
+            "champ inconnu de forme whsec_": {"id": 5, "cle_de_signature": SECRET_WEBHOOK_CREE},
+        }
+        for nom, reponse in trouves.items():
+            with self.subTest(nom):
+                self.ecrire_env(ENV_INITIAL)
+                self.faux.reponse_webhook = reponse
+                sortie = self.lancer("creer-webhook", "--url", URL_TUNNEL)
+                self.assertNotIn(SECRET_WEBHOOK_CREE, sortie)
+                self.assertIn(f"GENIUSPAY_WEBHOOK_SECRET={SECRET_WEBHOOK_CREE}\n", self.lire_env())
+        absents = {
+            "aucun secret": {"id": 9, "url": URL_WEBHOOK_TUNNEL, "jeton": "abc"},
+            "secret sur deux lignes": {"id": 9, "secret": "whsec_a\nAUTRE=1"},
+            "secret avec espace": {"id": 9, "secret": "whsec_a b"},
+        }
+        for nom, reponse in absents.items():
+            with self.subTest(nom):
+                self.ecrire_env(ENV_INITIAL)
+                self.faux.reponse_webhook = reponse
+                with self.assertRaises(CommandError) as refus:
+                    self.lancer("creer-webhook", "--url", URL_TUNNEL)
+                # Noms des champs reçus seulement, jamais leurs valeurs.
+                self.assertIn("id 9", str(refus.exception))
+                self.assertIn("champs reçus", str(refus.exception))
+                self.assertNotIn("whsec_", str(refus.exception))
+                self.assertNotIn("abc", str(refus.exception))
+                self.assertEqual(self.lire_env(), ENV_INITIAL)
+
+    def test_creer_webhook_refus_de_geniuspay_ou_env_absent(self):
+        for panne in ((401, erreur_geniuspay("UNAUTHORIZED")), (422, erreur_geniuspay("VALIDATION_ERROR")),
+                      requests.ConnectionError(f"{CLE_GENIUSPAY} {SECRET_GENIUSPAY}")):
+            with self.subTest(panne=panne):
+                self.faux.panne = panne
+                with self.assertLogs("apps.paiements", "ERROR") as journaux, self.assertRaises(CommandError) as refus:
+                    self.lancer("creer-webhook", "--url", URL_TUNNEL)
+                for interdit in (CLE_GENIUSPAY, SECRET_GENIUSPAY):
+                    self.assertNotIn(interdit, str(refus.exception) + "\n".join(journaux.output))
+                self.assertEqual(self.lire_env(), ENV_INITIAL)
+        self.faux.panne = None
+        self.faux.appels.clear()
+        self.env.unlink()
+        with self.assertRaises(CommandError) as refus:
+            self.lancer("creer-webhook", "--url", URL_TUNNEL)
+        self.assertIn(".env introuvable", str(refus.exception))
+        self.assertEqual(self.faux.appels, [])
+        self.assertFalse(self.env.exists())
+
+    # --- payer ------------------------------------------------------------------
+
+    def test_payer_passe_par_le_vrai_checkout_et_le_vrai_service(self):
+        with mock.patch.object(services, "initier_paiement", wraps=services.initier_paiement) as initier:
+            sortie, paiement = self.payer_par_la_commande(500)
+        initier.assert_called_once()
+        (methode, chemin, corps, _), = self.faux.appels
+        self.assertEqual((methode, chemin), ("POST", "/payments"))
+        self.assertEqual((corps["amount"], corps["metadata"]), (500, {"reference": paiement.reference}))
+        self.assertEqual(corps["customer"], {
+            "name": "Client Essai", "email": "client.essai-geniuspay@essai.anitche.test", "country": "CI",
+        })
+        commande = paiement.commande
+        self.assertEqual(
+            (paiement.fournisseur, paiement.statut, paiement.montant, paiement.transaction_id_externe),
+            ("geniuspay", "en_attente", Decimal("500"), "MTX-FAUX000001"),
+        )
+        # Commande du vrai checkout : livraison offerte par la boutique de
+        # test (le montant payé est le prix de l'article), stock décrémenté.
+        self.assertEqual((commande.status, commande.montant_total, commande.frais_livraison, commande.livraison_offerte),
+                         ("creee", Decimal("500"), Decimal("0"), True))
+        article = CommandeItem.objects.get(commande=commande)
+        self.assertEqual(Stock.objects.get(variante=article.variante).quantite_disponible, 99)
+        self.assertFalse(PanierItem.objects.exists())
+        self.assertFalse(paiement.client.has_usable_password())
+        for attendu in (paiement.reference, "MTX-FAUX000001", "https://pay.geniuspay.test/checkout/MTX-FAUX000001",
+                        commande.numero_commande, "500 XOF"):
+            self.assertIn(attendu, sortie)
+        self.assertTrue(paiement.reference.startswith("PAY-"))
+        for interdit in (CLE_GENIUSPAY, SECRET_GENIUSPAY, SECRET_WEBHOOK_GENIUSPAY):
+            self.assertNotIn(interdit, sortie)
+
+    def test_payer_reutilise_les_donnees_de_test(self):
+        _, premier = self.payer_par_la_commande(500)
+        comptes = set(Utilisateur.objects.values_list("email", flat=True))
+        Stock.objects.update(quantite_disponible=0)
+        _, second = self.payer_par_la_commande(750, "--telephone", "+2250700000009")
+        self.assertEqual(set(Utilisateur.objects.values_list("email", flat=True)), comptes)
+        self.assertEqual((Boutique.objects.count(), Produit.objects.count(), VarianteProduit.objects.count()), (1, 1, 1))
+        self.assertNotEqual(premier.commande_id, second.commande_id)
+        self.assertEqual((second.montant, second.client_id), (Decimal("750"), premier.client_id))
+        self.assertEqual(self.faux.appels[-1][2]["customer"]["phone"], "+2250700000009")
+        self.assertEqual(Stock.objects.get().quantite_disponible, 99)
+
+    def test_payer_refus(self):
+        with self.assertRaises(CommandError) as refus:
+            self.lancer("payer", "--montant", "199")
+        self.assertIn("200 FCFA", str(refus.exception))
+        self.assertFalse(Utilisateur.objects.exists() or Commande.objects.exists())
+        self.assertEqual(self.faux.appels, [])
+        self.faux.panne = (401, erreur_geniuspay("UNAUTHORIZED"))
+        with self.assertLogs("apps.paiements", "ERROR"), self.assertRaises(CommandError) as refus:
+            self.lancer("payer", "--montant", "500")
+        self.assertIn("Initiation refusée par GeniusPay", str(refus.exception))
+        self.assertNotIn(SECRET_GENIUSPAY, str(refus.exception))
+        self.assertEqual(Paiement.objects.get().statut, "echoue")
+
+    # --- etat -------------------------------------------------------------------
+
+    def test_etat_puis_reconciliation(self):
+        _, paiement = self.payer_par_la_commande(500)
+        commande = paiement.commande
+        sortie = self.lancer("etat", "--reference", paiement.reference)
+        self.assertIn(f"Paiement {paiement.reference} : en_attente, 500 XOF, référence GeniusPay MTX-FAUX000001", sortie)
+        self.assertIn(f"Commande {commande.numero_commande} : creee", sortie)
+        self.assertIn("Aucune notification journalisée", sortie)
+        self.assertIn("statut en_attente, montant 500, devise XOF", sortie)
+        self.assertEqual(self.verifications(), ["/payments/MTX-FAUX000001"])
+
+        # Sans --reconcilier, la vérification ne change rien, même encaissé.
+        self.encaisser(paiement)
+        sortie = self.lancer("etat", "--reference", paiement.reference)
+        self.assertIn("statut succes, montant 500, devise XOF", sortie)
+        self.assertEqual(self.statuts(paiement, commande), ("en_attente", "creee"))
+
+        with self.assertLogs("securite", "WARNING"):
+            sortie = self.lancer("etat", "--reference", paiement.reference, "--reconcilier")
+        self.assertIn("Réconciliation : issue succes, statut modifié.", sortie)
+        self.assertIn(f"Paiement {paiement.reference} : valide", sortie)
+        self.assertIn(f"Commande {commande.numero_commande} : confirmee", sortie)
+        self.assertEqual(self.statuts(paiement, commande), ("valide", "confirmee"))
+
+    def test_etat_montre_les_notifications_et_les_refus(self):
+        _, paiement = self.payer_par_la_commande(500)
+        self.encaisser(paiement)
+        self.assertEqual(self.poster(self.evenement(paiement=paiement)).status_code, 200)
+        sortie = self.lancer("etat", "--reference", paiement.reference)
+        self.assertIn(f"Paiement {paiement.reference} : valide", sortie)
+        self.assertIn("Notification payment.success : traite", sortie)
+        # metadata absente du GET : refus affiché, la commande se termine normalement.
+        self.encaisser(paiement, metadata=ABSENT)
+        sortie = self.lancer("etat", "--reference", paiement.reference)
+        self.assertIn("refusée (NotificationInvalide)", sortie)
+        self.assertIn("metadata", sortie)
+        with self.assertRaises(CommandError):
+            self.lancer("etat", "--reference", "PAY-INCONNU")
+        Paiement.objects.filter(pk=paiement.pk).update(fournisseur="simule")
+        with self.assertRaises(CommandError):
+            self.lancer("etat", "--reference", paiement.reference)
+
+    # --- Journal de l'essai et réglages de dev ----------------------------------
+
+    def test_journal_info_de_la_notification_et_de_la_verification(self):
+        _, paiement = self.payer_par_la_commande(500)
+        self.encaisser(paiement)
+        corps = json_brut(self.evenement(paiement=paiement))
+        signature = signature_geniuspay(corps, MAINTENANT_GENIUSPAY)
+        with self.assertLogs("apps.paiements.fournisseurs.geniuspay", "INFO") as journaux:
+            reponse = self.poster(corps, HTTP_X_WEBHOOK_EVENT="payment.success", HTTP_X_WEBHOOK_ENVIRONMENT="sandbox")
+        self.assertEqual(reponse.status_code, 200)
+        journal = "\n".join(journaux.output)
+        for attendu in (
+            f"Notification GeniusPay reçue : {len(corps)} octets, événement annoncé « payment.success », "
+            "environnement annoncé « sandbox », signature hexadécimale (64 caractères).",
+            "Notification GeniusPay : signature valide (encodage hex).",
+            "Notification GeniusPay payment.success : champs [api_version, created_at, data, event, id, timestamp] ; "
+            "data [amount, currency, customer_name, customer_phone, environment, fees,",
+            "amount de type Decimal ; référence « MTX-FAUX000001 ».",
+            "GeniusPay GET /payments/MTX-FAUX000001 : HTTP 200.",
+            f"Vérification GeniusPay de MTX-FAUX000001 (paiement {paiement.reference}) : statut « completed », "
+            "amount de type int, devise « XOF », environnement « sandbox », metadata [reference].",
+        ):
+            self.assertIn(attendu, journal)
+        for interdit in (signature, SECRET_WEBHOOK_GENIUSPAY, CLE_GENIUSPAY, SECRET_GENIUSPAY, "Jean Kouassi",
+                         "+2250748123456", "essai.anitche.test"):
+            self.assertNotIn(interdit, journal)
+
+    def test_journal_info_formes_de_signature_et_webhook_test(self):
+        _, paiement = self.payer_par_la_commande(500)
+        formes = {
+            "A" * 43 + "=": "signature base64 probable (44 caractères).",
+            "sha256=" + "a" * 64: "signature de forme inconnue (71 caractères).",
+            ABSENT: "signature absente.",
+        }
+        for signature, attendu in formes.items():
+            with self.subTest(attendu), self.assertLogs("apps.paiements", "INFO") as journaux, \
+                    self.assertLogs("securite", "WARNING"):
+                reponse = self.poster(self.evenement(paiement=paiement), HTTP_X_WEBHOOK_SIGNATURE=signature)
+                self.assertEqual(reponse.status_code, 401)
+                self.assertIn(attendu, journaux.output[0])
+                self.assertNotIn("signature valide", "\n".join(journaux.output))
+        essai = {"id": str(uuid.uuid4()), "event": "webhook.test", "data": {"message": "Test webhook"}}
+        with self.assertLogs("apps.paiements", "INFO") as journaux:
+            self.assertEqual(self.poster(essai).status_code, 200)
+        self.assertIn("Notification GeniusPay webhook.test : champs [data, event, id] ; data [message] ; "
+                      "amount de type NoneType", "\n".join(journaux.output))
+
+    def test_reglages_de_dev_hotes_du_tunnel_et_journal(self):
+        script = (
+            "import json\n"
+            "from config.settings import dev\n"
+            "print(json.dumps({'hotes': dev.ALLOWED_HOSTS, 'debug': dev.DEBUG,\n"
+            "                  'journal': dev.LOGGING['loggers']['apps.paiements']['level'],\n"
+            "                  'racine': dev.LOGGING['root']['level']}))\n"
+        )
+        locaux = ["localhost", "127.0.0.1", "anitche-backend"]
+        cas = {
+            "": locaux,
+            "essai-anitche.trycloudflare.com": [*locaux, "essai-anitche.trycloudflare.com"],
+            ".trycloudflare.com, autre.exemple.test": [*locaux, ".trycloudflare.com", "autre.exemple.test"],
+        }
+        for valeur, attendus in cas.items():
+            with self.subTest(valeur):
+                env = {**os.environ, "DJANGO_SETTINGS_MODULE": "config.settings.dev", "ALLOWED_HOSTS_DEV": valeur}
+                resultat = subprocess.run([sys.executable, "-c", script], cwd=Path(settings.BASE_DIR), env=env,
+                                          capture_output=True, text=True)
+                self.assertEqual(resultat.returncode, 0, resultat.stderr[-500:])
+                self.assertEqual(json.loads(resultat.stdout.strip().splitlines()[-1]),
+                                 {"hotes": attendus, "debug": True, "journal": "INFO", "racine": "WARNING"})
+        # base.py, dont héritent prod.py, ci.py et test.py : aucun journal INFO du module.
+        self.assertNotIn("apps.paiements", settings.LOGGING["loggers"])
+        prod = (Path(settings.BASE_DIR) / "config" / "settings" / "prod.py").read_text(encoding="utf-8")
+        self.assertNotIn("ALLOWED_HOSTS_DEV", prod)
 
 
 # =====================================================================
@@ -2149,7 +4198,8 @@ class ReconciliationReponsesCinetPayTests(ReponsesCinetPay, DonneesReconciliatio
 # =====================================================================
 
 class ConfigurationProductionTests(APITestCase):
-    """prod.py refuse le fournisseur simulé, une clé de sandbox ou l'absence de clés."""
+    """prod.py refuse tout fournisseur hors de sa liste fermée (dont le
+    simulé), une clé de sandbox ou l'absence de clés."""
 
     def importer_prod(self, script="import config.settings.prod", **variables):
         env = {
@@ -2160,14 +4210,18 @@ class ConfigurationProductionTests(APITestCase):
             "ALLOWED_HOSTS": "api.anitche.com",
             "CORS_ALLOWED_ORIGINS": "https://anitche.com",
             "BACKEND_BASE_URL": "https://api.anitche.com",
-            "PAIEMENT_FOURNISSEUR": "cinetpay",
-            "CINETPAY_API_KEY": "sk_live_cle",
-            "CINETPAY_API_PASSWORD": "mdp",
+            "PAIEMENT_FOURNISSEUR": "geniuspay",
+            "GENIUSPAY_API_KEY": "sk_live_cle",
+            "GENIUSPAY_API_SECRET": "ss_live_cle",
+            "GENIUSPAY_WEBHOOK_SECRET": "whsec_cle",
+            "GENIUSPAY_ENVIRONNEMENT": "live",
             "EMAIL_BACKEND": "django.core.mail.backends.smtp.EmailBackend",
             "EMAIL_HOST": "smtp.exemple.test",
             "EMAIL_HOST_USER": "identifiant-factice",
             "EMAIL_HOST_PASSWORD": "mot-de-passe-factice",
             "DEFAULT_FROM_EMAIL": "ANITCHE <no-reply@anitche.com>",
+            "REDIS_URL": "redis://:rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr@redis:6379/0",
+            "REDIS_CACHE_URL": "redis://:rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr@redis:6379/1",
             **variables,
         }
         return subprocess.run(
@@ -2214,8 +4268,9 @@ class ConfigurationProductionTests(APITestCase):
     def test_refus(self):
         cas = {
             "simulé": {"PAIEMENT_FOURNISSEUR": "simule"},
-            "sandbox": {"CINETPAY_API_KEY": "sk_test_cle"},
-            "sans clé": {"CINETPAY_API_KEY": ""},
+            "sandbox": {"GENIUSPAY_ENVIRONNEMENT": "sandbox", "GENIUSPAY_API_KEY": "sk_sandbox_cle",
+                        "GENIUSPAY_API_SECRET": "ss_sandbox_cle"},
+            "sans clé": {"GENIUSPAY_API_KEY": ""},
             "http": {"BACKEND_BASE_URL": "http://api.anitche.com"},
         }
         for libelle, variables in cas.items():
@@ -2224,9 +4279,41 @@ class ConfigurationProductionTests(APITestCase):
                 self.assertNotEqual(resultat.returncode, 0)
                 self.assertIn("ImproperlyConfigured", resultat.stderr)
 
+    def test_fournisseur_en_liste_fermee(self):
+        """Seuls les fournisseurs listés dans prod.py démarrent : ni le
+        simulé, ni une valeur inconnue (qui passerait sinon tous les
+        contrôles de clés). Les refus propres à geniuspay (clés,
+        environnement, staging) : config.tests_settings_prod."""
+        cas = {
+            "simulé": "simule",
+            "inconnu": "paydunya",
+            "vide": "",
+            "casse différente": "CinetPay",
+            "espace": "cinetpay ",
+            "cinetpay": "cinetpay",
+        }
+        for libelle, valeur in cas.items():
+            with self.subTest(libelle):
+                resultat = self.importer_prod(PAIEMENT_FOURNISSEUR=valeur)
+                self.assertNotEqual(resultat.returncode, 0)
+                self.assertIn("ImproperlyConfigured", resultat.stderr)
+                self.assertIn("PAIEMENT_FOURNISSEUR", resultat.stderr)
+
+    def test_fournisseur_absent_de_l_environnement_refuse(self):
+        # base.py : « simule » par défaut. Sans fichier .env, comme dans le conteneur.
+        script = (
+            "import os, decouple\n"
+            "decouple.config = decouple.Config(decouple.RepositoryEmpty())\n"
+            "os.environ.pop('PAIEMENT_FOURNISSEUR')\n"
+            "import config.settings.prod\n"
+        )
+        resultat = self.importer_prod(script=script)
+        self.assertNotEqual(resultat.returncode, 0)
+        self.assertIn("PAIEMENT_FOURNISSEUR", resultat.stderr)
+
     def test_refus_url_de_notification_injoignable(self):
         cas = {
-            # Notification CinetPay rejetée par Django (400 DisallowedHost).
+            # Notification rejetée par Django (400 DisallowedHost).
             "hôte hors ALLOWED_HOSTS": ({"BACKEND_BASE_URL": "https://anitche.com"}, "doit figurer dans ALLOWED_HOSTS"),
             # « /x/api/... » part vers le frontend ; « //api/... » dépend de la
             # fusion des « / » par nginx.

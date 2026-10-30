@@ -14,10 +14,14 @@ from rest_framework.exceptions import APIException, PermissionDenied, Validation
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework import status
 
-from .models import Commande, GroupeCommande, CommandeItem
+from .models import Commande, CommandeHistorique, GroupeCommande, CommandeItem
 from .serializers import (
+    MESSAGE_ADRESSE_EN_DOUBLE,
+    MESSAGE_ADRESSE_OBLIGATOIRE,
     AdresseLivraisonSerializer,
     CommandeAdministrationSerializer,
+    CommandeHistoriqueAdministrationSerializer,
+    CommandeHistoriqueSerializer,
     CommandeDetailSerializer,
     CommandeSerializer,
     CommandeVendeurSerializer,
@@ -31,6 +35,7 @@ from .services import (
     TransitionImpossible,
     annuler_commande,
     calculer_checkout,
+    creer_commande,
     est_payee,
     passer_en_preparation,
     trouver_coupon,
@@ -47,6 +52,7 @@ from apps.livraison.frais import TarifIntrouvable
 from apps.notifications.services import alerter_stock_bas
 from apps.paiements.frais import BaremeIntrouvable, bareme_en_vigueur, calculer_frais_ligne
 from apps.utilisateurs.permissions import EmailVerifie
+from apps.utilisateurs.services import adresse_du_checkout
 from apps.vendeurs.permissions import BoutiqueNonSuspendue, EstAdministrateur, EstVendeurValide
 
 logger_securite = logging.getLogger('securite')
@@ -57,12 +63,40 @@ class ServiceIndisponible(APIException):
     default_detail = "La validation des commandes est momentanément indisponible."
 
 
+def adresse_du_corps(request):
+    """Adresse de livraison de la validation du panier : celle du carnet du
+    client (`adresse_id`) ou celle qu'il saisit (`adresse_livraison`), l'une
+    des deux. Contrôlée avant toute écriture ; 404 pour une adresse qui n'est
+    pas la sienne. La commande en garde une copie : rien ne la relie au carnet."""
+    saisie = request.data.get("adresse_livraison")
+    if "adresse_id" in request.data:
+        if saisie is not None:
+            raise ValidationError({"adresse_id": MESSAGE_ADRESSE_EN_DOUBLE})
+        try:
+            adresse_id = serializers.UUIDField().run_validation(request.data["adresse_id"])
+        except ValidationError as erreur:
+            raise ValidationError({"adresse_id": erreur.detail})
+        return adresse_du_checkout(request.user, adresse_id)
+
+    if saisie is None:
+        raise ValidationError({"adresse_livraison": MESSAGE_ADRESSE_OBLIGATOIRE})
+    adresse = AdresseLivraisonSerializer(data=saisie)
+    if not adresse.is_valid():
+        # Clés à points, comme la simulation : « adresse_livraison.latitude ».
+        raise ValidationError({"adresse_livraison": adresse.errors})
+    return adresse.validated_data
+
+
 @extend_schema(
     summary="Valider le panier (checkout)",
     description=(
         "Crée une commande par boutique (statut `creee`, à payer sous 30 minutes), décrémente le stock "
-        "et vide le panier. Mêmes montants que `simuler-frais/`. Stock insuffisant ou panier vide : "
-        "400 (`errors.non_field_errors`)."
+        "et vide le panier. Mêmes montants que `simuler-frais/`. L'adresse est une adresse du carnet du client "
+        "(`adresse_id`, 404 si elle n'est pas la sienne) OU une adresse saisie (`adresse_livraison`) : l'une des "
+        "deux. Dans les deux cas la commande en garde une copie, que le carnet ne modifie plus ensuite. "
+        "Stock insuffisant ou panier vide : "
+        "400 (`errors.non_field_errors`). Panier contenant un article de la boutique du client : 400, "
+        "`errors.code = [\"auto_achat_interdit\"]`, aucune commande créée."
     ),
     request=SimulerFraisSerializer,
     responses={201: CommandeSerializer(many=True), **erreurs(503)},
@@ -86,13 +120,7 @@ class ValiderPanierView(APIView):
         serializers.Serializer(data=request.data).is_valid(raise_exception=True)
 
         # Adresse de livraison obligatoire, validée avant toute écriture.
-        adresse = AdresseLivraisonSerializer(data=request.data.get("adresse_livraison"))
-        if request.data.get("adresse_livraison") is None:
-            raise ValidationError({"adresse_livraison": "L'adresse de livraison est obligatoire."})
-        if not adresse.is_valid():
-            # Clés à points, comme la simulation : « adresse_livraison.latitude ».
-            raise ValidationError({"adresse_livraison": adresse.errors})
-        adresse = adresse.validated_data
+        adresse = adresse_du_corps(request)
 
         panier = get_or_create_panier(request)
 
@@ -151,6 +179,8 @@ class ValiderPanierView(APIView):
                 livraison_quartier=adresse["quartier"],
                 livraison_point_de_repere=adresse["point_de_repere"],
                 livraison_telephone=adresse["telephone"],
+                livraison_destinataire=adresse.get("destinataire", ""),
+                livraison_indications=adresse.get("indications", ""),
                 livraison_latitude=adresse.get("latitude"),
                 livraison_longitude=adresse.get("longitude"),
             )
@@ -166,7 +196,8 @@ class ValiderPanierView(APIView):
                     logger_securite.error("Validation de panier impossible : aucun barème de frais en vigueur.")
                     raise ServiceIndisponible()
 
-                commande = Commande.objects.create(
+                commande = creer_commande(
+                    request.user,
                     groupe=groupe,
                     boutique=lot.boutique,
                     client=request.user,
@@ -222,7 +253,10 @@ class ValiderPanierView(APIView):
 
 @extend_schema(
     summary="Simuler les montants du checkout",
-    description="Aucune écriture : montants par commande (une par boutique) et totaux, recalculés à l'identique à la validation.",
+    description=(
+        "Aucune écriture : montants par commande (une par boutique) et totaux, recalculés à l'identique à la validation. "
+        "Mêmes refus que la validation, dont `errors.code = [\"auto_achat_interdit\"]` (article de la boutique du client)."
+    ),
     request=SimulerFraisSerializer,
     responses={200: SimulationCheckoutSerializer, **erreurs(503)},
 )
@@ -242,12 +276,14 @@ class SimulerFraisView(APIView):
     def post(self, request):
         entree = SimulerFraisSerializer(data=request.data)
         entree.is_valid(raise_exception=True)
+        if "adresse_id" in entree.validated_data:
+            adresse = adresse_du_checkout(request.user, entree.validated_data["adresse_id"])
+        else:
+            adresse = entree.validated_data["adresse_livraison"]
         panier = get_or_create_panier(request)
         try:
             coupon = trouver_coupon(entree.validated_data.get("coupon_code"))
-            checkout = calculer_checkout(
-                list(panier.items.avec_details()), entree.validated_data["adresse_livraison"], request.user, coupon,
-            )
+            checkout = calculer_checkout(list(panier.items.avec_details()), adresse, request.user, coupon)
         except CheckoutRefuse as refus:
             raise ValidationError(refus.detail)
         except TarifIntrouvable:
@@ -302,6 +338,31 @@ class CommandeDetailView(generics.RetrieveAPIView):
         return Commande.objects.filter(client=self.request.user).select_related("groupe").prefetch_related("article")
 
 
+class HistoriqueCommandeView(generics.ListAPIView):
+    """Historique des statuts d'une commande, du plus ancien au plus récent.
+    Même visibilité que le détail de l'espace concerné : 404 pour un tiers."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = CommandeHistoriqueSerializer
+
+    def commandes_visibles(self):
+        raise NotImplementedError
+
+    def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):  # génération du schéma OpenAPI
+            return CommandeHistorique.objects.none()
+        commande = get_object_or_404(self.commandes_visibles(), pk=self.kwargs["pk"])
+        return CommandeHistorique.objects.filter(commande=commande)
+
+
+@extend_schema(
+    summary="Historique des statuts d'une commande (client)",
+    description="Origine du changement (`source`) seulement : jamais le compte qui l'a fait. 404 pour la commande d'un autre client.",
+)
+class CommandeHistoriqueView(HistoriqueCommandeView):
+    def commandes_visibles(self):
+        return Commande.objects.filter(client=self.request.user)
+
+
 @extend_schema(
     summary="Annuler sa commande",
     description="Possible tant que la commande n'est pas en préparation (409 sinon).",
@@ -353,6 +414,17 @@ class CommandeVendeurDetailView(generics.RetrieveAPIView):
 
 
 @extend_schema(
+    summary="Historique des statuts d'une commande (vendeur)",
+    description="Origine du changement (`source`) seulement. 404 pour la commande d'une autre boutique.",
+)
+class CommandeVendeurHistoriqueView(HistoriqueCommandeView):
+    permission_classes = [IsAuthenticated, EstVendeurValide]
+
+    def commandes_visibles(self):
+        return commandes_du_vendeur(self.request.user)
+
+
+@extend_schema(
     summary="Passer une commande en préparation (vendeur)",
     description="`confirmee` → `preparation`. Boutique suspendue : seules les commandes payées (403 sinon).",
     request=None,
@@ -371,7 +443,7 @@ class PasserEnPreparationView(APIView):
         if commande.boutique.est_suspendue and not est_payee(commande):
             raise PermissionDenied(BoutiqueNonSuspendue.message)
         try:
-            passer_en_preparation(commande)
+            passer_en_preparation(commande, request.user)
         except TransitionImpossible as erreur:
             raise ErreurMetier(str(erreur), status.HTTP_409_CONFLICT)
         commande = commandes_du_vendeur(request.user).get(pk=commande.pk)
@@ -453,6 +525,19 @@ class CommandeAdministrationDetailView(generics.RetrieveAPIView):
 
     def get_queryset(self):
         return commandes_administration()
+
+
+@extend_schema(
+    summary="Historique des statuts d'une commande (administration)",
+    description="Comme pour le client, plus `auteur` : identifiant du compte à l'origine du changement (vide pour le système).",
+    responses={200: CommandeHistoriqueAdministrationSerializer(many=True)},
+)
+class CommandeAdministrationHistoriqueView(HistoriqueCommandeView):
+    permission_classes = [IsAuthenticated, EstAdministrateur]
+    serializer_class = CommandeHistoriqueAdministrationSerializer
+
+    def commandes_visibles(self):
+        return Commande.objects.all()
 
 
 @extend_schema(

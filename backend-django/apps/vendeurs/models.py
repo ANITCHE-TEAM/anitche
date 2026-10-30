@@ -92,6 +92,12 @@ class Boutique(models.Model):
         help_text="Livraison offerte au client : les frais sont déduits du reversement du vendeur.",
     )
 
+    # Avis publiés sur les produits de la boutique, et part des positifs
+    # (note de 4 ou 5) : base du pourcentage de la réputation. Écrits
+    # uniquement par apps.avis.services.recalculer_agregats.
+    nombre_avis = models.PositiveIntegerField(default=0, editable=False)
+    nombre_avis_positifs = models.PositiveIntegerField(default=0, editable=False)
+
     date_creation = models.DateTimeField(auto_now_add=True)
     date_mise_a_jour = models.DateTimeField(auto_now=True)
 
@@ -178,6 +184,12 @@ class Boutique(models.Model):
         verbose_name = "Boutique"
         verbose_name_plural = "Boutiques"
         ordering = ['nom']
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(nombre_avis_positifs__lte=models.F('nombre_avis')),
+                name='boutique_avis_positifs_coherents',
+            ),
+        ]
 
 
 def verifier_nom_boutique_disponible(nom, boutique_pk=None):

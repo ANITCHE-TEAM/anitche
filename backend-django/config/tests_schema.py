@@ -182,7 +182,7 @@ class SchemaOpenAPITests(SimpleTestCase):
 
     def test_tags_par_module_decrits(self):
         tags = {tag["name"]: tag["description"] for tag in self.schema["tags"]}
-        self.assertEqual(len(tags), 12)
+        self.assertEqual(len(tags), 14)
         for chemin, methodes in self.schema["paths"].items():
             for methode, operation in methodes.items():
                 if methode in ("get", "post", "put", "patch", "delete"):
@@ -211,14 +211,18 @@ class DocumentationInteractiveTests(TestCase):
             "ALLOWED_HOSTS": "api.anitche.com",
             "CORS_ALLOWED_ORIGINS": "https://anitche.com",
             "BACKEND_BASE_URL": "https://api.anitche.com",
-            "PAIEMENT_FOURNISSEUR": "cinetpay",
-            "CINETPAY_API_KEY": "sk_live_cle",
-            "CINETPAY_API_PASSWORD": "mdp",
+            "PAIEMENT_FOURNISSEUR": "geniuspay",
+            "GENIUSPAY_API_KEY": "sk_live_cle",
+            "GENIUSPAY_API_SECRET": "ss_live_cle",
+            "GENIUSPAY_WEBHOOK_SECRET": "whsec_cle",
+            "GENIUSPAY_ENVIRONNEMENT": "live",
             "EMAIL_BACKEND": "django.core.mail.backends.smtp.EmailBackend",
             "EMAIL_HOST": "smtp.exemple.test",
             "EMAIL_HOST_USER": "identifiant-factice",
             "EMAIL_HOST_PASSWORD": "mot-de-passe-factice",
             "DEFAULT_FROM_EMAIL": "ANITCHE <no-reply@anitche.com>",
+            "REDIS_URL": "redis://:rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr@redis:6379/0",
+            "REDIS_CACHE_URL": "redis://:rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr@redis:6379/1",
             "DOCUMENTATION_API_ACTIVE": "True",
         }
         script = (

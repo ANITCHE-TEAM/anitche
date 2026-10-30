@@ -26,7 +26,7 @@ Django gère le classique : un ORM puissant, un admin prêt à l'emploi, idéal 
 
 | Outil | Usage |
 |---|---|
-| Node.js (v18+) | Frontend React |
+| Node.js (22 ou plus, `frontend/.nvmrc`) + pnpm (via Corepack) | Frontend React |
 | Python (3.11+) | Django et FastAPI |
 | PostgreSQL | Base de données |
 | Redis | Cache + tâches en arrière-plan (Celery) |
@@ -37,18 +37,23 @@ Django gère le classique : un ORM puissant, un admin prêt à l'emploi, idéal 
 
 ```
 anitche/
-├── frontend/                    # Application React
-│   ├── src/
-│   │   ├── composants/
-│   │   │   ├── ui/              # boutons, cartes, champs réutilisables
-│   │   │   └── mise-en-page/    # header, footer, structure des pages
-│   │   ├── fonctionnalites/     # un dossier par epic du backlog
-│   │   ├── hooks/
-│   │   ├── services/            # appels API (axios)
-│   │   ├── store/                # état global (Zustand)
-│   │   ├── routes/
-│   │   └── App.jsx
-│   └── package.json
+├── frontend/                    # Monorepo pnpm + Turborepo (voir frontend/README.md)
+│   ├── apps/
+│   │   ├── client/              # portail client (5173)
+│   │   ├── vendeur/             # portail vendeur (5174)
+│   │   ├── livreur/             # portail livreur (5175)
+│   │   └── admin/               # portail admin (5176)
+│   │   # chaque portail : src/app, src/mises-en-page ; composants/, lib/ et
+│   │   # fonctionnalites/<module>/ s'ajoutent avec le premier usage (règles : packages/config)
+│   ├── packages/
+│   │   ├── config/              # tsconfig, ESLint (frontières d'import), Vite, Vitest
+│   │   ├── utils/               # montants FCFA, dates, téléphone, validations
+│   │   ├── api-client/          # types générés, clients HTTP, ErreurApi, QueryClient
+│   │   ├── auth/                # session, jetons, gardes (sans écran)
+│   │   └── ui/                  # primitives et thème partagés
+│   ├── package.json             # scripts racine (turbo)
+│   ├── pnpm-workspace.yaml      # workspaces et catalogue de versions
+│   └── turbo.json
 │
 ├── backend-django/               # Coeur métier
 │   ├── config/settings/{base,dev,prod,test,ci}.py
@@ -67,16 +72,18 @@ anitche/
 ├── infra/                          # Déploiement
 │   ├── docker-compose.yml
 │   ├── docker-compose.prod.yml
-│   ├── nginx/nginx.conf
+│   ├── nginx/nginx.conf          # modèle (variables DOMAIN…), rendu au démarrage ; un bloc HTTPS par nom d'hôte
+│   ├── nginx/serveur-commun.conf # /api/, /fast/, /media/ communs aux cinq noms (inclus)
+│   ├── nginx/entrypoint.d/       # contrôles et rechargement périodique de nginx
 │   ├── backup/                   # image de sauvegarde (restic + pg_dump)
-│   └── scripts/{deploy.sh, backup.sh, restore.sh}
+│   └── scripts/{deploy.sh, migrer.sh, backup.sh, restore.sh, init-lets-encrypt.sh}
 │
 ├── .github/workflows/               # Tests automatiques (CI/CD)
 │
 └── docs/                              # Backlog, specs, ce guide
 ```
 
-**Règle de nommage à retenir** : les dossiers métier sont en français, pour que toute l'équipe s'y retrouve — y compris design. Les fichiers de code (`models.py`, `views.py`, `ProductCard.jsx`) restent en anglais : c'est la convention universelle attendue par Django et React.
+**Règle de nommage à retenir** : les dossiers métier sont en français, pour que toute l'équipe s'y retrouve — y compris design. Les fichiers de code des frameworks (`models.py`, `views.py`) restent en anglais : c'est la convention attendue par Django. Côté frontend, les noms métier sont en français (`fonctionnalites/`, `mises-en-page/`, `montant.ts`).
 
 ## 4. Démarrer après le clone
 
@@ -86,7 +93,7 @@ anitche/
 docker compose -f infra/docker-compose.yml up
 ```
 
-- Frontend  → http://localhost:5173
+- Frontend  → http://localhost:5173 (portail client seulement ; vendeur, livreur et admin se lancent sur l'hôte avec `pnpm dev`)
 - Django    → http://localhost:8000
 - Swagger   → http://localhost:8000/api/docs/ (documentation de l'API Django, dev uniquement)
 - FastAPI   → http://localhost:8001/docs
@@ -104,7 +111,7 @@ Comptes, contenu et conventions de l'API (JWT, erreurs, pagination) : [`GUIDE_FR
 
 | Équipe | Commandes |
 |---|---|
-| Frontend | `cd frontend && npm install && npm run dev` |
+| Frontend | `cd frontend && corepack enable && pnpm install && pnpm dev` (détail et commandes : [`frontend/README.md`](../frontend/README.md)) |
 | Backend Django | `cd backend-django` → venv → `pip install -r requirements.txt` → `migrate` → `runserver` |
 | Backend FastAPI | `cd backend-fastapi` → venv → `pip install -r requirements.txt` → `uvicorn app.main:app --reload` |
 
@@ -143,15 +150,19 @@ Pour que les Runs Postman répétés (connexions, codes OTP, inscriptions, paiem
 ./infra/scripts/deploy.sh
 ```
 
-Toujours passer par `deploy.sh`, jamais par un `docker compose … up -d --build` direct : seul le script contrôle `infra/.env` et recrée le rôle PostgreSQL de FastAPI après les migrations. Étapes, arrêt à la première erreur :
+Toujours passer par `deploy.sh`, jamais par un `docker compose … up -d --build` direct : seul le script contrôle `infra/.env`, prépare le rôle PostgreSQL applicatif avant les migrations, sauvegarde la base avant de migrer et recrée le rôle de FastAPI après. Premier serveur, déploiement courant, retour arrière et ouverture de `/admin/` : [`DEPLOIEMENT.md`](./DEPLOIEMENT.md). Étapes, arrêt à la première erreur :
 
 1. `git pull origin main` ;
-2. `infra/scripts/check_prod_env.sh` : refuse tout ce que refuseraient au démarrage `config/settings/prod.py` (Django et Celery) et les réglages de production de FastAPI (origines CORS, `FRONTEND_BASE_URL`, `PUBLIC_BASE_URL`, `MEDIA_BASE_URL`), plus un `FASTAPI_DB_PASSWORD` de moins de 12 caractères ou pas seulement alphanumérique, et un `DB_PASSWORD` d'exemple ou de moins de 12 caractères. Il affiche toutes les erreurs (noms des variables, jamais leurs valeurs) puis sort en 1, et avertit si `infra/.env` n'a pas les droits 600 ;
+2. `infra/scripts/check_prod_env.sh` : refuse tout ce que refuseraient au démarrage `config/settings/prod.py` (Django et Celery) et les réglages de production de FastAPI (origines CORS, `FRONTEND_BASE_URL`, `PUBLIC_BASE_URL`), plus un `FASTAPI_DB_PASSWORD` de moins de 12 caractères ou pas seulement alphanumérique, un `DB_PASSWORD` ou un `DB_SUPERUSER_PASSWORD` d'exemple ou de moins de 12 caractères, deux mots de passe PostgreSQL identiques, et un `REDIS_PASSWORD` de moins de 32 caractères ou pas seulement alphanumérique. Il affiche toutes les erreurs (noms des variables, jamais leurs valeurs) puis sort en 1, et avertit si `infra/.env` n'a pas les droits 600 ;
 3. construction des images (`docker compose build`) ;
 4. démarrage de `db` et `redis` seuls, jusqu'à ce qu'ils soient prêts (`up -d --wait db redis`) ;
-5. migrations dans un conteneur ponctuel (`docker compose run --rm backend-django python manage.py migrate`) ;
-6. `infra/scripts/create_fastapi_readonly_role.sh` (avec `COMPOSE_FILE=infra/docker-compose.prod.yml`) : crée ou met à jour le rôle `anitche_fastapi_ro`, son mot de passe (`FASTAPI_DB_PASSWORD`) et ses droits. À chaque déploiement, car ses `GRANT` portent sur des tables et des vues créées par les migrations : une migration qui recrée une vue lui retire ses droits ;
-7. `up -d` de toute la pile, puis statut. `backend-django` relance `migrate` à son démarrage, sans effet après l'étape 5.
+5. `infra/scripts/create_app_role.sh` (avec `COMPOSE_FILE=infra/docker-compose.prod.yml`) : crée ou met à jour le rôle `anitche_app` (ni superutilisateur, ni `CREATEDB`, ni `CREATEROLE`), son mot de passe (`DB_PASSWORD`), et lui donne la base ; s'arrête si une table, vue ou séquence du schéma `public` appartient à un autre rôle. Django, Celery et les migrations se connectent avec ce rôle ; le superutilisateur `postgres` (`DB_SUPERUSER_PASSWORD`) ne sert qu'à ce script, à celui de FastAPI et aux sauvegardes ;
+6. `infra/scripts/migrer.sh` : compte les migrations en attente ; s'il y en a, sauvegarde la base et les médias (`infra/scripts/backup.sh`, dépôt restic initialisé au préalable, [`SAUVEGARDES.md`](./SAUVEGARDES.md) § 3) puis migre dans un conteneur ponctuel. **Une sauvegarde en échec arrête le déploiement sans rien migrer.** C'est le seul endroit où les migrations s'appliquent : la commande du conteneur `backend-django` ne migre jamais. `unaccent` et `pg_trgm` (catalogue 0004) sont des extensions « trusted », créées par le propriétaire de la base sans superutilisateur ;
+7. `infra/scripts/create_fastapi_readonly_role.sh` (avec `COMPOSE_FILE=infra/docker-compose.prod.yml`) : crée ou met à jour le rôle `anitche_fastapi_ro`, son mot de passe (`FASTAPI_DB_PASSWORD`) et ses droits. À chaque déploiement, car ses `GRANT` portent sur des tables et des vues créées par les migrations : une migration qui recrée une vue lui retire ses droits ;
+8. `up -d` de toute la pile ;
+9. nginx relit son modèle et se recharge sans coupure (`nginx -t` d'abord), puis statut.
+
+Durcissement de la pile : Redis exige `REDIS_PASSWORD` (`requirepass` dans un fichier de configuration monté, URL `redis://:<mot de passe>@redis:6379/<base>` pour Django, Celery et FastAPI ; `prod.py` refuse une URL sans lui) ; `backend-django`, `celery-worker`, `celery-beat` et `backend-fastapi` tournent sous l'utilisateur `app` (uid non nul), le code appartient à root en lecture seule, seuls `/app/media` et `/app/staticfiles` appartiennent à `app`.
 
 ### Emails en production
 
@@ -174,20 +185,23 @@ Variables de `infra/.env` (modèle commenté : `infra/.env.example`), transmises
 
 ### Composants
 
-- **Nginx** en reverse proxy devant tout, sur un seul domaine (`https://anitche.com`) : `/` vers le build React statique, `/api/` et `/admin/` vers Django avec le chemin complet (sauf la route interne `/api/utilisateurs/jeton/verification`, 404), `/fast/` vers FastAPI sans le préfixe `/fast` (WebSocket compris). Il sert lui-même `/static/` (volume `anitche_static`, rempli par `collectstatic`) et les seuls médias publics sous `/media/` (images des produits et catégories, logos et bannières ; volume `anitche_media` en lecture seule) ; tout autre chemin sous `/media/` répond 404. Détail et liste des dossiers : en-tête de `infra/nginx/nginx.conf`.
+- **Nginx** en reverse proxy devant tout, sur le domaine `DOMAIN` de `infra/.env` (`https://anitche.com` en production ; aucun nom écrit dans `infra/nginx/nginx.conf`, qui est un modèle) : Host et SNI inconnus refusés sans réponse, `/admin/` fermé sauf aux adresses de `ADMIN_ALLOWED_CIDRS` (vide par défaut), certificat renouvelé servi grâce à un rechargement toutes les `NGINX_RELOAD_INTERVAL` (6 h). `/` vers le portail React du nom d'hôte (client, vendeur, livreur ou admin : une image chacune, `frontend/Dockerfile.prod`), `/api/` et `/admin/` vers Django avec le chemin complet (sauf la route interne `/api/utilisateurs/jeton/verification`, 404), `/fast/` vers FastAPI sans le préfixe `/fast` (WebSocket compris). Il sert lui-même `/static/` (volume `anitche_static`, rempli par `collectstatic`) et les seuls médias publics sous `/media/` (images des produits et catégories, logos et bannières ; volume `anitche_media` en lecture seule) ; tout autre chemin sous `/media/` répond 404. Détail et liste des dossiers : en-tête de `infra/nginx/nginx.conf`.
 - **Gunicorn** pour Django, **Uvicorn** pour FastAPI, chacun dans son conteneur.
 - **PostgreSQL managé** si possible (Neon, Supabase, Railway) plutôt que self-hosté au début.
 - **Redis** pour Celery + cache.
-- `infra/scripts/deploy.sh` enchaîne contrôle, construction, migrations, rôle FastAPI et redémarrage (étapes ci-dessus).
+- `infra/scripts/deploy.sh` enchaîne contrôle, construction, sauvegarde et migrations, rôle FastAPI et redémarrage (étapes ci-dessus).
 - `infra/scripts/backup.sh` sauvegarde chaque nuit (cron, 3 h UTC) la base et les médias, chiffrés, sur un stockage S3 hors du serveur ; `infra/scripts/restore.sh` les restaure dans une base et un dossier vides. Mise en place, surveillance, exercice mensuel et garde des clés : [`SAUVEGARDES.md`](./SAUVEGARDES.md).
 
 ## 6. Aide-mémoire — où je mets quoi
 
 | Je veux ajouter... | Je vais dans... |
 |---|---|
-| Un composant réutilisable | `frontend/src/composants/ui/` |
-| Une fonctionnalité liée à un epic | `frontend/src/fonctionnalites/<nom-epic>/` |
-| Un appel API | `frontend/src/services/` |
+| Un composant réutilisable entre portails | `frontend/packages/ui/` (seulement quand une page l'exige) |
+| Un composant propre à un portail | `frontend/apps/<portail>/src/composants/` |
+| Une fonctionnalité liée à un epic | `frontend/apps/<portail>/src/fonctionnalites/<module>/` |
+| Un appel API | `frontend/apps/<portail>/src/fonctionnalites/<module>/api.ts`, via `@anitche/api-client` |
+| Un format, une validation locale (FCFA, date, téléphone) | `frontend/packages/utils/` |
+| Une règle de frontière d'import | `frontend/packages/config/eslint/frontieres.js` |
 | Une table liée aux commandes | `backend-django/apps/commandes/models.py` |
 | Une route de recherche rapide | `backend-fastapi/app/routeurs/recherche.py` |
 | Un script de déploiement | `infra/scripts/` |

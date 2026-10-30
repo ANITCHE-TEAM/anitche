@@ -1,0 +1,7 @@
+{
+  "extends": "@anitche/config/tsconfig/react-library.json",
+  "compilerOptions": {
+    "paths": { "@/*": ["./src/*"] }
+  },
+  "include": ["src", "*.config.ts", "eslint.config.js"]
+}

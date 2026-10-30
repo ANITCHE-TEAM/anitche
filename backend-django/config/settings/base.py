@@ -1,5 +1,5 @@
-import os
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 from decouple import Csv, config
 from celery.schedules import crontab
 
@@ -43,11 +43,13 @@ INSTALLED_APPS = [
     'apps.paiements',
     'apps.livraison',
     'apps.retours',
+    'apps.avis',
     'apps.fidelite',
     'apps.vendeurs',
     'apps.notifications',
     'apps.support',
     'apps.passeport_qr',
+    'apps.statistiques',
 ]
 
 MIDDLEWARE = [
@@ -134,7 +136,7 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
-# Ça reste dans base.py et non dev.py : la config en elle-même (où pointent les fichiers) ne change pas entre dev et prod, seule la façon de servir ces fichiers change (config/urls.py en DEBUG). En prod, c'est Nginx qui sert les médias publics (infra/nginx/nginx.conf) — pas Django.
+# Ça reste dans base.py et non dev.py : la config en elle-même (où pointent les fichiers) ne change pas entre dev et prod, seule la façon de servir ces fichiers change (config/urls.py en DEBUG). En prod, c'est Nginx qui sert les médias publics (infra/nginx/serveur-commun.conf) — pas Django.
 
 
 
@@ -228,6 +230,14 @@ REST_FRAMEWORK = {
         # plus d'une par commande) et photos justificatives (5 par demande).
         'retour_creation': '10/hour',
         'retour_photo': '30/hour',
+        # Avis, par utilisateur : publication (un avis par produit acheté,
+        # donc rarement plus de quelques-uns par commande) et écritures
+        # suivantes (modification, suppression).
+        'avis_creation': '10/hour',
+        'avis_ecriture': '30/hour',
+        # Signalement d'avis, par utilisateur : une lecture attentive en
+        # produit quelques-uns, au-delà c'est du harcèlement de la modération.
+        'avis_signalement': '20/hour',
         # Support, par utilisateur : tickets, messages d'un fil de discussion
         # et pièces jointes (5 par message au plus).
         'support_ticket': '10/hour',
@@ -309,15 +319,18 @@ SPECTACULAR_SETTINGS = {
         {'name': 'Paiements', 'description': "Paiement en ligne (mobile money, carte), annulation d'un paiement en attente ; reversements vendeur ; remboursements, reversements et barèmes de frais (administration). Les notifications des fournisseurs (webhooks) ne figurent pas ici."},
         {'name': 'Livraison', 'description': "Tarifs par commune, suivi selon le rôle (client, livreur, vendeur, administration), code de livraison, contestation, assignation et gestion des livreurs."},
         {'name': 'Retours', 'description': "Demandes de retour (commande livrée, 7 jours), photos justificatives, traitement par la boutique ou l'administration."},
+        {'name': 'Avis', 'description': "Avis d'un client sur un produit reçu (note de 1 à 5, 60 jours après la livraison, un avis par produit) : articles à noter, mes avis, modification et suppression par l'auteur."},
         {'name': 'Fidélité', 'description': "Compte de points, gains en attente, transactions, conversion de points en coupon, vérification d'un code promo."},
         {'name': 'Notifications', 'description': "Notifications de l'utilisateur connecté, compteur de non lues, préférences d'envoi par email."},
         {'name': 'Support', 'description': "Tickets, messages, pièces jointes et notation ; file et assignation pour l'équipe support."},
         {'name': 'Passeports QR', 'description': "Passeports d'authenticité : vérification publique d'un QR, gestion par le vendeur."},
+        {'name': 'Statistiques', 'description': "Statistiques en lecture seule : ventes de la boutique du vendeur, activité de la plateforme pour l'administration, sur une période en Africa/Abidjan."},
     ],
     # Noms stables des énumérations dont le nom de champ revient dans
     # plusieurs modèles (sans eux : StatusC4bEnum, Statut8cbEnum...).
     'ENUM_NAME_OVERRIDES': {
         'StatutCommandeEnum': 'apps.commandes.models.Commande.Status',
+        'SourceEnum': 'apps.commandes.models.CommandeHistorique.Source',
         'StatutLivraisonEnum': 'apps.livraison.models.Livraison.Status',
         'StatutContestationEnum': 'apps.livraison.models.ContestationLivraison.Statut',
         'StatutPaiementEnum': 'apps.paiements.models.Paiement.Statut',
@@ -327,9 +340,16 @@ SPECTACULAR_SETTINGS = {
         'CanalReversementEnum': 'apps.paiements.models.Reversement.Canal',
         'StatutRetourEnum': 'apps.retours.models.DemandeRetour.Statut',
         'MotifRetourEnum': 'apps.retours.models.DemandeRetour.Motif',
+        'ActionRetourEnum': 'apps.retours.services.ACTIONS_UTILISATEUR',
+        'SourceHistoriqueRetourEnum': 'apps.retours.models.RetourHistorique.Source',
         'StatutGainFideliteEnum': 'apps.fidelite.models.GainFidelite.Statut',
         'StatutTicketEnum': 'apps.support.models.SupportTicket.Status',
         'CanalNotificationEnum': 'apps.notifications.models.Notification.Canal',
+        'AvisStatutEnum': 'apps.avis.models.Avis.Statut',
+        'StatutSignalementAvisEnum': 'apps.avis.models.SignalementAvis.Statut',
+        'MotifSignalementAvisEnum': 'apps.avis.models.SignalementAvis.Motif',
+        'MethodeEnum': 'apps.paiements.models.Paiement.Methode',
+        'MethodeConnexionEnum': 'apps.utilisateurs.models.MethodeConnexion',
     },
     # Versions figées (drf-spectacular charge sinon « @latest » depuis le
     # CDN) : même interface pour toute l'équipe, pas de mise à jour subie.
@@ -387,6 +407,13 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'apps.paiements.tasks.reconcilier_paiements',
         'schedule': crontab(minute='*/10'),
     },
+    # Notifications de transfert perdues : état des reversements en cours
+    # redemandé au fournisseur, alertes de blocage. Décalée de 5 minutes de
+    # la réconciliation des paiements.
+    'paiements-reconcilier-reversements': {
+        'task': 'apps.paiements.tasks.reconcilier_reversements',
+        'schedule': crontab(minute='5-59/10'),
+    },
     # Délai de rétractation écoulé : reversements aux vendeurs disponibles.
     'paiements-rendre-reversements-disponibles': {
         'task': 'apps.paiements.tasks.rendre_reversements_disponibles',
@@ -397,24 +424,44 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'apps.fidelite.tasks.crediter_points_echus',
         'schedule': crontab(minute=15),
     },
+    # Retours : escalade à la modération sans réponse du vendeur, refus non
+    # contestés rendus définitifs, rappels et alertes de délai.
+    'retours-appliquer-echeances': {
+        'task': 'apps.retours.tasks.appliquer_echeances_retours',
+        'schedule': crontab(minute='2-59/15'),
+    },
     'utilisateurs-purger-tokens-expires': {
         'task': 'apps.utilisateurs.tasks.purger_tokens_expires',
         'schedule': crontab(hour=3, minute=15),
     },
+    # Journal des connexions : lignes plus anciennes que
+    # JOURNAL_CONNEXIONS_RETENTION_JOURS supprimées.
+    'utilisateurs-purger-journal-connexions': {
+        'task': 'apps.utilisateurs.tasks.purger_journal_connexions',
+        'schedule': crontab(hour=3, minute=30),
+    },
 }
 
-# Cache Redis
-REDIS_URL = os.environ.get('REDIS_URL', 'redis://redis:6379/0')
+# Cache Redis : REDIS_CACHE_URL (base 1), lue comme REDIS_URL dans
+# l'environnement puis le .env. Absente, elle reprend REDIS_URL avec la base 1
+# à la place de son chemin, après découpage de l'URL : identifiants, hôte et
+# paramètres ne sont jamais réécrits. Le compose de production fixe les deux.
+REDIS_URL = config('REDIS_URL', default='redis://localhost:6379/0')
+REDIS_CACHE_URL = config('REDIS_CACHE_URL', default=urlunsplit(urlsplit(REDIS_URL)._replace(path='/1')))
 CACHES = {
     'default': {
         'BACKEND': 'django.core.cache.backends.redis.RedisCache',
-        'LOCATION': REDIS_URL.replace('/0', '/1'),
+        'LOCATION': REDIS_CACHE_URL,
         'TIMEOUT': 300,  # 5 minutes
     }
 }
 
 # Auth Google
 GOOGLE_OAUTH_CLIENT_ID = config('GOOGLE_OAUTH_CLIENT_ID', default='')
+
+# Journal des connexions (apps.utilisateurs) : durée de conservation des
+# lignes (IP et appareil sont des données personnelles), en jours.
+JOURNAL_CONNEXIONS_RETENTION_JOURS = config('JOURNAL_CONNEXIONS_RETENTION_JOURS', default=180, cast=int)
 
 # Chiffrement au repos de champs sensibles (DocumentKYC.numero_mobile_money,
 # Reversement.numero_destinataire)
@@ -437,25 +484,39 @@ FIELD_ENCRYPTION_KEYS = config('FIELD_ENCRYPTION_KEYS', default='', cast=Csv())
 
 # Paiements (apps.paiements, docs/MODULE_PAIEMENTS.md).
 # Fournisseur actif : 'simule' (dev, tests ; refusé en production) ou
-# 'cinetpay'. Aucun secret n'a de valeur par défaut ici : ils viennent de
+# 'geniuspay'. Aucun secret n'a de valeur par défaut ici : ils viennent de
 # l'environnement (docker-compose.prod.yml), comme FIELD_ENCRYPTION_KEYS.
 PAIEMENT_FOURNISSEUR = config('PAIEMENT_FOURNISSEUR', default='simule')
 # Secret HMAC des notifications du fournisseur simulé (dev.py en fournit un).
 PAIEMENT_SIMULE_SECRET = config('PAIEMENT_SIMULE_SECRET', default='')
-# CinetPay (API v1) : identifiants du compte marchand Côte d'Ivoire. L'URL
-# de l'API se déduit du préfixe de la clé (sk_test_ → sandbox).
-CINETPAY_API_KEY = config('CINETPAY_API_KEY', default='')
-CINETPAY_API_PASSWORD = config('CINETPAY_API_PASSWORD', default='')
-CINETPAY_API_URL = config('CINETPAY_API_URL', default='')
-CINETPAY_TIMEOUT = config('CINETPAY_TIMEOUT', default=10, cast=int)
+# GeniusPay (API marchand v1, encaissement) : clés du compte, secret de
+# signature des webhooks (whsec_…) et environnement attendu, 'sandbox' ou
+# 'live', comparé à celui de chaque notification et de chaque réponse.
+# Vides : l'adaptateur n'ouvre, ne vérifie et n'accepte rien. L'URL de l'API
+# n'est à définir que pour remplacer celle de la documentation.
+GENIUSPAY_API_KEY = config('GENIUSPAY_API_KEY', default='')
+GENIUSPAY_API_SECRET = config('GENIUSPAY_API_SECRET', default='')
+GENIUSPAY_WEBHOOK_SECRET = config('GENIUSPAY_WEBHOOK_SECRET', default='')
+GENIUSPAY_ENVIRONNEMENT = config('GENIUSPAY_ENVIRONNEMENT', default='')
+GENIUSPAY_API_URL = config('GENIUSPAY_API_URL', default='')
+GENIUSPAY_TIMEOUT = config('GENIUSPAY_TIMEOUT', default=10, cast=int)
 # Adresse publique de l'API, pour les URL de notification envoyées au
-# fournisseur (120 caractères au plus chez CinetPay).
+# fournisseur.
 BACKEND_BASE_URL = config('BACKEND_BASE_URL', default='http://localhost:8000')
 # Reversement au vendeur : N jours après la livraison confirmée.
 REVERSEMENT_DELAI_RETRACTATION_JOURS = config('REVERSEMENT_DELAI_RETRACTATION_JOURS', default=7, cast=int)
 # Retours : une demande est possible jusqu'à N jours après la livraison
 # (apps.retours). Même valeur que le délai de rétractation par défaut.
 RETOUR_DELAI_JOURS = config('RETOUR_DELAI_JOURS', default=7, cast=int)
+# Circuit de décision des retours (heures calendaires) : réponse du vendeur
+# à partir de la demande (sinon escalade à la modération), puis contestation
+# d'un refus par le client (sinon le refus devient définitif).
+RETOUR_DELAI_REPONSE_VENDEUR_HEURES = config('RETOUR_DELAI_REPONSE_VENDEUR_HEURES', default=48, cast=int)
+RETOUR_DELAI_CONTESTATION_HEURES = config('RETOUR_DELAI_CONTESTATION_HEURES', default=72, cast=int)
+# Avis (apps.avis) : un client note un produit livré jusqu'à N jours après la
+# livraison, puis peut modifier son avis pendant N jours après sa publication.
+AVIS_DELAI_JOURS = config('AVIS_DELAI_JOURS', default=60, cast=int)
+AVIS_DELAI_MODIFICATION_JOURS = config('AVIS_DELAI_MODIFICATION_JOURS', default=14, cast=int)
 # Livraison : passages « en cours » possibles (première tentative comprise)
 # avant l'abandon par l'administration (commande annulée, remboursement).
 LIVRAISON_TENTATIVES_MAX = config('LIVRAISON_TENTATIVES_MAX', default=3, cast=int)
@@ -485,8 +546,17 @@ PAIEMENT_RECONCILIATION_AGE_MINUTES = config('PAIEMENT_RECONCILIATION_AGE_MINUTE
 # (succès tardif constaté chez le fournisseur).
 PAIEMENT_RECONCILIATION_FENETRE_HEURES = config('PAIEMENT_RECONCILIATION_FENETRE_HEURES', default=24, cast=int)
 # Paiements vérifiés au plus par exécution (un appel au fournisseur chacun,
-# CINETPAY_TIMEOUT au plus) : 50 x 10 s reste sous l'intervalle de 10 minutes.
+# GENIUSPAY_TIMEOUT au plus) : 50 x 10 s reste sous l'intervalle de 10 minutes.
 PAIEMENT_RECONCILIATION_LOT = config('PAIEMENT_RECONCILIATION_LOT', default=50, cast=int)
+
+# Réconciliation des reversements (apps.paiements.reversements) : transferts
+# « en cours » dont la notification n'arrive pas. Vérifiés après N minutes...
+REVERSEMENT_RECONCILIATION_AGE_MINUTES = config('REVERSEMENT_RECONCILIATION_AGE_MINUTES', default=10, cast=int)
+# ... au plus N par exécution (50 x GENIUSPAY_TIMEOUT reste sous l'intervalle de 10 minutes)...
+REVERSEMENT_RECONCILIATION_LOT = config('REVERSEMENT_RECONCILIATION_LOT', default=50, cast=int)
+# ... et alerte de l'administration pour un reversement encore en cours après
+# N heures (répétée toutes les 24 h tant qu'il le reste).
+REVERSEMENT_ALERTE_BLOCAGE_HEURES = config('REVERSEMENT_ALERTE_BLOCAGE_HEURES', default=2, cast=int)
 
 FRONTEND_BASE_URL = config('FRONTEND_BASE_URL', default='http://localhost:5173')
 

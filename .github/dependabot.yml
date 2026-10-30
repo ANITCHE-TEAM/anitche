@@ -99,6 +99,34 @@ updates:
         patterns:
           - "*"
 
+  # Images de base du Dockerfile de production des portails (node et
+  # nginx-unprivileged, épinglés sur des versions exactes).
+  - package-ecosystem: docker
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: UTC
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 3
+    labels:
+      - dependencies
+      - docker
+    commit-message:
+      prefix: "build(deps)"
+    # Node 25 et suivants ne fournissent plus corepack : le build pnpm du
+    # Dockerfile casse. Les montées majeures de node sont donc ignorées ; la
+    # montée vers Node 24 LTS se fait à la main.
+    # Levée : quand le Dockerfile installe pnpm sans corepack, ou quand une
+    # version LTS suivante de Node fournit à nouveau corepack, retirer cette
+    # entrée.
+    ignore:
+      - dependency-name: node
+        update-types:
+          - version-update:semver-major
+
   # Correctifs de sécurité seulement : une limite à 0 désactive les mises à
   # jour de version, pas les PR de sécurité. Les mises à jour de version
   # s'activent avec le monorepo pnpm.

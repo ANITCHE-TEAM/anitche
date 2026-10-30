@@ -770,9 +770,11 @@ class IsolationEtSuiviTests(DonneesLivraison, APITestCase):
         donnees = self.detail(self.client_user).data
         self.assertEqual(donnees["livreur"], {"prenom": "User", "telephone": None})
         self.assertEqual(donnees["date_livraison_estimee"], demain.isoformat())
-        # Point GPS : null, ce checkout n'en a pas (PositionLivraisonTests).
+        # Point GPS : null, ce checkout n'en a pas (PositionLivraisonTests) ;
+        # destinataire et indications vides, le client n'en a pas donné.
         self.assertEqual(donnees["adresse"], {"zone": "abidjan", "commune": "Cocody", "quartier": "Angré",
                                               "point_de_repere": "Face pharmacie", "telephone": "0700000000",
+                                              "destinataire": "", "indications": "",
                                               "latitude": None, "longitude": None})
         self.mettre_en_cours()
         self.assertEqual(self.detail(self.client_user).data["livreur"]["telephone"], "0102030405")
@@ -1002,9 +1004,9 @@ class ConcurrenceTests(DonneesLivraison, TransactionTestCase):
         code = self.code()
         original = services_commandes.synchroniser_depuis_livraison
 
-        def lent(commande, statut):
+        def lent(commande, statut, *arguments):
             time.sleep(0.3)  # la première requête garde le verrou un moment
-            return original(commande, statut)
+            return original(commande, statut, *arguments)
 
         barriere = threading.Barrier(2)
         resultats = {}

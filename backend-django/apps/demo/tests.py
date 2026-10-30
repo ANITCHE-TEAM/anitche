@@ -172,11 +172,11 @@ class SeedDemoRefusTests(TestCase):
     def test_refus_avec_les_settings_de_production(self):
         self.verifier_refus("settings de production")
 
-    @override_settings(DEBUG=True, PAIEMENT_FOURNISSEUR='cinetpay')
+    @override_settings(DEBUG=True, PAIEMENT_FOURNISSEUR='geniuspay')
     def test_refus_si_le_fournisseur_n_est_pas_simule(self):
         self.verifier_refus("fournisseur simulé")
 
-    @override_settings(DEBUG=True, PAIEMENT_FOURNISSEUR='cinetpay')
+    @override_settings(DEBUG=True, PAIEMENT_FOURNISSEUR='geniuspay')
     def test_refus_du_reset_ne_supprime_rien(self):
         Utilisateur.objects.create_user(
             email=donnees.CLIENT['email'], password='x', nom='D', prenom='C',
@@ -196,14 +196,18 @@ class SeedDemoAbsenteEnProductionTests(SimpleTestCase):
             "ALLOWED_HOSTS": "api.anitche.com",
             "CORS_ALLOWED_ORIGINS": "https://anitche.com",
             "BACKEND_BASE_URL": "https://api.anitche.com",
-            "PAIEMENT_FOURNISSEUR": "cinetpay",
-            "CINETPAY_API_KEY": "sk_live_cle",
-            "CINETPAY_API_PASSWORD": "mdp",
+            "PAIEMENT_FOURNISSEUR": "geniuspay",
+            "GENIUSPAY_API_KEY": "sk_live_cle",
+            "GENIUSPAY_API_SECRET": "ss_live_cle",
+            "GENIUSPAY_WEBHOOK_SECRET": "whsec_cle",
+            "GENIUSPAY_ENVIRONNEMENT": "live",
             "EMAIL_BACKEND": "django.core.mail.backends.smtp.EmailBackend",
             "EMAIL_HOST": "smtp.exemple.test",
             "EMAIL_HOST_USER": "identifiant-factice",
             "EMAIL_HOST_PASSWORD": "mot-de-passe-factice",
             "DEFAULT_FROM_EMAIL": "ANITCHE <no-reply@anitche.com>",
+            "REDIS_URL": "redis://:rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr@redis:6379/0",
+            "REDIS_CACHE_URL": "redis://:rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr@redis:6379/1",
         }
         script = (
             "import django, json\n"

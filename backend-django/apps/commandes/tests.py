@@ -1,4 +1,5 @@
 from decimal import Decimal
+from django.test import TestCase
 from django.urls import reverse
 from rest_framework.test import APITestCase
 from rest_framework import status
@@ -7,7 +8,7 @@ from apps.utilisateurs.models import Utilisateur, Role, StatutKYC
 from apps.vendeurs.models import Boutique
 from apps.catalogue.models import Produit, VarianteProduit
 from apps.panier.models import Panier, PanierItem
-from apps.fidelite.models import CouponReduction
+from apps.fidelite.models import CouponReduction, UtilisationCoupon
 from .models import Commande, GroupeCommande, CommandeItem
 
 
@@ -240,6 +241,55 @@ class CommandeAdminTestCase(APITestCase):
         self.assertIn("prix_unitaire", admin_instance.readonly_fields)
         self.assertIn("quantite", admin_instance.readonly_fields)
         self.assertIn("nom_produit", admin_instance.readonly_fields)
+
+
+class SuppressionAdminCommandeTestCase(TestCase):
+    """Aucune suppression de commande dans l'admin Django, même pour un
+    superutilisateur : une correction passe par un remboursement."""
+
+    def setUp(self):
+        self.client_user = Utilisateur.objects.create_user(
+            email="client-admin@test.com", password="testpass123", nom="C", prenom="L", role=Role.CLIENT,
+        )
+        vendeur = Utilisateur.objects.create_user(
+            email="vendeur-admin@test.com", password="testpass123", nom="V", prenom="D",
+            role=Role.VENDEUR, statut_kyc=StatutKYC.VALIDE,
+        )
+        boutique = Boutique.objects.create(proprietaire=vendeur, nom="Boutique admin", est_active=True)
+        produit = Produit.objects.create(boutique=boutique, nom="Produit", prix_base=Decimal("500"))
+        variante = VarianteProduit.objects.create(produit=produit, nom="Standard", prix=Decimal("500"))
+        self.groupe = GroupeCommande.objects.create(client=self.client_user)
+        self.commande = Commande.objects.create(
+            groupe=self.groupe, boutique=boutique, client=self.client_user, montant_total=Decimal("500.00"),
+        )
+        self.item = CommandeItem.objects.create(
+            commande=self.commande, variante=variante, nom_produit="Produit",
+            prix_unitaire=Decimal("500.00"), quantite=1,
+        )
+        superutilisateur = Utilisateur.objects.create_superuser(
+            email="su-admin@test.com", password="testpass123", nom="S", prenom="U",
+        )
+        self.client.force_login(superutilisateur)
+
+    def test_suppression_refusee_403(self):
+        for nom, objet in (
+            ("commande", self.commande), ("groupecommande", self.groupe), ("commandeitem", self.item),
+        ):
+            with self.subTest(modele=nom):
+                url = f"/admin/commandes/{nom}/{objet.pk}/delete/"
+                self.assertEqual(self.client.get(url).status_code, 403)
+                self.assertEqual(self.client.post(url, {"post": "yes"}).status_code, 403)
+        self.assertTrue(Commande.objects.filter(pk=self.commande.pk).exists())
+        self.assertTrue(GroupeCommande.objects.filter(pk=self.groupe.pk).exists())
+        self.assertTrue(CommandeItem.objects.filter(pk=self.item.pk).exists())
+
+    def test_action_de_suppression_groupee_absente(self):
+        url = "/admin/commandes/commande/"
+        formulaire = self.client.get(url).context["action_form"]
+        actions = [] if formulaire is None else [valeur for valeur, _ in formulaire.fields["action"].choices]
+        self.assertNotIn("delete_selected", actions)
+        self.client.post(url, {"action": "delete_selected", "_selected_action": [str(self.commande.pk)], "post": "yes"})
+        self.assertTrue(Commande.objects.filter(pk=self.commande.pk).exists())
 
 
 class ValiderPanierCouponTestCase(APITestCase):
@@ -874,17 +924,20 @@ class ConcurrenceCommandesTests(DonneesCycleDeVie, TransactionTestCase):
         self.creer_donnees()
 
     def en_parallele(self, action, fois=2):
-        barriere = threading.Barrier(fois)
+        return self.actions_en_parallele([action] * fois)
+
+    def actions_en_parallele(self, actions):
+        barriere = threading.Barrier(len(actions))
         resultats = []
 
-        def executer():
+        def executer(action):
             try:
                 barriere.wait()
                 resultats.append(action())
             finally:
                 connection.close()
 
-        threads = [threading.Thread(target=executer) for _ in range(fois)]
+        threads = [threading.Thread(target=executer, args=(action,)) for action in actions]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -912,6 +965,37 @@ class ConcurrenceCommandesTests(DonneesCycleDeVie, TransactionTestCase):
         codes = self.en_parallele(self.appel(f"/api/commandes/{commande.pk}/annuler/"))
         self.assertEqual(codes, [200, 409])
         self.assertEqual(self.stock(self.variante1), 10)
+
+    def test_annulations_concurrentes_finalisent_paiement_et_coupon_du_groupe(self):
+        CouponReduction.objects.create(
+            code="CONCURRENT", type_reduction="pourcentage", valeur=Decimal("10"),
+            utilisations_max=1,
+        )
+        self.assertEqual(
+            self.commander((self.variante1, 1), (self.variante2, 1), coupon_code="CONCURRENT").status_code,
+            201,
+        )
+        commandes = list(Commande.objects.order_by("pk"))
+        paiement = Paiement.objects.create(
+            client=self.client_user,
+            groupe_commande=commandes[0].groupe,
+            montant=sum((commande.montant_total for commande in commandes), Decimal("0")),
+            statut=Paiement.Statut.EN_ATTENTE,
+            fournisseur="simule",
+        )
+        paiement.commandes.add(*commandes)
+
+        codes = self.actions_en_parallele([
+            self.appel(f"/api/commandes/{commande.pk}/annuler/") for commande in commandes
+        ])
+
+        self.assertEqual(codes, [200, 200])
+        paiement.refresh_from_db()
+        self.assertEqual(paiement.statut, Paiement.Statut.ANNULE)
+        coupon = CouponReduction.objects.get(code="CONCURRENT")
+        self.assertEqual(coupon.nombre_utilisations, 0)
+        self.assertFalse(coupon.est_utilise)
+        self.assertFalse(UtilisationCoupon.objects.filter(coupon=coupon).exists())
 
     def test_stocks_verrouilles_dans_l_ordre_des_cles_quel_que_soit_le_plan(self):
         """Sans ORDER BY, les stocks seraient verrouillés dans l'ordre que
@@ -1452,3 +1536,84 @@ class CommandesAdministrationTests(DonneesCycleDeVie, APITestCase):
         with CaptureQueriesContext(connection) as apres:
             self.assertEqual(self.client.get(URL_ADMIN_COMMANDES).data["count"], 7)
         self.assertEqual(len(avant.captured_queries), len(apres.captured_queries))
+
+
+class AutoAchatVendeurTests(DonneesCycleDeVie, APITestCase):
+    """Un vendeur n'achète pas les articles de sa propre boutique. Le panier
+    refuse l'ajout (apps/panier/tests.py) : ici, des lignes posées directement
+    en base ne passent ni la simulation ni la validation, qui sont les seules
+    créations de commande."""
+
+    def setUp(self):
+        self.creer_donnees()
+
+    def verifier_refus(self, reponse):
+        self.assertEqual(reponse.status_code, 400, reponse.data)
+        self.assertEqual(reponse.data["errors"]["code"], ["auto_achat_interdit"])
+        self.assertIn("propre boutique", reponse.data["detail"])
+        self.assertIn("Produit A", reponse.data["detail"])
+
+    def verifier_rien_ecrit(self, *variantes_stock):
+        self.assertFalse(GroupeCommande.objects.exists())
+        self.assertFalse(Commande.objects.exists())
+        self.assertFalse(CommandeItem.objects.exists())
+        for variante, stock in variantes_stock:
+            self.assertEqual(self.stock(variante), stock)
+
+    def test_validation_refusee_pour_un_article_de_sa_boutique(self):
+        reponse = self.commander((self.variante1, 2), client=self.vendeur1)
+
+        self.verifier_refus(reponse)
+        self.verifier_rien_ecrit((self.variante1, 10))
+        self.assertEqual(PanierItem.objects.filter(panier__utilisateur=self.vendeur1).count(), 1)
+
+    def test_panier_mixte_refuse_en_entier(self):
+        reponse = self.commander((self.variante1, 1), (self.variante2, 1), client=self.vendeur1)
+
+        self.verifier_refus(reponse)
+        self.verifier_rien_ecrit((self.variante1, 10), (self.variante2, 10))
+
+    def test_article_d_une_autre_boutique_reste_achetable(self):
+        reponse = self.commander((self.variante2, 2), client=self.vendeur1)
+
+        self.assertEqual(reponse.status_code, 201, reponse.data)
+        self.assertEqual(Commande.objects.get().boutique, self.boutique2)
+        self.assertEqual(self.stock(self.variante2), 8)
+
+    def test_simulation_refusee_pour_un_article_de_sa_boutique(self):
+        panier, _ = Panier.objects.get_or_create(utilisateur=self.vendeur1)
+        PanierItem.objects.create(panier=panier, variante=self.variante1, quantite=1)
+        self.en_tant_que(self.vendeur1)
+
+        self.verifier_refus(self.client.post(URL_SIMULER, {"adresse_livraison": ADRESSE_LIVRAISON}, format="json"))
+
+    def test_coupon_non_consomme_quand_la_validation_est_refusee(self):
+        coupon = CouponReduction.objects.create(code="AUTO", type_reduction="pourcentage", valeur=Decimal("10"))
+
+        reponse = self.commander((self.variante1, 1), client=self.vendeur1, coupon_code="AUTO")
+
+        self.verifier_refus(reponse)
+        coupon.refresh_from_db()
+        self.assertFalse(coupon.est_utilise)
+        self.assertEqual(coupon.nombre_utilisations, 0)
+        self.verifier_rien_ecrit((self.variante1, 10))
+
+    def test_comptes_sans_boutique_commandent_normalement(self):
+        comptes = [
+            Utilisateur.objects.create_user(
+                email=f"{role}-sans-boutique@cmd.ci", password="x", nom="S", prenom="B", role=role, email_verifie=True,
+            )
+            for role in (Role.ADMIN, Role.LIVREUR)
+        ]
+        for compte in comptes:
+            with self.subTest(role=compte.role):
+                reponse = self.commander((self.variante1, 1), client=compte)
+                self.assertEqual(reponse.status_code, 201, reponse.data)
+
+    def test_aucune_creation_de_commande_hors_validation_du_panier(self):
+        self.en_tant_que(self.vendeur1)
+
+        reponse = self.client.post(reverse("commandes:commande-list"), {"boutique": self.boutique1.pk}, format="json")
+
+        self.assertEqual(reponse.status_code, 405)
+        self.assertFalse(Commande.objects.exists())

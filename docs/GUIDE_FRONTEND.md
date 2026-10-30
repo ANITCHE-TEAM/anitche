@@ -144,20 +144,33 @@ La liste complète est dans `REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']` (`config/
 
 **Mailpit** (http://localhost:8025) reçoit tous les emails envoyés en dev : codes OTP, code de livraison, notifications. Aucun email ne sort vers l'extérieur. Détails : [`GUIDE_STRUCTURE_ANITCHE.md`](./GUIDE_STRUCTURE_ANITCHE.md) § 4.
 
-**Types générés depuis le schéma** avec [openapi-typescript](https://openapi-ts.dev) (OpenAPI 3.1) :
+**Types générés depuis les schémas** avec [openapi-typescript](https://openapi-ts.dev) (OpenAPI 3.1). Le frontend est un monorepo pnpm en TypeScript ([`frontend/README.md`](../frontend/README.md)) ; les types vivent dans le paquet `@anitche/api-client`.
 
 ```bash
 cd frontend
-npx openapi-typescript ../backend-django/schema.yaml -o src/services/api-types.d.ts
+pnpm generer:api     # régénère les types depuis les deux schémas versionnés
+pnpm verifier:api    # échoue si les types commités sont périmés (lancé par la CI)
 ```
 
-À relancer à chaque modification de `schema.yaml`. Le frontend étant en JavaScript, les types s'utilisent via JSDoc (l'éditeur les vérifie) :
+| Source (versionnée) | Fichier généré (commité, jamais édité à la main) |
+|---|---|
+| `backend-django/schema.yaml` | `frontend/packages/api-client/src/generes/django.ts` |
+| `backend-fastapi/openapi.json` | `frontend/packages/api-client/src/generes/fastapi.ts` |
 
-```js
-/** @typedef {import('./api-types').components['schemas']['ProduitPublicDetail']} ProduitDetail */
+- Régénérer **dans la même PR** que toute modification de `schema.yaml` ou `openapi.json` : la CI frontend (`ci-frontend`) échoue sinon. Aucun serveur n'a besoin de tourner.
+- Un portail n'importe jamais ces fichiers : il passe par `@anitche/api-client`, qui les expose sous forme de types nommés.
+
+```ts
+import type { Page, SchemaDjango } from "@anitche/api-client";
+
+type Commande = SchemaDjango<"Commande">;
+type PageDeCommandes = Page<Commande>;
 ```
 
-Les corps de requête ont leur propre composant (`…Request`, sans les champs en lecture seule) ; les énumérations ont des noms stables (`StatutCommandeEnum`, `StatutLivraisonEnum`…).
+- `SchemaDjango<"Nom">` et `SchemaFastapi<"Nom">` lisent `components.schemas` ; `Page<T>` est l'enveloppe de pagination DRF (§ 6) ; `Role` et `StatutKyc` sont dérivés des énumérations du schéma.
+- Les chemins du schéma Django **contiennent** `/api/...` ; ceux de FastAPI n'ont **pas** le préfixe `/fast`. Les URL de base se configurent donc ainsi : Django = origine seule, FastAPI = origine + `/fast`.
+- Les corps de requête ont leur propre composant (`…Request`, sans les champs en lecture seule) ; les énumérations ont des noms stables (`StatutCommandeEnum`, `StatutLivraisonEnum`…).
+- Les messages du WebSocket FastAPI ne figurent pas dans `openapi.json` : leurs types s'écrivent à la main (§ 12).
 
 ## 10. Index des « Impact frontend »
 
@@ -544,7 +557,7 @@ await api.post(`/api/paiements/simulation/${reference}/`, { statut: 'succes' });
 |---|---|
 | Client | `/commandes`, `/commandes/{uuid}`, `/livraisons/{uuid}`, `/retours/{uuid}`, `/paiements/{uuid}`, `/fidelite/mon-compte`, `/support/tickets/{uuid}` |
 | Vendeur | `/vendeur/commandes/{uuid}`, `/vendeur/produits/{id}`, `/vendeur/retours/{uuid}`, `/vendeur/reversements`, `/support/tickets/{uuid}` |
-| Administration | `/administration/retours/{uuid}`, `/administration/remboursements`, `/administration/livraisons/{uuid}` |
+| Administration | `/administration/retours/{uuid}`, `/administration/remboursements`, `/administration/reversements`, `/administration/livraisons/{uuid}` |
 
 - Chaque portail associe ces chemins à ses pages ; **tout préfixe inconnu mène au centre de notifications**. Ne jamais naviguer vers une valeur reçue sans la résoudre, et ne jamais lire `metadata` pour naviguer (ses clés varient).
 - Le préfixe d'administration est `/administration/`, jamais `/admin/` (admin Django). Les anciennes notifications `/admin/retours/…` ont été réécrites.
